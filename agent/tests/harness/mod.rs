@@ -139,7 +139,24 @@ impl Run {
         self
     }
 
+    /// Runs the target and asserts it succeeded, which is what every case but a deliberate
+    /// failure wants.
     pub(crate) fn run(self) -> Report {
+        let program = self.program.clone();
+        let report = self.run_unchecked();
+        assert!(
+            report.status.success(),
+            "{} exited {:?}\nstdout:\n{}\nstderr:\n{}",
+            program.display(),
+            report.status.code(),
+            report.stdout,
+            report.stderr,
+        );
+        report
+    }
+
+    /// The same, handing back whatever the target did, for a case where exiting is the point.
+    pub(crate) fn run_unchecked(self) -> Report {
         let mut command = Command::new(&self.program);
         command
             .args(&self.args)
@@ -161,17 +178,12 @@ impl Run {
 
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-        assert!(
-            output.status.success(),
-            "{} exited {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
-            self.program.display(),
-            output.status.code(),
-        );
 
         Report {
             facts: parse(&stdout),
             stdout,
             stderr,
+            status: output.status,
             before,
             after,
         }
@@ -191,6 +203,8 @@ pub(crate) struct Report {
     facts: BTreeMap<String, String>,
     pub(crate) stdout: String,
     pub(crate) stderr: String,
+    /// How the target left, for a case that expects it not to have run at all.
+    pub(crate) status: std::process::ExitStatus,
     /// Genuine `CLOCK_REALTIME` in nanoseconds, immediately before and after the run.
     pub(crate) before: i64,
     pub(crate) after: i64,

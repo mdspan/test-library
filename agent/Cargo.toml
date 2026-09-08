@@ -27,5 +27,6 @@ default = ["vdso"]
 vdso = []
 
 [dev-dependencies]
+common = { path = "../common" }
 libc = { workspace = true }
 tempfile = "3.24.0"

@@ -7,9 +7,7 @@
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::panic,
-    dead_code,
-    reason = "test support: a failed assumption should fail the test loudly, and not every helper \
-              is used by every case"
+    reason = "test support: a failed assumption should fail the test loudly"
 )]
 
 mod harness;
@@ -505,6 +503,10 @@ fn a_setting_the_library_cannot_honour_leaves_every_family_genuine() {
                 "{env:?} left {clock} at {faked} against a genuine {genuine}"
             );
         }
-        assert_eq!(report.get("shared"), "", "{env:?} published a session");
+        assert_ne!(
+            report.get("shared"),
+            "",
+            "{env:?} left its children no session to attach to"
+        );
     }
 }

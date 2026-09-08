@@ -48,6 +48,96 @@ impl Keeper {
             _ => None,
         }
     }
+
+    /// The keeper `text` names, or `None` when it names none.
+    #[must_use]
+    pub fn from_name(text: &str) -> Option<Self> {
+        let text = text.trim();
+        [Self::Affine, Self::Null]
+            .into_iter()
+            .find(|keeper| keeper.as_str().eq_ignore_ascii_case(text))
+    }
+
+    /// The name a user writes for this keeper.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Affine => "affine",
+            Self::Null => "null",
+        }
+    }
+}
+
+/// What a [`Fault`] says went wrong.
+///
+/// One code covers everything this library can fail to set up, because the outcome is the same
+/// one: the null keeper with no hook. The log line beside it names the variable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+pub enum FaultCode {
+    /// The environment asked for something the library could not set up.
+    BadValue = 1,
+}
+
+impl FaultCode {
+    /// The code `value` names, or `None` when it names none.
+    #[must_use]
+    pub const fn from_code(value: u32) -> Option<Self> {
+        match value {
+            1 => Some(Self::BadValue),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for FaultCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::BadValue => f.write_str("a value the library could not use"),
+        }
+    }
+}
+
+/// Why a session stopped faking: a [`FaultCode`] and the pid that hit it.
+///
+/// The pair lives in one 64-bit word, the code in the low half and the pid in the high one, so it
+/// is written in a single store and a crash mid-write leaves a whole value behind. Zero is not a
+/// fault: it is what the slot holds while the session is still faking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Fault {
+    /// What went wrong.
+    pub code: FaultCode,
+    /// The process that hit it.
+    pub pid: u32,
+}
+
+impl Fault {
+    /// The fault `pid` hit.
+    #[must_use]
+    pub const fn new(code: FaultCode, pid: u32) -> Self {
+        Self { code, pid }
+    }
+
+    /// The word the fault slot holds.
+    #[must_use]
+    pub const fn word(self) -> u64 {
+        ((self.pid as u64) << u32::BITS) | self.code as u64
+    }
+
+    /// The fault a slot's word names, or `None` when it names none.
+    #[must_use]
+    pub fn from_word(word: u64) -> Option<Self> {
+        Some(Self {
+            code: FaultCode::from_code(u32::try_from(word & u64::from(u32::MAX)).ok()?)?,
+            pid: u32::try_from(word >> u32::BITS).ok()?,
+        })
+    }
+}
+
+impl std::fmt::Display for Fault {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} in pid {}", self.code, self.pid)
+    }
 }
 
 /// One family's parameters: the line, and the genuine clock it tracks passage with.
@@ -269,6 +359,23 @@ impl Header {
         Ok(())
     }
 
+    /// Records `fault`, and says whether this one took the slot.
+    ///
+    /// First fault wins: the slot keeps it for the session's life, and later faults in the same
+    /// session stay in the log. Only a process attaching or creating comes through here; a clock
+    /// read never does, because the read hot path writes no shared memory at all.
+    pub fn record_fault(&self, fault: Fault) -> bool {
+        self.fault
+            .compare_exchange(0, fault.word(), Ordering::Release, Ordering::Relaxed)
+            .is_ok()
+    }
+
+    /// The fault this session carries, or `None` while it is still faking.
+    #[must_use]
+    pub fn fault(&self) -> Option<Fault> {
+        Fault::from_word(self.fault.load(Ordering::Acquire))
+    }
+
     /// The hook path up to its NUL, or the whole field when it has none.
     #[must_use]
     pub fn hook_path(&self) -> &[u8] {
@@ -327,6 +434,39 @@ mod tests {
         }
         assert!(offset_of!(Header, live) - offset_of!(Header, seqlock) >= CACHE_LINE);
         assert!(offset_of!(Header, shadow) - offset_of!(Header, live) >= CACHE_LINE);
+    }
+
+    #[test]
+    fn a_keeper_is_named_the_way_the_variable_spells_it() {
+        assert_eq!(Keeper::from_name("affine"), Some(Keeper::Affine));
+        assert_eq!(Keeper::from_name(" NULL "), Some(Keeper::Null));
+        assert_eq!(Keeper::from_name("genuine"), None);
+        assert_eq!(Keeper::from_name(""), None);
+        for keeper in [Keeper::Affine, Keeper::Null] {
+            assert_eq!(Keeper::from_name(keeper.as_str()), Some(keeper));
+        }
+    }
+
+    #[test]
+    fn a_fault_word_carries_the_code_low_and_the_pid_above() {
+        let fault = Fault::new(FaultCode::BadValue, 4321);
+        assert_eq!(
+            fault.word() & u64::from(u32::MAX),
+            FaultCode::BadValue as u64
+        );
+        assert_eq!(fault.word() >> u32::BITS, 4321);
+        assert_eq!(Fault::from_word(fault.word()), Some(fault));
+    }
+
+    #[test]
+    fn zero_is_not_a_fault_and_neither_is_a_code_we_do_not_know() {
+        assert_eq!(Fault::from_word(0), None);
+        assert_eq!(Fault::from_word(u64::from(u32::MAX)), None);
+        // A pid of zero is still a whole fault: it is the code alone that says there is one.
+        assert_eq!(
+            Fault::from_word(FaultCode::BadValue as u64),
+            Some(Fault::new(FaultCode::BadValue, 0))
+        );
     }
 
     #[test]

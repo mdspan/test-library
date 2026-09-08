@@ -4,9 +4,11 @@ use std::sync::atomic::Ordering;
 
 use super::*;
 use crate::config::{
-    ENV_BOOTTIME_SHIFT, ENV_CPU_RATE, ENV_MONOTONIC_SHIFT, ENV_MONOTONIC_TIMEBASE,
-    ENV_REALTIME_RATE, ENV_REALTIME_TIMEBASE, ENV_SHIFT, ENV_TIME, ENV_TIMEKEEP_INTERVAL,
+    ENV_BOOTTIME_SHIFT, ENV_CPU_RATE, ENV_EMULATE_VDSO, ENV_FAIL_CLOSED, ENV_KEEPER,
+    ENV_MONOTONIC_SHIFT, ENV_MONOTONIC_TIMEBASE, ENV_RATE, ENV_REALTIME_RATE,
+    ENV_REALTIME_TIMEBASE, ENV_SHIFT, ENV_TIME, ENV_TIMEKEEP_INTERVAL,
 };
+use layout::{Fault, FaultCode};
 
 fn setup_in(dir: &Path) -> Setup {
     Setup::plain(dir.join("libtimewarp"))
@@ -168,10 +170,10 @@ fn the_shadow_starts_as_a_whole_copy_of_the_live_parameters() {
 fn a_name_that_collides_fails_instead_of_landing_on_a_live_session() {
     let tmp = tempfile::tempdir().unwrap();
     let setup = setup_in(tmp.path());
-    let first = create_named(&setup, "pid-1-fixed").unwrap();
+    let first = create_named(&setup, "pid-1-fixed", None).unwrap();
     let before = fs::read(first.path()).unwrap();
 
-    let err = create_named(&setup, "pid-1-fixed").unwrap_err();
+    let err = create_named(&setup, "pid-1-fixed", None).unwrap_err();
     assert!(matches!(err, SessionError::Collision(_)), "{err:?}");
 
     assert_eq!(
@@ -668,18 +670,146 @@ fn the_clocks_the_family_table_leaves_alone_read_genuine() {
 #[test]
 fn the_null_keeper_hands_every_clock_back_to_the_genuine_call() {
     let tmp = tempfile::tempdir().unwrap();
-    let session = create(&setup_in(tmp.path())).unwrap();
-    let path = session.path().to_path_buf();
-    drop(session);
+    let mut setup = setup_in(tmp.path());
+    setup.keeper = Keeper::Null;
+    let session = create(&setup).unwrap();
+    let header = session.header();
 
-    let mut bytes = fs::read(&path).unwrap();
-    bytes[20..24].copy_from_slice(&(Keeper::Null as u32).to_ne_bytes());
-    fs::write(&path, bytes).unwrap();
-
-    let session = attach(&path).unwrap();
     for id in [clock::REALTIME, clock::MONOTONIC, clock::PROCESS_CPUTIME] {
-        assert_eq!(clock_now(session.header(), id), None, "{id}");
+        assert_eq!(clock_now(header, id), None, "{id}");
     }
+    // No seqlock read and no write section: the words the write flow uses are as the creator left
+    // them.
+    assert_eq!(header.seqlock.sequence.load(Ordering::Relaxed), 0);
+    assert_eq!(header.seqlock.writer_state.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn a_null_session_publishes_the_genuine_parameters_it_never_reads() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut setup = setup_in(tmp.path());
+    setup.keeper = Keeper::Null;
+    let session = create(&setup).unwrap();
+    let header = session.header();
+
+    assert_eq!(header.keeper, Keeper::Null as u32);
+    assert!(header.creation_time > 1_700_000_000 * Nanos::SECOND);
+    for (line, timebase) in [
+        (&header.live.realtime, clock::REALTIME),
+        (&header.live.monotonic, clock::MONOTONIC),
+        (&header.live.boottime, clock::BOOTTIME),
+    ] {
+        assert_eq!(line.load().rate, Rate::UNITY);
+        assert_eq!(line.load().fake_anchor, line.load().timebase_anchor);
+        assert_eq!(line.timebase(), timebase);
+    }
+    // Including the offset a controller reads TAI's lead from, which says what the kernel says.
+    let affine = create(&setup_in(tmp.path())).unwrap();
+    assert_eq!(
+        header.live.tai_offset.load(Ordering::Relaxed),
+        affine.header().live.tai_offset.load(Ordering::Relaxed)
+    );
+}
+
+#[test]
+fn a_genuine_plan_refuses_no_reading() {
+    let plan = genuine_plan(&readings);
+    assert_eq!(
+        plan.realtime.fake_anchor,
+        readings(clock::REALTIME).unwrap()
+    );
+    assert_eq!(plan.realtime.timebase_anchor, plan.realtime.fake_anchor);
+    assert_eq!(plan.realtime.rate, Rate::UNITY);
+    assert_eq!(plan.creation_time, readings(clock::REALTIME).unwrap());
+    assert_eq!(plan.tai_offset, 37);
+
+    // A clock the kernel will not give up lands as zero rather than as a bad value, so a creator
+    // recording a fault still gets its session onto disk.
+    let refused = |_: libc::clockid_t| None;
+    assert_eq!(genuine_plan(&refused).creation_time, Nanos::ZERO);
+    assert_eq!(genuine_plan(&refused).tai_offset, 0);
+}
+
+#[test]
+fn the_null_keeper_reads_none_of_the_clock_settings() {
+    // Every one of these is a bad value for the affine keeper, and none of them is read here.
+    let setup = setup_from(&[
+        (ENV_KEEPER, "null"),
+        (ENV_RATE, "-1"),
+        (ENV_TIME, "yesterday"),
+        (ENV_MONOTONIC_TIMEBASE, "CLOCK_YESTERDAY"),
+    ])
+    .unwrap();
+
+    assert_eq!(setup.keeper, Keeper::Null);
+    assert_eq!(setup.realtime.rate, Rate::UNITY);
+}
+
+#[test]
+fn a_timekeeper_this_library_does_not_have_is_a_bad_value() {
+    assert_eq!(
+        setup_from(&[(ENV_KEEPER, "genuine")]).unwrap_err(),
+        BadValue::new(ENV_KEEPER, Reason::UnknownKeeper)
+    );
+    assert_eq!(
+        setup_from(&[(ENV_KEEPER, "affine")]).unwrap().keeper,
+        Keeper::Affine
+    );
+    // The keeper is the session's, and the default is the affine one.
+    assert_eq!(setup_from(&[]).unwrap().keeper, Keeper::Affine);
+}
+
+#[test]
+fn a_creator_that_fell_back_publishes_a_null_session_carrying_the_fault() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env = env_of(&[(ENV_FAIL_CLOSED, "1"), (ENV_EMULATE_VDSO, "0")]);
+    let setup = Setup::fallback(&env, tmp.path().join("libtimewarp"));
+    let fault = Fault::new(FaultCode::BadValue, std::process::id());
+
+    let session = create_faulted(&setup, fault).unwrap();
+    let header = session.header();
+
+    assert_eq!(header.keeper, Keeper::Null as u32);
+    assert_eq!(header.hook_path(), b"", "a fault leaves no hook either");
+    assert_eq!(header.fault(), Some(fault));
+    // The flags the session owns are still the environment's to say.
+    assert_eq!(header.fail_closed, 1);
+    assert_eq!(header.emulate_vdso, 0);
+    // And the file is whole and alone, so a child attaches to it as it would to any other.
+    assert_eq!(fs::read_dir(&setup.dir).unwrap().count(), 1);
+    assert_eq!(
+        attach(session.path()).unwrap().header().fault(),
+        Some(fault)
+    );
+}
+
+#[test]
+fn the_first_fault_holds_the_slot_for_the_session() {
+    let tmp = tempfile::tempdir().unwrap();
+    let session = create(&setup_in(tmp.path())).unwrap();
+    let header = session.header();
+    assert_eq!(header.fault(), None, "a healthy session carries none");
+
+    let first = Fault::new(FaultCode::BadValue, 11);
+    assert!(header.record_fault(first));
+    assert!(!header.record_fault(Fault::new(FaultCode::BadValue, 22)));
+    assert_eq!(header.fault(), Some(first));
+}
+
+#[test]
+fn the_session_says_whether_a_process_fails_closed_and_the_environment_says_when_none_does() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut setup = setup_in(tmp.path());
+    setup.fail_closed = true;
+    let session = create(&setup).unwrap();
+
+    // An attacher reads none of the setup variables, so the header wins over the environment.
+    let says_no = env_of(&[(ENV_FAIL_CLOSED, "0")]);
+    assert!(fails_closed(Some(session.header()), &says_no));
+    // With no session to follow, the variable decides on its own.
+    assert!(!fails_closed(None, &says_no));
+    assert!(fails_closed(None, &env_of(&[(ENV_FAIL_CLOSED, "1")])));
+    assert!(!fails_closed(None, &env_of(&[])));
 }
 
 #[test]

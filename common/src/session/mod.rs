@@ -11,14 +11,14 @@ use std::ptr::NonNull;
 use std::sync::atomic::Ordering;
 
 use crate::config::{
-    self, BadValue, ENV_CPU_RATE, ENV_EMULATE_VDSO, ENV_FAIL_CLOSED, ENV_RATE, ENV_REALTIME_SHIFT,
-    ENV_SHIFT, ENV_TIME, ENV_TIMEKEEP_INTERVAL, EnvLookup, Reason, duration_var, flag_var,
-    rate_var, timestamp_var,
+    self, BadValue, ENV_CPU_RATE, ENV_EMULATE_VDSO, ENV_FAIL_CLOSED, ENV_KEEPER, ENV_RATE,
+    ENV_REALTIME_SHIFT, ENV_SHIFT, ENV_TIME, ENV_TIMEKEEP_INTERVAL, EnvLookup, Reason,
+    duration_var, flag_var, rate_var, timestamp_var,
 };
 use crate::platform::{self, clock};
 use crate::time::{Family, Line, Nanos, Rate};
 
-use layout::{BadHeader, Header, Keeper};
+use layout::{BadHeader, Fault, Header, Keeper};
 
 /// What the environment asked one family to do. Cpu has no line, so it has none of this: its rate
 /// is [`Setup::cpu_rate`].
@@ -69,6 +69,29 @@ impl FamilySetup {
     }
 }
 
+/// The timekeeper the environment names, or the affine one it defaults to.
+fn keeper_from_env(env: &impl EnvLookup) -> Result<Keeper, BadValue> {
+    env.nonempty(ENV_KEEPER)
+        .map_or(Ok(Keeper::Affine), |value| {
+            Keeper::from_name(&value.to_string_lossy())
+                .ok_or_else(|| BadValue::new(ENV_KEEPER, Reason::UnknownKeeper))
+        })
+}
+
+/// Whether a process that cannot set up what it was asked for exits rather than running genuine.
+///
+/// The choice belongs to the session: it is read at creation, recorded in the header, and followed
+/// by every process that attaches, since an attacher reads none of the setup variables itself. A
+/// failure landing before any session exists has no header to follow, so there the variable in the
+/// environment decides on its own.
+#[must_use]
+pub fn fails_closed(session: Option<&Header>, env: &impl EnvLookup) -> bool {
+    session.map_or_else(
+        || flag_var(env, ENV_FAIL_CLOSED, false),
+        |header| header.fail_closed == 1,
+    )
+}
+
 /// The clock a family tracks passage against: the name the user gave, checked against what the
 /// family may track, or the family's default timebase.
 fn timebase_from_env(env: &impl EnvLookup, family: Family) -> Result<libc::clockid_t, BadValue> {
@@ -95,6 +118,8 @@ fn timebase_from_env(env: &impl EnvLookup, family: Family) -> Result<libc::clock
 pub struct Setup {
     /// The directory the session file is created in.
     pub dir: PathBuf,
+    /// Which timekeeper computes what the families show.
+    pub keeper: Keeper,
     /// An absolute value for the Realtime family, from `LIBTIMEWARP_TIME`, in place of a shift.
     pub realtime_at: Option<Nanos>,
     /// The wall clock.
@@ -122,6 +147,7 @@ impl Setup {
     pub const fn plain(dir: PathBuf) -> Self {
         Self {
             dir,
+            keeper: Keeper::Affine,
             realtime_at: None,
             realtime: FamilySetup::tracking(clock::REALTIME),
             monotonic: FamilySetup::tracking(clock::MONOTONIC),
@@ -130,6 +156,21 @@ impl Setup {
             emulate_vdso: true,
             fail_closed: false,
             timekeep_interval: DEFAULT_TIMEKEEP_INTERVAL,
+        }
+    }
+
+    /// What a creator publishes when it cannot set up what the environment asked for: the null
+    /// keeper with no hook, so the program runs genuine rather than half-faked.
+    ///
+    /// The two flags the session owns are still the environment's to say, and neither can be a bad
+    /// value of its own. None of the clock settings are read, because the null keeper reads none.
+    #[must_use]
+    pub fn fallback(env: &impl EnvLookup, dir: PathBuf) -> Self {
+        Self {
+            keeper: Keeper::Null,
+            emulate_vdso: flag_var(env, ENV_EMULATE_VDSO, true),
+            fail_closed: flag_var(env, ENV_FAIL_CLOSED, false),
+            ..Self::plain(dir)
         }
     }
 
@@ -142,6 +183,20 @@ impl Setup {
     /// # Errors
     /// The first [`BadValue`] found, so the caller can name the variable the user got wrong.
     pub fn from_env(env: &impl EnvLookup, dir: PathBuf) -> Result<Self, BadValue> {
+        let session = Self {
+            keeper: keeper_from_env(env)?,
+            emulate_vdso: flag_var(env, ENV_EMULATE_VDSO, true),
+            fail_closed: flag_var(env, ENV_FAIL_CLOSED, false),
+            timekeep_interval: duration_var(env, ENV_TIMEKEEP_INTERVAL)?
+                .unwrap_or(DEFAULT_TIMEKEEP_INTERVAL),
+            ..Self::plain(dir)
+        };
+        // The clock settings belong to the affine keeper alone, so a null session reads none of
+        // them, and a value none of them will be asked for cannot be a bad one.
+        if session.keeper == Keeper::Null {
+            return Ok(session);
+        }
+
         let bare_shift = duration_var(env, ENV_SHIFT)?;
         let bare_rate = rate_var(env, ENV_RATE)?;
         let realtime_at = timestamp_var(env, ENV_TIME)?;
@@ -159,11 +214,7 @@ impl Setup {
             boottime: FamilySetup::from_env(env, Family::Boottime, None, bare_rate)?,
             cpu_rate: rate_var(env, ENV_CPU_RATE)?.unwrap_or(Rate::UNITY),
             realtime_at,
-            emulate_vdso: flag_var(env, ENV_EMULATE_VDSO, true),
-            fail_closed: flag_var(env, ENV_FAIL_CLOSED, false),
-            timekeep_interval: duration_var(env, ENV_TIMEKEEP_INTERVAL)?
-                .unwrap_or(DEFAULT_TIMEKEEP_INTERVAL),
-            ..Self::plain(dir)
+            ..session
         })
     }
 
@@ -196,17 +247,22 @@ impl Setup {
             monotonic: nondecreasing_line(read, Family::Monotonic, &self.monotonic)?,
             boottime: nondecreasing_line(read, Family::Boottime, &self.boottime)?,
             cpu_rate: self.cpu_rate,
-            // Today's offset whatever era Realtime is set to, and exact because it is whole
-            // seconds. A kernel that never had the offset set reports the wall clock, so zero.
-            tai_offset: read(clock::TAI).map_or(0, |tai| {
-                tai.0
-                    .saturating_sub(realtime_zero.0)
-                    .saturating_add(Nanos::SECOND / 2)
-                    .div_euclid(Nanos::SECOND)
-            }),
+            tai_offset: tai_offset(read, realtime_zero),
             creation_time: realtime_zero,
         })
     }
+}
+
+/// Whole seconds by which genuine `CLOCK_TAI` leads genuine `CLOCK_REALTIME`: today's offset
+/// whatever era Realtime is set to, and exact because it is whole seconds. A kernel that never had
+/// the offset set reports the wall clock, so zero.
+fn tai_offset(read: &dyn Fn(libc::clockid_t) -> Option<Nanos>, realtime_zero: Nanos) -> i64 {
+    read(clock::TAI).map_or(0, |tai| {
+        tai.0
+            .saturating_sub(realtime_zero.0)
+            .saturating_add(Nanos::SECOND / 2)
+            .div_euclid(Nanos::SECOND)
+    })
 }
 
 /// The genuine reading of a family's clock, or the bad value naming the variable that chose it.
@@ -260,6 +316,34 @@ fn nondecreasing_line(
     })
 }
 
+/// The parameters a session that fakes nothing publishes: every family showing its own genuine
+/// clock at real speed.
+///
+/// The null keeper reads none of them, so nothing here can refuse a reading the way a plan does: a
+/// clock the kernel will not give up lands as zero rather than as a bad value, and a creator
+/// recording a fault still gets its session on disk.
+fn genuine_plan(read: &dyn Fn(libc::clockid_t) -> Option<Nanos>) -> Plan {
+    let identity = |clock| {
+        let now = read(clock).unwrap_or(Nanos::ZERO);
+        Line {
+            fake_anchor: now,
+            timebase_anchor: now,
+            rate: Rate::UNITY,
+        }
+    };
+    let realtime = identity(clock::REALTIME);
+    Plan {
+        realtime,
+        monotonic: identity(clock::MONOTONIC),
+        boottime: identity(clock::BOOTTIME),
+        cpu_rate: Rate::UNITY,
+        // What the kernel says, like everything else here: a null session's TAI leads its wall
+        // clock by exactly what the genuine pair does.
+        tai_offset: tai_offset(read, realtime.fake_anchor),
+        creation_time: realtime.fake_anchor,
+    }
+}
+
 /// The parameters a fresh session starts with, from one round of genuine readings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Plan {
@@ -290,8 +374,8 @@ pub enum SessionError {
     /// A generated name landed on an existing file. Nothing is written; we never take over a
     /// session that may be live.
     Collision(PathBuf),
-    /// The environment asked for something the library could not set up. Nothing is written: a
-    /// creator that hits one publishes no session.
+    /// The environment asked for something the library could not set up. Nothing is written, so
+    /// the directory is left clean for whatever the creator publishes in its place.
     BadValue(BadValue),
     /// The operating system refused a step of the work.
     Io(io::Error),
@@ -485,9 +569,26 @@ fn map(fd: libc::c_int, len: usize) -> Result<NonNull<u8>, SessionError> {
 /// Whatever [`create_named`] rejects, or [`SessionError::Io`] when the name's randomness cannot be
 /// read.
 pub fn create(setup: &Setup) -> Result<Session, SessionError> {
+    create_generated(setup, None)
+}
+
+/// [`create`], with `fault` recorded in the session before it is published, so children attach to
+/// a session that already says what went wrong and a controller can read it later.
+///
+/// # Errors
+/// Whatever [`create`] rejects.
+pub fn create_faulted(setup: &Setup, fault: Fault) -> Result<Session, SessionError> {
+    create_generated(setup, Some(fault))
+}
+
+fn create_generated(setup: &Setup, fault: Option<Fault>) -> Result<Session, SessionError> {
     let mut random = [0u8; 16];
     platform::random_bytes(&mut random)?;
-    create_named(setup, &naming::session_name(std::process::id(), random))
+    create_named(
+        setup,
+        &naming::session_name(std::process::id(), random),
+        fault,
+    )
 }
 
 /// [`create`] with the name supplied. The name is generated in every path a target takes; this is
@@ -497,11 +598,18 @@ pub fn create(setup: &Setup) -> Result<Session, SessionError> {
 /// [`SessionError::BadValue`] when the setup cannot be turned into parameters,
 /// [`SessionError::Collision`] when the name is taken, or [`SessionError::Io`] when a step of the
 /// build fails.
-pub fn create_named(setup: &Setup, name: &str) -> Result<Session, SessionError> {
+pub fn create_named(
+    setup: &Setup,
+    name: &str,
+    fault: Option<Fault>,
+) -> Result<Session, SessionError> {
     ensure_dir(&setup.dir)?;
     // Before anything is on disk, so a creator that cannot set up what it was asked for leaves the
     // directory clean.
-    let plan = setup.plan(&platform::genuine_nanos)?;
+    let plan = match setup.keeper {
+        Keeper::Affine => setup.plan(&platform::genuine_nanos)?,
+        Keeper::Null => genuine_plan(&platform::genuine_nanos),
+    };
 
     let pid = std::process::id();
     let (path, tmp) = naming::session_paths(&setup.dir, name);
@@ -544,7 +652,7 @@ pub fn create_named(setup: &Setup, name: &str) -> Result<Session, SessionError> 
     drop(guard);
 
     // Safety: nothing else can reach this file: it is under a private name and not yet linked.
-    unsafe { initialize(header_ptr(base), setup, &plan, pid, page, len) };
+    unsafe { initialize(header_ptr(base), setup, &plan, fault, pid, page, len) };
 
     let c_path = cstring(&path)?;
     // Safety: `c_tmp` and `c_path` are live NUL-terminated paths.
@@ -584,6 +692,7 @@ unsafe fn initialize(
     header: *mut Header,
     setup: &Setup,
     plan: &Plan,
+    fault: Option<Fault>,
     pid: u32,
     page: usize,
     len: usize,
@@ -593,7 +702,7 @@ unsafe fn initialize(
     header.magic = layout::MAGIC;
     header.abi_version = layout::ABI_VERSION;
     header.platform = platform::PLATFORM_TAG;
-    header.keeper = Keeper::Affine as u32;
+    header.keeper = setup.keeper as u32;
     header.emulate_vdso = u32::from(setup.emulate_vdso);
     header.fail_closed = u32::from(setup.fail_closed);
     header.file_size = u32::try_from(len).unwrap_or(u32::MAX);
@@ -619,6 +728,10 @@ unsafe fn initialize(
     params.tai_offset.store(plan.tai_offset, Ordering::Relaxed);
     params.epoch.store(0, Ordering::Relaxed);
     copy_params(&header.live, &header.shadow);
+
+    if let Some(fault) = fault {
+        header.record_fault(fault);
+    }
 
     header.ready.store(1, Ordering::Release);
 }

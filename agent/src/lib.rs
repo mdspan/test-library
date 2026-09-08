@@ -10,12 +10,17 @@ mod interpose;
 mod platform;
 mod state;
 
-use std::path::Path;
+use std::fmt::Display;
+use std::path::{Path, PathBuf};
 
-use common::config::{ENV_SHARED_FILE, EnvLookup, ProcessEnv};
+use common::config::{BadValue, ENV_SHARED_FILE, EnvLookup, ProcessEnv};
 use common::log::{self, Level};
 use common::platform::genuine_clock_gettime;
-use common::session::{self, Setup, naming};
+use common::session::layout::{Fault, FaultCode};
+use common::session::{self, SessionError, Setup, naming};
+
+/// What a process that fails closed exits with: the `EX_CONFIG` of `sysexits.h`.
+const EX_CONFIG: libc::c_int = 78;
 
 /// The genuine reading of `clock`, for a hook or a controller loaded into a faked process.
 ///
@@ -51,30 +56,70 @@ fn attach_or_create() {
         // this environment instead would fake something nobody asked for.
         match session::attach(Path::new(&inherited)) {
             Ok(session) => state::install(session.leak()),
-            Err(reason) => give_up(&reason),
+            // The session the parent named is gone or unusable, so there is none to record the
+            // failure in either.
+            Err(reason) => report_failure(&reason),
         }
         return;
     }
 
-    let setup = match Setup::from_env(&ProcessEnv, naming::session_dir_from_env()) {
-        Ok(setup) => setup,
-        Err(reason) => return give_up(&reason),
-    };
-    match session::create(&setup) {
-        Ok(session) => {
-            // So whatever this process execs attaches to the session rather than making its own.
-            // Safety: a constructor runs before `main`, so nothing in the program is reading
-            // `environ` yet to race this write.
-            unsafe { std::env::set_var(ENV_SHARED_FILE, session.path()) };
-            state::install(session.leak());
-        }
-        Err(reason) => give_up(&reason),
+    let dir = naming::session_dir_from_env();
+    let created = Setup::from_env(&ProcessEnv, dir.clone())
+        .map_err(SessionError::from)
+        .and_then(|setup| session::create(&setup));
+    match created {
+        Ok(session) => publish(session),
+        Err(SessionError::BadValue(bad)) => fall_back(dir, &bad),
+        // An unusable directory leaves no place for a session file, so nothing can be recorded.
+        Err(reason) => report_failure(&reason),
     }
 }
 
-/// The one place setup can fail. The process runs on genuine time, because we live inside somebody
-/// else's program and its exit is not ours to cause. Recording the fault and honouring
-/// `LIBTIMEWARP_FAIL_CLOSED` come later.
-fn give_up(reason: &dyn std::fmt::Display) {
+/// Installs the session and names it for whatever this process execs, so its children attach to it
+/// rather than making one of their own.
+fn publish(session: session::Session) {
+    // Safety: a constructor runs before `main`, so nothing in the program is reading `environ` yet
+    // to race this write.
+    unsafe { std::env::set_var(ENV_SHARED_FILE, session.path()) };
+    state::install(session.leak());
+}
+
+/// A creator that cannot set up what the environment asked for.
+///
+/// The process runs on, because we live inside somebody else's program and its exit is not ours to
+/// cause, and it runs genuine rather than half-faked: the null keeper, with no hook. The session is
+/// published all the same, carrying the fault, so children attach quietly and a controller can read
+/// what went wrong.
+fn fall_back(dir: PathBuf, bad: &BadValue) {
+    // Nothing is on disk yet, so a creator that leaves here leaves the directory clean.
+    report_failure(bad);
+
+    let setup = Setup::fallback(&ProcessEnv, dir);
+    match session::create_faulted(&setup, Fault::new(FaultCode::BadValue, std::process::id())) {
+        Ok(session) => publish(session),
+        // No place for a file, so the bad value stays in the log alone.
+        Err(reason) => common::log!(Level::Error, "{reason}"),
+    }
+}
+
+/// Reports a failure that has no session to be recorded in: the `error` line, and the exit when
+/// this process fails closed.
+///
+/// With no header to follow, the variable in the environment decides on its own whether the
+/// process runs on, and a caller this returns to still has whatever it can publish to publish.
+fn report_failure(reason: &dyn Display) {
     common::log!(Level::Error, "{reason}");
+    if session::fails_closed(None, &ProcessEnv) {
+        fail_closed(reason);
+    }
+}
+
+/// One line to the program's own stderr, then `_exit`.
+///
+/// `_exit`, because we are in the middle of starting somebody's program and its `atexit` handlers
+/// are theirs to run.
+fn fail_closed(reason: &dyn Display) -> ! {
+    log::Sink::stderr().write(Level::Error, format_args!("{reason}"));
+    // Safety: `_exit` ends the process, so nothing here can be reached afterwards.
+    unsafe { libc::_exit(EX_CONFIG) }
 }

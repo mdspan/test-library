@@ -18,6 +18,10 @@ pub const ENV_SESSION_DIR: &str = "LIBTIMEWARP_SESSION_DIR";
 /// The freedesktop runtime directory, used when `LIBTIMEWARP_SESSION_DIR` is unset.
 pub const ENV_XDG_RUNTIME_DIR: &str = "XDG_RUNTIME_DIR";
 
+/// Which timekeeper the session runs: `affine`, the default, or `null` for genuine time
+/// underneath. Read at creation and recorded in the header, like every choice a session makes.
+pub const ENV_KEEPER: &str = "LIBTIMEWARP_KEEPER";
+
 /// How far the Realtime family is moved from the genuine clock, as a duration. A bare shift moves
 /// Realtime alone: applying it to the monotonic clocks would drive them negative most of the time.
 pub const ENV_SHIFT: &str = "LIBTIMEWARP_SHIFT";
@@ -177,6 +181,8 @@ pub enum Reason {
     OutOfRange,
     /// A move that would put a nondecreasing family below zero.
     BelowZero,
+    /// A timekeeper this library does not have.
+    UnknownKeeper,
 }
 
 impl std::fmt::Display for Reason {
@@ -191,6 +197,7 @@ impl std::fmt::Display for Reason {
             Self::SaidTwice(other) => write!(f, "says the same thing as {other}"),
             Self::OutOfRange => f.write_str("outside the range an instant can hold"),
             Self::BelowZero => f.write_str("would put a nondecreasing family below zero"),
+            Self::UnknownKeeper => f.write_str("not a timekeeper this library has"),
         }
     }
 }

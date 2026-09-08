@@ -136,6 +136,19 @@ impl Sink {
         Some(sink)
     }
 
+    /// The program's own stderr, keeping `error` alone.
+    ///
+    /// A process about to exit because it cannot set up what it was asked for is the one thing
+    /// that writes here. The rule that keeps us out of a program's own output protects a program
+    /// that is going to run, and that one is not.
+    #[must_use]
+    pub const fn stderr() -> Self {
+        Self {
+            descriptor: libc::STDERR_FILENO,
+            level: Level::Error,
+        }
+    }
+
     /// The descriptor lines go to.
     #[must_use]
     pub const fn descriptor(self) -> c_int {
