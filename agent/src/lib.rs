@@ -1,6 +1,10 @@
 //! The agent: the library a target loads.
 //!
 //! It runs before the program's `main`, joins or creates a session, and answers the clock from it.
+//!
+//! What the shared object exports is exactly the `no_mangle` items below and in `platform`:
+//! rustc's own version script hides the rest, and a second one of ours cannot be added because a
+//! linker takes only one anonymous version tag.
 
 mod interpose;
 mod platform;
