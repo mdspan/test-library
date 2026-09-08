@@ -98,7 +98,9 @@ jobs:
           release: "14.2"
           usesh: true
           prepare: |
-            pkg install -y rustup-init
+            # The base system carries no root certificates, so cargo cannot reach crates.io
+            # until this package drops a bundle at /etc/ssl/cert.pem.
+            pkg install -y ca_root_nss rustup-init
             rustup-init -y --no-modify-path --default-toolchain none
           run: |
             . "$HOME/.cargo/env"
