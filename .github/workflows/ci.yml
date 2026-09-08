@@ -1,0 +1,136 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # Everything the suite has, on both architectures we support. This is the job that gates a merge.
+  linux:
+    name: linux ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    env:
+      PLATFORM: linux ${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the toolchain rust-toolchain.toml pins
+        run: rustup toolchain install
+
+      - name: Formatting
+        run: cargo fmt --all --check
+
+      - name: Build
+        run: cargo build --locked --workspace --all-targets --all-features
+
+      - name: Clippy
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+
+      - name: Test
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --locked --workspace --all-features --no-fail-fast 2>&1 \
+            | tee "$RUNNER_TEMP/test.log"
+
+      - name: Name what failed
+        if: failure()
+        shell: bash
+        run: .github/report-failure.sh "$PLATFORM" "$RUNNER_TEMP/test.log"
+
+  # Builds the library and runs the part of the suite that already applies here. It grows as the
+  # macOS port lands.
+  macos:
+    name: macos aarch64
+    runs-on: macos-15
+    env:
+      PLATFORM: macos aarch64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the toolchain rust-toolchain.toml pins
+        run: rustup toolchain install
+
+      - name: Build
+        run: cargo build --locked --workspace --all-targets --all-features
+
+      - name: Test
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --locked --workspace --all-features --no-fail-fast 2>&1 \
+            | tee "$RUNNER_TEMP/test.log"
+
+      - name: Name what failed
+        if: failure()
+        shell: bash
+        run: .github/report-failure.sh "$PLATFORM" "$RUNNER_TEMP/test.log"
+
+  # The same, in a VM, because GitHub has no FreeBSD runner. The log is written into the shared
+  # workspace so the host can read it after the VM is gone.
+  freebsd:
+    name: freebsd x86_64
+    runs-on: ubuntu-24.04
+    env:
+      PLATFORM: freebsd x86_64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and test in the VM
+        uses: vmactions/freebsd-vm@v1
+        with:
+          release: "14.2"
+          usesh: true
+          prepare: |
+            pkg install -y rustup-init
+            rustup-init -y --no-modify-path --default-toolchain none
+          run: |
+            . "$HOME/.cargo/env"
+            rustup toolchain install
+            cargo build --locked --workspace --all-targets --all-features
+            # /bin/sh has no PIPESTATUS, so the log is a file the exit status survives.
+            cargo test --locked --workspace --all-features --no-fail-fast >test.log 2>&1
+            status=$?
+            cat test.log
+            if [ $status -ne 0 ]; then
+              echo "=== freebsd x86_64 failed ==="
+              grep -E '^test .+ \.\.\. FAILED$' test.log
+            fi
+            exit $status
+
+      - name: Name what failed
+        if: failure()
+        shell: bash
+        run: .github/report-failure.sh "$PLATFORM" test.log
+
+  # One check to point branch protection at. Only the Linux jobs are required, because macOS and
+  # FreeBSD still run a fraction of the suite.
+  gate:
+    name: gate
+    needs: [linux]
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require the Linux jobs
+        run: |
+          result='${{ needs.linux.result }}'
+          if [ "$result" != "success" ]; then
+            echo "The Linux jobs are $result, so this branch does not merge." >&2
+            exit 1
+          fi

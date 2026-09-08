@@ -1,0 +1,5 @@
+# Pinned so that a platform job going red means the code changed, not the toolchain under it.
+[toolchain]
+channel = "1.94.0"
+profile = "minimal"
+components = ["clippy", "rustfmt"]
