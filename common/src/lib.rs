@@ -2,6 +2,7 @@
 //! inside it, and how a genuine reading becomes a fake one.
 
 pub mod config;
+pub mod log;
 pub mod platform;
 pub mod session;
 pub mod time;

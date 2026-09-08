@@ -13,6 +13,7 @@ mod state;
 use std::path::Path;
 
 use common::config::{ENV_SHARED_FILE, EnvLookup, ProcessEnv};
+use common::log::{self, Level};
 use common::platform::genuine_clock_gettime;
 use common::session::{self, Setup, naming};
 
@@ -40,6 +41,11 @@ fn constructor() {
 }
 
 fn attach_or_create() {
+    // Before anything that can fail, and read afresh at every exec: the logging variables say
+    // where this process writes, not how the session behaves, so a process joining somebody else's
+    // session reads them too.
+    log::init(&ProcessEnv);
+
     if let Some(inherited) = ProcessEnv.nonempty(ENV_SHARED_FILE) {
         // The inherited path always wins, whatever else the environment says: a session built from
         // this environment instead would fake something nobody asked for.
@@ -67,8 +73,8 @@ fn attach_or_create() {
 }
 
 /// The one place setup can fail. The process runs on genuine time, because we live inside somebody
-/// else's program and its exit is not ours to cause. Logging `reason` and recording the fault for
+/// else's program and its exit is not ours to cause. Recording the fault and honouring
 /// `LIBTIMEWARP_FAIL_CLOSED` come later.
 fn give_up(reason: &dyn std::fmt::Display) {
-    let _ = reason;
+    common::log!(Level::Error, "{reason}");
 }

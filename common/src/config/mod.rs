@@ -97,6 +97,16 @@ pub const fn family_vars(family: Family) -> FamilyVars {
     }
 }
 
+/// Where log lines are appended. Read by every process at every exec, not only by a creator: it
+/// says where this process writes, not how the session behaves.
+pub const ENV_LOG: &str = "LIBTIMEWARP_LOG";
+
+/// An already-open descriptor to write log lines to. Wins over [`ENV_LOG`].
+pub const ENV_LOG_FD: &str = "LIBTIMEWARP_LOG_FD";
+
+/// How much of the log a destination keeps, by level name.
+pub const ENV_LOG_LEVEL: &str = "LIBTIMEWARP_LOG_LEVEL";
+
 /// Whether a target that reads the clock through the vDSO is caught. A flag.
 pub const ENV_EMULATE_VDSO: &str = "LIBTIMEWARP_EMULATE_VDSO";
 

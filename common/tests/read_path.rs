@@ -1,4 +1,5 @@
-//! The read path takes no lock and allocates nothing.
+//! The read path takes no lock and allocates nothing, and a log line follows the same rules, since
+//! one can be written from wherever a clock read can happen.
 //!
 //! A counting allocator is a whole-binary thing, so this check lives in a test binary of its own.
 //!
@@ -8,12 +9,24 @@
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Mutex, PoisonError};
 
+use common::config::ENV_LOG;
+use common::log::{Level, Sink};
 use common::platform::clock;
 use common::session::{self, Setup, clock_now};
 use common::time::Nanos;
 
 static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
+
+/// The counter is one word for the whole binary, so two tests measuring at once would each see the
+/// other's allocations. Taken for the length of a test, poison and all: a test that already failed
+/// should not turn the next one into a second failure.
+static MEASURING: Mutex<()> = Mutex::new(());
+
+fn measuring() -> std::sync::MutexGuard<'static, ()> {
+    MEASURING.lock().unwrap_or_else(PoisonError::into_inner)
+}
 
 struct Counting;
 
@@ -46,6 +59,7 @@ static ALLOCATOR: Counting = Counting;
 
 #[test]
 fn reading_the_clock_allocates_nothing() {
+    let _measuring = measuring();
     let dir = tempfile::tempdir().unwrap();
     let mut setup = Setup::plain(dir.path().join("libtimewarp"));
     setup.realtime.shift = Nanos(-7_200 * Nanos::SECOND);
@@ -75,6 +89,25 @@ fn reading_the_clock_allocates_nothing() {
         let now = clock_now(header, clock::REALTIME).unwrap();
         assert!(now >= last);
         last = now;
+    }
+    assert_eq!(ALLOCATIONS.load(Ordering::Relaxed), before);
+}
+
+#[test]
+fn writing_a_log_line_allocates_nothing() {
+    let _measuring = measuring();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("log").into_os_string();
+    let sink = Sink::from_env(&|name: &str| (name == ENV_LOG).then(|| path.clone())).unwrap();
+
+    // Warm anything the first line might touch, then measure.
+    sink.write(Level::Error, format_args!("warm"));
+    let before = ALLOCATIONS.load(Ordering::Relaxed);
+    for line in 0..1_000 {
+        sink.write(
+            Level::Error,
+            format_args!("{line}: {} for {}", "a suspected writer death", 4321),
+        );
     }
     assert_eq!(ALLOCATIONS.load(Ordering::Relaxed), before);
 }
