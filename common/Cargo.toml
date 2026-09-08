@@ -1,0 +1,17 @@
+[package]
+name = "common"
+version.workspace = true
+edition.workspace = true
+description = "Session state, configuration, and time arithmetic shared by the agent and its tools."
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+cfg-if = { workspace = true }
+libc = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3.24.0"

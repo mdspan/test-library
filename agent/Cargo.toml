@@ -1,0 +1,31 @@
+[package]
+name = "agent"
+version.workspace = true
+edition.workspace = true
+description = "The preloaded library that shifts a process's view of the clock."
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "timewarp"
+crate-type = ["cdylib"]
+
+[lints]
+workspace = true
+
+[dependencies]
+cfg-if = { workspace = true }
+common = { path = "../common" }
+ctor = { workspace = true }
+libc = { workspace = true }
+
+[features]
+default = ["vdso"]
+
+# The synthetic vDSO on Linux and the substituted timekeep page on FreeBSD. Neither is built yet;
+# the flag exists so the seam that will carry them is already switchable.
+vdso = []
+
+[dev-dependencies]
+libc = { workspace = true }
+tempfile = "3.24.0"

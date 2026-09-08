@@ -1,0 +1,17 @@
+# Tests may panic; that is what a failing test is.
+allow-expect-in-tests = true
+allow-panic-in-tests = true
+allow-print-in-tests = true
+allow-unwrap-in-tests = true
+allow-indexing-slicing-in-tests = true
+allow-dbg-in-tests = false
+
+# Nothing here is published, so tightening a signature breaks nobody.
+avoid-breaking-exported-api = false
+
+# Documentation and complexity budgets.
+# Doc lints on private helpers would only invite comment for its own sake.
+check-private-items = false
+cognitive-complexity-threshold = 15
+excessive-nesting-threshold = 5
+too-many-lines-threshold = 80
