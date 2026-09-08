@@ -293,3 +293,218 @@ fn the_genuine_clock_stays_reachable_through_our_own_symbol() {
         "the genuine symbol was faked"
     );
 }
+
+/// One run of `families`, which reports every clock faked and genuine, twice, with real time
+/// passing in between.
+fn families(env: &[(&str, &str)]) -> harness::Report {
+    let dir = Box::leak(Box::new(tempfile::tempdir().unwrap()));
+    let mut run = Run::new(harness::program_linked_to_library("families"))
+        .without_library()
+        .session_dir(dir.path());
+    for (name, value) in env {
+        run = run.env(name, value);
+    }
+    run.run()
+}
+
+/// How far a clock moved between the two rounds, faked and genuine.
+fn advance(report: &harness::Report, clock: &str) -> (i64, i64) {
+    (
+        report.nanos(&format!("b.{clock}")) - report.nanos(&format!("a.{clock}")),
+        report.nanos(&format!("b.{clock}.genuine")) - report.nanos(&format!("a.{clock}.genuine")),
+    )
+}
+
+/// Asserts that `clock` ran at `rate` times its own genuine passage.
+fn assert_rate(report: &harness::Report, clock: &str, rate: i64) {
+    let (faked, genuine) = advance(report, clock);
+    let expected = genuine * rate;
+    let slack = 50_000_000 + expected.abs() / 10;
+    assert!(
+        (faked - expected).abs() <= slack,
+        "{clock} moved {faked} ns while its timebase moved {genuine} ns, wanted {expected} ns"
+    );
+}
+
+#[test]
+fn each_family_carries_its_own_line() {
+    // The wall clock frozen while the monotonic clocks run at ten times speed, which is the
+    // combination a single line could not express.
+    let report = families(&[
+        ("LIBTIMEWARP_REALTIME_RATE", "0"),
+        ("LIBTIMEWARP_MONOTONIC_RATE", "10"),
+        ("LIBTIMEWARP_BOOTTIME_RATE", "2"),
+        ("LIBTIMEWARP_CPU_RATE", "4"),
+    ]);
+
+    assert_rate(&report, "realtime", 0);
+    assert_rate(&report, "monotonic", 10);
+    assert_rate(&report, "boottime", 2);
+    assert_rate(&report, "process_cpu", 4);
+}
+
+#[test]
+fn a_bare_rate_covers_elapsed_time_and_leaves_consumption_alone() {
+    let report = families(&[("LIBTIMEWARP_RATE", "10")]);
+
+    assert_rate(&report, "realtime", 10);
+    assert_rate(&report, "monotonic", 10);
+    assert_rate(&report, "boottime", 10);
+    assert_rate(&report, "process_cpu", 1);
+}
+
+#[test]
+fn every_clock_of_a_family_reads_the_family_value() {
+    let report = families(&[("LIBTIMEWARP_RATE", "5"), ("LIBTIMEWARP_SHIFT", "-2h")]);
+
+    for group in [
+        ["realtime", "realtime_coarse", "realtime_alarm"],
+        ["monotonic", "monotonic_coarse", "monotonic_raw"],
+        ["boottime", "boottime_alarm", "boottime"],
+    ] {
+        let readings: Vec<i64> = group
+            .iter()
+            .map(|clock| report.nanos(&format!("a.{clock}")))
+            .collect();
+        let spread = readings.iter().max().unwrap() - readings.iter().min().unwrap();
+        assert!(spread < 100_000_000, "{group:?} spread by {spread} ns");
+    }
+}
+
+#[test]
+fn the_cpu_family_scales_each_clock_on_its_own() {
+    let report = families(&[("LIBTIMEWARP_CPU_RATE", "8")]);
+
+    for clock in ["process_cpu", "thread_cpu"] {
+        let faked = report.nanos(&format!("a.{clock}"));
+        let genuine = report.nanos(&format!("a.{clock}.genuine"));
+        assert!(genuine > 10_000_000, "{clock} consumed only {genuine} ns");
+        // The faked reading is taken first, so it trails eight times the genuine one by whatever
+        // the process consumed between the two calls.
+        let expected = 8 * genuine;
+        assert!(
+            (faked - expected).abs() < expected / 100,
+            "{clock} read {faked} against a genuine {genuine}"
+        );
+    }
+}
+
+#[test]
+fn the_tai_clock_keeps_its_offset_from_the_wall_clock() {
+    let report = families(&[("LIBTIMEWARP_TIME", "1990-01-01T00:00:00Z")]);
+
+    let genuine_offset =
+        report.nanos("a.tai.genuine") - report.nanos("a.realtime.genuine") + HOUR / 3_600 / 2;
+    let faked_offset = report.nanos("a.tai") - report.nanos("a.realtime");
+    assert!(
+        (faked_offset - genuine_offset).abs() < 1_000_000_000,
+        "faked TAI leads by {faked_offset} ns, genuine by {genuine_offset} ns"
+    );
+    // Today's offset whatever era the wall clock is set to, and the era here is 1990.
+    assert!(report.nanos("a.realtime") < 700_000_000 * 1_000_000_000);
+}
+
+#[test]
+fn an_absolute_time_starts_the_wall_clock_where_it_says() {
+    let report = families(&[("LIBTIMEWARP_TIME", "2020-01-01T00:00:00Z")]);
+    let start = 1_577_836_800i64 * 1_000_000_000;
+
+    let reading = report.nanos("a.realtime");
+    assert!(
+        (start..start + 60 * 1_000_000_000).contains(&reading),
+        "the wall clock read {reading}, wanted 2020-01-01"
+    );
+    // And it runs from there, rather than standing still.
+    assert_rate(&report, "realtime", 1);
+}
+
+#[test]
+fn the_unix_seconds_spelling_agrees_with_the_timestamp_one() {
+    let stamped = families(&[("LIBTIMEWARP_TIME", "2020-01-01T00:00:00Z")]);
+    let seconds = families(&[("LIBTIMEWARP_TIME", "@1577836800")]);
+
+    let drift = (stamped.nanos("a.realtime") - seconds.nanos("a.realtime")).abs();
+    assert!(
+        drift < 60 * 1_000_000_000,
+        "the two spellings differ by {drift} ns"
+    );
+}
+
+#[test]
+fn a_timebase_override_changes_passage_and_leaves_the_zero_alone() {
+    let report = families(&[("LIBTIMEWARP_REALTIME_TIMEBASE", "CLOCK_BOOTTIME")]);
+
+    // The zero still comes from the default timebase, so the wall clock still reads the wall clock.
+    let reading = report.nanos("a.realtime");
+    let genuine = report.nanos("a.realtime.genuine");
+    assert!(
+        (reading - genuine).abs() < 1_000_000_000,
+        "the wall clock read {reading} against a genuine {genuine}"
+    );
+    // And passage now comes from a clock NTP cannot step, at the same speed.
+    assert_rate(&report, "realtime", 1);
+}
+
+#[test]
+fn a_monotonic_family_can_be_moved_as_long_as_it_stays_above_zero() {
+    let report = families(&[("LIBTIMEWARP_BOOTTIME_SHIFT", "1h")]);
+
+    let moved = report.nanos("a.boottime") - report.nanos("a.boottime.genuine");
+    assert!(
+        (moved - HOUR).abs() < 1_000_000_000,
+        "boottime moved {moved} ns"
+    );
+    // The bare shift never reaches it, so the monotonic clocks stay where they are.
+    let untouched = report.nanos("a.monotonic") - report.nanos("a.monotonic.genuine");
+    assert!(
+        untouched.abs() < 1_000_000_000,
+        "monotonic moved {untouched} ns"
+    );
+}
+
+#[test]
+fn the_clocks_the_family_table_leaves_alone_read_genuine() {
+    let report = families(&[("LIBTIMEWARP_RATE", "10"), ("LIBTIMEWARP_CPU_RATE", "8")]);
+
+    let faked = report.nanos("own_cpuclockid");
+    let genuine = report.nanos("own_cpuclockid.genuine");
+    assert!(
+        (faked - genuine).abs() < 100_000_000,
+        "an id from clock_getcpuclockid read {faked} against a genuine {genuine}"
+    );
+}
+
+/// Every bad value this ticket can produce leaves the program on genuine time.
+#[test]
+fn a_setting_the_library_cannot_honour_leaves_every_family_genuine() {
+    for env in [
+        // A shift that would put a nondecreasing family below zero.
+        vec![("LIBTIMEWARP_MONOTONIC_SHIFT", "-100000d")],
+        // A timebase name this platform does not have.
+        vec![("LIBTIMEWARP_REALTIME_TIMEBASE", "CLOCK_YESTERDAY")],
+        // A timebase the family may not track: a step in it would break monotonicity.
+        vec![("LIBTIMEWARP_MONOTONIC_TIMEBASE", "CLOCK_REALTIME")],
+        // A negative rate, and one past the ceiling the fixed point holds.
+        vec![("LIBTIMEWARP_RATE", "-1")],
+        vec![("LIBTIMEWARP_CPU_RATE", "5e9")],
+        // A timestamp that does not parse, and one outside the range an instant holds.
+        vec![("LIBTIMEWARP_TIME", "yesterday")],
+        vec![("LIBTIMEWARP_TIME", "2300-01-01T00:00:00Z")],
+        // The absolute time and a Realtime shift say the same thing twice.
+        vec![
+            ("LIBTIMEWARP_TIME", "2020-01-01T00:00:00Z"),
+            ("LIBTIMEWARP_SHIFT", "-2h"),
+        ],
+    ] {
+        let report = families(&env);
+        for clock in ["realtime", "monotonic", "boottime", "process_cpu"] {
+            let faked = report.nanos(&format!("a.{clock}"));
+            let genuine = report.nanos(&format!("a.{clock}.genuine"));
+            assert!(
+                (faked - genuine).abs() < 1_000_000_000,
+                "{env:?} left {clock} at {faked} against a genuine {genuine}"
+            );
+        }
+        assert_eq!(report.get("shared"), "", "{env:?} published a session");
+    }
+}

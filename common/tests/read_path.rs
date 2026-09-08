@@ -9,7 +9,8 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use common::session::{self, Setup, realtime_now};
+use common::platform::clock;
+use common::session::{self, Setup, clock_now};
 use common::time::Nanos;
 
 static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
@@ -46,22 +47,32 @@ static ALLOCATOR: Counting = Counting;
 #[test]
 fn reading_the_clock_allocates_nothing() {
     let dir = tempfile::tempdir().unwrap();
-    let session = session::create(&Setup {
-        dir: dir.path().join("libtimewarp"),
-        realtime_shift: Nanos(-7_200 * Nanos::SECOND),
-        emulate_vdso: true,
-        fail_closed: false,
-        timekeep_interval: Nanos(1_000_000),
-    })
-    .unwrap();
+    let mut setup = Setup::plain(dir.path().join("libtimewarp"));
+    setup.realtime.shift = Nanos(-7_200 * Nanos::SECOND);
+    let session = session::create(&setup).unwrap();
     let header = session.header();
 
+    // Every family, because each takes a different arm of the keeper's match.
+    let clocks = [
+        clock::REALTIME,
+        clock::TAI,
+        clock::MONOTONIC,
+        clock::BOOTTIME,
+        clock::PROCESS_CPUTIME,
+        clock::THREAD_CPUTIME,
+    ];
+
     // Warm anything the first call might touch, then measure.
-    let _ = realtime_now(header);
+    for id in clocks {
+        assert!(clock_now(header, id).is_some());
+    }
     let before = ALLOCATIONS.load(Ordering::Relaxed);
     let mut last = Nanos::ZERO;
     for _ in 0..1_000 {
-        let now = realtime_now(header).unwrap();
+        for id in clocks {
+            assert!(clock_now(header, id).is_some());
+        }
+        let now = clock_now(header, clock::REALTIME).unwrap();
         assert!(now >= last);
         last = now;
     }

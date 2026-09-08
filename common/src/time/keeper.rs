@@ -15,16 +15,6 @@ pub struct Line {
 }
 
 impl Line {
-    /// A line that shows the timebase itself, shifted.
-    #[must_use]
-    pub const fn anchored(timebase_now: Nanos, shift: Nanos) -> Self {
-        Self {
-            fake_anchor: timebase_now.saturating_add(shift),
-            timebase_anchor: timebase_now,
-            rate: Rate::UNITY,
-        }
-    }
-
     /// What the family shows for a genuine timebase reading.
     ///
     /// The clamp covers a reading older than the anchor it is paired with: a drifted sample, a
@@ -44,9 +34,18 @@ mod tests {
 
     const NOW: Nanos = Nanos(1_700_000_000_000_000_000);
 
+    /// A line that shows the timebase itself, shifted: what a family starts as at creation.
+    fn anchored(timebase_now: Nanos, shift: Nanos) -> Line {
+        Line {
+            fake_anchor: timebase_now.saturating_add(shift),
+            timebase_anchor: timebase_now,
+            rate: Rate::UNITY,
+        }
+    }
+
     #[test]
     fn an_unshifted_line_shows_the_timebase() {
-        let line = Line::anchored(NOW, Nanos::ZERO);
+        let line = anchored(NOW, Nanos::ZERO);
         assert_eq!(line.project(NOW), NOW);
         assert_eq!(
             line.project(Nanos(NOW.0 + 10 * Nanos::SECOND)),
@@ -56,7 +55,7 @@ mod tests {
 
     #[test]
     fn a_shift_moves_the_whole_line() {
-        let line = Line::anchored(NOW, Nanos(-7_200 * Nanos::SECOND));
+        let line = anchored(NOW, Nanos(-7_200 * Nanos::SECOND));
         assert_eq!(line.project(NOW), Nanos(NOW.0 - 7_200 * Nanos::SECOND));
         assert_eq!(
             line.project(Nanos(NOW.0 + Nanos::SECOND)),
@@ -68,7 +67,7 @@ mod tests {
     fn the_rate_scales_elapsed_time_alone() {
         let line = Line {
             rate: Rate::from_f64(10.0).unwrap(),
-            ..Line::anchored(NOW, Nanos::ZERO)
+            ..anchored(NOW, Nanos::ZERO)
         };
         assert_eq!(line.project(NOW), NOW);
         assert_eq!(
@@ -81,14 +80,14 @@ mod tests {
     fn rate_zero_freezes_the_family() {
         let line = Line {
             rate: Rate::FROZEN,
-            ..Line::anchored(NOW, Nanos::ZERO)
+            ..anchored(NOW, Nanos::ZERO)
         };
         assert_eq!(line.project(Nanos(NOW.0 + 3600 * Nanos::SECOND)), NOW);
     }
 
     #[test]
     fn a_timebase_behind_the_anchor_shows_the_anchor() {
-        let line = Line::anchored(NOW, Nanos::ZERO);
+        let line = anchored(NOW, Nanos::ZERO);
         assert_eq!(line.project(Nanos(NOW.0 - Nanos::SECOND)), NOW);
         assert_eq!(line.project(Nanos(i64::MIN)), NOW);
     }

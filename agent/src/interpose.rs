@@ -13,21 +13,16 @@
 )]
 
 use common::platform::{clock, genuine_clock_gettime};
-use common::session::realtime_now;
+use common::session::clock_now;
 use common::time::Nanos;
 
 use crate::state;
 
-/// What the session shows for `clock`, or `None` when the call belongs to the genuine clock.
-///
-/// Only Realtime is faked in this release; every other family reads genuine. The family table,
-/// and with it the rest of the clock ids, comes later.
+/// What the session shows for `clock`, or `None` when this process runs on genuine time and when
+/// the clock is one the family table leaves alone.
 #[inline]
 fn faked(clock: libc::clockid_t) -> Option<Nanos> {
-    if clock != clock::REALTIME {
-        return None;
-    }
-    realtime_now(state::session()?)
+    clock_now(state::session()?, clock)
 }
 
 /// # Safety

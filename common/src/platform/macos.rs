@@ -5,9 +5,11 @@ use std::io;
 /// What the header's platform field carries for macOS.
 pub const OS_TAG: u32 = 3;
 
-/// The genuine clock ids the families track passage against.
+/// The clock ids of the families, by the names the family table gives them.
 pub mod clock {
     use libc::clockid_t;
+
+    use crate::time::Family;
 
     /// The wall clock.
     pub const REALTIME: clockid_t = libc::CLOCK_REALTIME;
@@ -17,6 +19,23 @@ pub mod clock {
     pub const BOOTTIME: clockid_t = libc::CLOCK_MONOTONIC;
     /// The wall clock without leap seconds, which macOS does not keep separately.
     pub const TAI: clockid_t = libc::CLOCK_REALTIME;
+
+    /// Every clock a family holds, by the name a user writes for a timebase. Filled in with this
+    /// platform's column of the family table when the arm lands.
+    pub const NAMED: &[(&str, clockid_t)] = &[];
+
+    /// The family a clock id belongs to, or `None` when the id is left on genuine time. Nothing is
+    /// faked here yet, so every id passes through.
+    #[must_use]
+    pub const fn family_of(_clock: clockid_t) -> Option<Family> {
+        None
+    }
+
+    /// Whether this clock reads the Realtime line plus the TAI offset.
+    #[must_use]
+    pub const fn is_tai(_clock: clockid_t) -> bool {
+        false
+    }
 }
 
 /// Reads a genuine clock, once this arm exists.

@@ -11,21 +11,101 @@ use std::ptr::NonNull;
 use std::sync::atomic::Ordering;
 
 use crate::config::{
-    ENV_EMULATE_VDSO, ENV_FAIL_CLOSED, ENV_SHIFT, ENV_TIMEKEEP_INTERVAL, EnvLookup, ParseError,
-    parse_duration, parse_flag,
+    self, BadValue, ENV_CPU_RATE, ENV_EMULATE_VDSO, ENV_FAIL_CLOSED, ENV_RATE, ENV_REALTIME_SHIFT,
+    ENV_SHIFT, ENV_TIME, ENV_TIMEKEEP_INTERVAL, EnvLookup, Reason, duration_var, flag_var,
+    rate_var, timestamp_var,
 };
 use crate::platform::{self, clock};
-use crate::time::{Line, Nanos, Rate};
+use crate::time::{Family, Line, Nanos, Rate};
 
 use layout::{BadHeader, Header, Keeper};
+
+/// What the environment asked one family to do. Cpu has no line, so it has none of this: its rate
+/// is [`Setup::cpu_rate`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FamilySetup {
+    /// How far the family is moved from its default timebase's genuine reading.
+    pub shift: Nanos,
+    /// How fast the family runs: fake nanoseconds per nanosecond of the timebase.
+    pub rate: Rate,
+    /// The genuine clock the family tracks passage against.
+    pub timebase: libc::clockid_t,
+}
+
+impl FamilySetup {
+    /// The family left where its timebase is, running at real speed.
+    #[must_use]
+    pub const fn tracking(timebase: libc::clockid_t) -> Self {
+        Self {
+            shift: Nanos::ZERO,
+            rate: Rate::UNITY,
+            timebase,
+        }
+    }
+
+    /// Reads one family's variables. `bare_shift` and `bare_rate` are the settings that name no
+    /// family; the family's own variable wins over either.
+    ///
+    /// # Errors
+    /// The [`BadValue`] naming the variable that could not be used.
+    fn from_env(
+        env: &impl EnvLookup,
+        family: Family,
+        bare_shift: Option<Nanos>,
+        bare_rate: Option<Rate>,
+    ) -> Result<Self, BadValue> {
+        let vars = config::family_vars(family);
+        let own_shift = match vars.shift {
+            Some(name) => duration_var(env, name)?,
+            None => None,
+        };
+        Ok(Self {
+            shift: own_shift.or(bare_shift).unwrap_or(Nanos::ZERO),
+            rate: rate_var(env, vars.rate)?
+                .or(bare_rate)
+                .unwrap_or(Rate::UNITY),
+            timebase: timebase_from_env(env, family)?,
+        })
+    }
+}
+
+/// The clock a family tracks passage against: the name the user gave, checked against what the
+/// family may track, or the family's default timebase.
+fn timebase_from_env(env: &impl EnvLookup, family: Family) -> Result<libc::clockid_t, BadValue> {
+    let vars = config::family_vars(family);
+    let named = vars
+        .timebase
+        .and_then(|name| env.nonempty(name).map(|value| (name, value)));
+    let Some((name, value)) = named else {
+        // Cpu has no timebase, so it is the one family with no default to fall back on.
+        return platform::default_timebase(family)
+            .ok_or_else(|| BadValue::new(vars.rate, Reason::ForbiddenTimebase));
+    };
+
+    let timebase = platform::clock_named(&value.to_string_lossy())
+        .ok_or_else(|| BadValue::new(name, Reason::UnknownClock))?;
+    if !platform::timebase_allowed(family, timebase) {
+        return Err(BadValue::new(name, Reason::ForbiddenTimebase));
+    }
+    Ok(timebase)
+}
 
 /// What the environment asked for when no session is inherited.
 #[derive(Debug, Clone)]
 pub struct Setup {
     /// The directory the session file is created in.
     pub dir: PathBuf,
-    /// How far the Realtime family is moved from the genuine clock.
-    pub realtime_shift: Nanos,
+    /// An absolute value for the Realtime family, from `LIBTIMEWARP_TIME`, in place of a shift.
+    pub realtime_at: Option<Nanos>,
+    /// The wall clock.
+    pub realtime: FamilySetup,
+    /// The clocks that stop across suspend.
+    pub monotonic: FamilySetup,
+    /// The clocks that keep counting across suspend.
+    pub boottime: FamilySetup,
+    /// How fast process and thread CPU time runs. The Cpu family's one setting, fixed for the life
+    /// of the session.
+    pub cpu_rate: Rate,
     /// Whether a target that reads the clock through the vDSO is caught.
     pub emulate_vdso: bool,
     /// Whether a target whose setup failed refuses to run.
@@ -34,52 +114,167 @@ pub struct Setup {
     pub timekeep_interval: Nanos,
 }
 
-/// A variable whose value the library could not use.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct BadValue {
-    /// The variable's name.
-    pub variable: &'static str,
-    /// What its parser said.
-    pub error: ParseError,
-}
-
-impl std::fmt::Display for BadValue {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}: {}", self.variable, self.error)
-    }
-}
-
 const DEFAULT_TIMEKEEP_INTERVAL: Nanos = Nanos(1_000_000);
 
 impl Setup {
+    /// A session that fakes nothing: every family where its genuine clock is, at real speed.
+    #[must_use]
+    pub const fn plain(dir: PathBuf) -> Self {
+        Self {
+            dir,
+            realtime_at: None,
+            realtime: FamilySetup::tracking(clock::REALTIME),
+            monotonic: FamilySetup::tracking(clock::MONOTONIC),
+            boottime: FamilySetup::tracking(clock::BOOTTIME),
+            cpu_rate: Rate::UNITY,
+            emulate_vdso: true,
+            fail_closed: false,
+            timekeep_interval: DEFAULT_TIMEKEEP_INTERVAL,
+        }
+    }
+
     /// Reads every variable that describes a new session.
+    ///
+    /// A bare `LIBTIMEWARP_SHIFT` moves Realtime alone, because "two hours ago" leaves the uptime
+    /// counter where it is. A bare `LIBTIMEWARP_RATE` covers the three families that measure
+    /// elapsed time and leaves Cpu at unity, because that family measures consumption instead.
     ///
     /// # Errors
     /// The first [`BadValue`] found, so the caller can name the variable the user got wrong.
     pub fn from_env(env: &impl EnvLookup, dir: PathBuf) -> Result<Self, BadValue> {
-        let duration = |name: &'static str, default: Nanos| -> Result<Nanos, BadValue> {
-            env.nonempty(name).map_or(Ok(default), |value| {
-                parse_duration(&value.to_string_lossy())
-                    .map(Nanos)
-                    .map_err(|error| BadValue {
-                        variable: name,
-                        error,
-                    })
-            })
-        };
-        let flag = |name: &str, default: bool| {
-            env.nonempty(name)
-                .map_or(default, |v| parse_flag(&v.to_string_lossy()))
-        };
+        let bare_shift = duration_var(env, ENV_SHIFT)?;
+        let bare_rate = rate_var(env, ENV_RATE)?;
+        let realtime_at = timestamp_var(env, ENV_TIME)?;
+
+        let said_twice = [ENV_REALTIME_SHIFT, ENV_SHIFT]
+            .into_iter()
+            .find(|name| env.nonempty(name).is_some());
+        if let (Some(_), Some(shift)) = (realtime_at, said_twice) {
+            return Err(BadValue::new(ENV_TIME, Reason::SaidTwice(shift)));
+        }
 
         Ok(Self {
-            dir,
-            realtime_shift: duration(ENV_SHIFT, Nanos::ZERO)?,
-            emulate_vdso: flag(ENV_EMULATE_VDSO, true),
-            fail_closed: flag(ENV_FAIL_CLOSED, false),
-            timekeep_interval: duration(ENV_TIMEKEEP_INTERVAL, DEFAULT_TIMEKEEP_INTERVAL)?,
+            realtime: FamilySetup::from_env(env, Family::Realtime, bare_shift, bare_rate)?,
+            monotonic: FamilySetup::from_env(env, Family::Monotonic, None, bare_rate)?,
+            boottime: FamilySetup::from_env(env, Family::Boottime, None, bare_rate)?,
+            cpu_rate: rate_var(env, ENV_CPU_RATE)?.unwrap_or(Rate::UNITY),
+            realtime_at,
+            emulate_vdso: flag_var(env, ENV_EMULATE_VDSO, true),
+            fail_closed: flag_var(env, ENV_FAIL_CLOSED, false),
+            timekeep_interval: duration_var(env, ENV_TIMEKEEP_INTERVAL)?
+                .unwrap_or(DEFAULT_TIMEKEEP_INTERVAL),
+            ..Self::plain(dir)
         })
     }
+
+    /// Turns what the environment asked for into the parameters the session starts with.
+    ///
+    /// `read` supplies the genuine readings, so the creator's own clocks and a test's chosen
+    /// values go through the same arithmetic. A family's zero comes from its default timebase and
+    /// its passage from its timebase; with no override the two are one clock, read once.
+    ///
+    /// # Errors
+    /// A [`BadValue`] for a clock the kernel refuses, a Realtime value outside the range an
+    /// instant can hold, or a shift that would put Monotonic or Boottime below zero.
+    pub fn plan(&self, read: &dyn Fn(libc::clockid_t) -> Option<Nanos>) -> Result<Plan, BadValue> {
+        let realtime_zero = sample(read, Family::Realtime, clock::REALTIME)?;
+        let fake_anchor = match self.realtime_at {
+            Some(at) => at,
+            None => realtime_zero
+                .0
+                .checked_add(self.realtime.shift.0)
+                .map(Nanos)
+                .ok_or_else(|| BadValue::new(ENV_REALTIME_SHIFT, Reason::OutOfRange))?,
+        };
+
+        Ok(Plan {
+            realtime: Line {
+                fake_anchor,
+                timebase_anchor: anchor(read, Family::Realtime, realtime_zero, &self.realtime)?,
+                rate: self.realtime.rate,
+            },
+            monotonic: nondecreasing_line(read, Family::Monotonic, &self.monotonic)?,
+            boottime: nondecreasing_line(read, Family::Boottime, &self.boottime)?,
+            cpu_rate: self.cpu_rate,
+            // Today's offset whatever era Realtime is set to, and exact because it is whole
+            // seconds. A kernel that never had the offset set reports the wall clock, so zero.
+            tai_offset: read(clock::TAI).map_or(0, |tai| {
+                tai.0
+                    .saturating_sub(realtime_zero.0)
+                    .saturating_add(Nanos::SECOND / 2)
+                    .div_euclid(Nanos::SECOND)
+            }),
+            creation_time: realtime_zero,
+        })
+    }
+}
+
+/// The genuine reading of a family's clock, or the bad value naming the variable that chose it.
+fn sample(
+    read: &dyn Fn(libc::clockid_t) -> Option<Nanos>,
+    family: Family,
+    timebase: libc::clockid_t,
+) -> Result<Nanos, BadValue> {
+    let vars = config::family_vars(family);
+    read(timebase)
+        .ok_or_else(|| BadValue::new(vars.timebase.unwrap_or(vars.rate), Reason::UnreadableClock))
+}
+
+/// The timebase reading the family's zero is paired with. An override changes where passage comes
+/// from and leaves the zero alone, so only an overridden family is read a second time.
+fn anchor(
+    read: &dyn Fn(libc::clockid_t) -> Option<Nanos>,
+    family: Family,
+    zero: Nanos,
+    setup: &FamilySetup,
+) -> Result<Nanos, BadValue> {
+    match platform::default_timebase(family) {
+        Some(default) if default == setup.timebase => Ok(zero),
+        _ => sample(read, family, setup.timebase),
+    }
+}
+
+/// A Monotonic or Boottime line. A creation shift that would put the family below zero is refused,
+/// so a faked monotonic clock never reads negative.
+fn nondecreasing_line(
+    read: &dyn Fn(libc::clockid_t) -> Option<Nanos>,
+    family: Family,
+    setup: &FamilySetup,
+) -> Result<Line, BadValue> {
+    let default = platform::default_timebase(family).ok_or_else(|| {
+        BadValue::new(config::family_vars(family).rate, Reason::ForbiddenTimebase)
+    })?;
+    let zero = sample(read, family, default)?;
+    let fake_anchor = zero.saturating_add(setup.shift);
+    if fake_anchor < Nanos::ZERO {
+        let vars = config::family_vars(family);
+        return Err(BadValue::new(
+            vars.shift.unwrap_or(vars.rate),
+            Reason::BelowZero,
+        ));
+    }
+    Ok(Line {
+        fake_anchor,
+        timebase_anchor: anchor(read, family, zero, setup)?,
+        rate: setup.rate,
+    })
+}
+
+/// The parameters a fresh session starts with, from one round of genuine readings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Plan {
+    /// The wall clock's line.
+    pub realtime: Line,
+    /// The Monotonic family's line.
+    pub monotonic: Line,
+    /// The Boottime family's line.
+    pub boottime: Line,
+    /// How fast process and thread CPU time runs.
+    pub cpu_rate: Rate,
+    /// Whole seconds by which genuine `CLOCK_TAI` leads genuine `CLOCK_REALTIME`.
+    pub tai_offset: i64,
+    /// Genuine `CLOCK_REALTIME` when the readings were taken.
+    pub creation_time: Nanos,
 }
 
 /// Why a session could not be created or attached to.
@@ -95,6 +290,9 @@ pub enum SessionError {
     /// A generated name landed on an existing file. Nothing is written; we never take over a
     /// session that may be live.
     Collision(PathBuf),
+    /// The environment asked for something the library could not set up. Nothing is written: a
+    /// creator that hits one publishes no session.
+    BadValue(BadValue),
     /// The operating system refused a step of the work.
     Io(io::Error),
 }
@@ -108,6 +306,7 @@ impl std::fmt::Display for SessionError {
             Self::Collision(path) => {
                 write!(f, "a session file already exists at {}", path.display())
             }
+            Self::BadValue(bad) => write!(f, "{bad}"),
             Self::Io(err) => write!(f, "{err}"),
         }
     }
@@ -118,6 +317,12 @@ impl std::error::Error for SessionError {}
 impl From<io::Error> for SessionError {
     fn from(err: io::Error) -> Self {
         Self::Io(err)
+    }
+}
+
+impl From<BadValue> for SessionError {
+    fn from(bad: BadValue) -> Self {
+        Self::BadValue(bad)
     }
 }
 
@@ -289,10 +494,14 @@ pub fn create(setup: &Setup) -> Result<Session, SessionError> {
 /// the seam the tests use to force a collision.
 ///
 /// # Errors
+/// [`SessionError::BadValue`] when the setup cannot be turned into parameters,
 /// [`SessionError::Collision`] when the name is taken, or [`SessionError::Io`] when a step of the
 /// build fails.
 pub fn create_named(setup: &Setup, name: &str) -> Result<Session, SessionError> {
     ensure_dir(&setup.dir)?;
+    // Before anything is on disk, so a creator that cannot set up what it was asked for leaves the
+    // directory clean.
+    let plan = setup.plan(&platform::genuine_nanos)?;
 
     let pid = std::process::id();
     let (path, tmp) = naming::session_paths(&setup.dir, name);
@@ -335,7 +544,7 @@ pub fn create_named(setup: &Setup, name: &str) -> Result<Session, SessionError> 
     drop(guard);
 
     // Safety: nothing else can reach this file: it is under a private name and not yet linked.
-    unsafe { initialize(header_ptr(base), setup, pid, page, len) };
+    unsafe { initialize(header_ptr(base), setup, &plan, pid, page, len) };
 
     let c_path = cstring(&path)?;
     // Safety: `c_tmp` and `c_path` are live NUL-terminated paths.
@@ -371,52 +580,47 @@ impl Drop for FdGuard {
 /// # Safety
 /// `header` must point at a zeroed mapping of at least `size_of::<Header>()` bytes that no other
 /// process can reach.
-unsafe fn initialize(header: *mut Header, setup: &Setup, pid: u32, page: usize, len: usize) {
-    {
-        let realtime = platform::genuine_nanos(clock::REALTIME).unwrap_or(Nanos::ZERO);
-        let monotonic = platform::genuine_nanos(clock::MONOTONIC).unwrap_or(Nanos::ZERO);
-        let boottime = platform::genuine_nanos(clock::BOOTTIME).unwrap_or(monotonic);
-        let tai = platform::genuine_nanos(clock::TAI).unwrap_or(realtime);
+unsafe fn initialize(
+    header: *mut Header,
+    setup: &Setup,
+    plan: &Plan,
+    pid: u32,
+    page: usize,
+    len: usize,
+) {
+    // Safety: the caller guarantees a zeroed, header-sized mapping nobody else can reach.
+    let header = unsafe { &mut *header };
+    header.magic = layout::MAGIC;
+    header.abi_version = layout::ABI_VERSION;
+    header.platform = platform::PLATFORM_TAG;
+    header.keeper = Keeper::Affine as u32;
+    header.emulate_vdso = u32::from(setup.emulate_vdso);
+    header.fail_closed = u32::from(setup.fail_closed);
+    header.file_size = u32::try_from(len).unwrap_or(u32::MAX);
+    header.page_size = u32::try_from(page).unwrap_or(u32::MAX);
+    header.arena_offset = 0;
+    header.arena_size = 0;
+    header.creator_pid = pid;
+    header.creation_time = plan.creation_time.0;
+    // A negative interval is not a thing; it lands as zero rather than as an enormous one.
+    header.timekeep_interval = u64::try_from(setup.timekeep_interval.0).unwrap_or(0);
 
-        // Safety: the caller guarantees a zeroed, header-sized mapping nobody else can reach.
-        let header = unsafe { &mut *header };
-        header.magic = layout::MAGIC;
-        header.abi_version = layout::ABI_VERSION;
-        header.platform = platform::PLATFORM_TAG;
-        header.keeper = Keeper::Affine as u32;
-        header.emulate_vdso = u32::from(setup.emulate_vdso);
-        header.fail_closed = u32::from(setup.fail_closed);
-        header.file_size = u32::try_from(len).unwrap_or(u32::MAX);
-        header.page_size = u32::try_from(page).unwrap_or(u32::MAX);
-        header.arena_offset = 0;
-        header.arena_size = 0;
-        header.creator_pid = pid;
-        header.creation_time = realtime.0;
-        // A negative interval is not a thing; it lands as zero rather than as an enormous one.
-        header.timekeep_interval = u64::try_from(setup.timekeep_interval.0).unwrap_or(0);
+    let params = &header.live;
+    params
+        .realtime
+        .store(plan.realtime, setup.realtime.timebase);
+    params
+        .monotonic
+        .store(plan.monotonic, setup.monotonic.timebase);
+    params
+        .boottime
+        .store(plan.boottime, setup.boottime.timebase);
+    params.cpu_rate.store(plan.cpu_rate.0, Ordering::Relaxed);
+    params.tai_offset.store(plan.tai_offset, Ordering::Relaxed);
+    params.epoch.store(0, Ordering::Relaxed);
+    copy_params(&header.live, &header.shadow);
 
-        let params = &header.live;
-        params.realtime.store(
-            Line::anchored(realtime, setup.realtime_shift),
-            clock::REALTIME,
-        );
-        params
-            .monotonic
-            .store(Line::anchored(monotonic, Nanos::ZERO), clock::MONOTONIC);
-        params
-            .boottime
-            .store(Line::anchored(boottime, Nanos::ZERO), clock::BOOTTIME);
-        params.cpu_rate.store(Rate::UNITY.0, Ordering::Relaxed);
-        // Today's offset whatever era Realtime is set to, and exact because it is whole seconds.
-        params.tai_offset.store(
-            (tai.0 - realtime.0 + Nanos::SECOND / 2).div_euclid(Nanos::SECOND),
-            Ordering::Relaxed,
-        );
-        params.epoch.store(0, Ordering::Relaxed);
-        copy_params(&header.live, &header.shadow);
-
-        header.ready.store(1, Ordering::Release);
-    }
+    header.ready.store(1, Ordering::Release);
 }
 
 fn copy_params(from: &layout::Params, to: &layout::Params) {
@@ -502,17 +706,58 @@ pub fn attach(path: &Path) -> Result<Session, SessionError> {
     }
 }
 
-/// What the Realtime family shows now.
+/// What the session shows for `clock`, or `None` when the call belongs to the genuine clock.
 ///
 /// The read path: the parameter words and one genuine clock sample. No lock, no allocation,
 /// nothing written to shared memory. The seqlock read flow goes around this later; today the
 /// parameters are written once, before the file is linked into place, and never change, and
 /// attach's acquire on `ready` is what orders them ahead of every read.
+///
+/// Dispatch is static: the keeper is an enum, so choosing costs one predictable branch.
 #[inline]
-pub fn realtime_now(header: &Header) -> Option<Nanos> {
-    let line = header.live.realtime.load();
-    let timebase = header.live.realtime.timebase();
-    Some(line.project(platform::genuine_nanos(timebase)?))
+pub fn clock_now(header: &Header, clock: libc::clockid_t) -> Option<Nanos> {
+    match Keeper::from_tag(header.keeper)? {
+        Keeper::Affine => affine_now(&header.live, clock),
+        // The genuine reading, which the caller reaches by letting the call through untouched.
+        Keeper::Null => None,
+    }
+}
+
+/// The affine keeper: the family's line projected over a genuine reading of its timebase.
+///
+/// Every value here comes out of shared memory a writer may be changing, so every step saturates
+/// and the arithmetic holds for any bit pattern. A torn read is discarded by the seqlock around
+/// this, not prevented inside it.
+#[inline]
+fn affine_now(params: &layout::Params, clock: libc::clockid_t) -> Option<Nanos> {
+    match clock::family_of(clock)? {
+        Family::Realtime => {
+            let now = project(&params.realtime)?;
+            if clock::is_tai(clock) {
+                // The whole-second offset genuine `CLOCK_TAI` leads genuine `CLOCK_REALTIME` by,
+                // fixed at creation, so a Realtime set to 1990 shows TAI at 1990 plus today's.
+                let offset = params.tai_offset.load(Ordering::Relaxed);
+                return Some(now.saturating_add(Nanos(offset.saturating_mul(Nanos::SECOND))));
+            }
+            Some(now)
+        }
+        Family::Monotonic => project(&params.monotonic),
+        Family::Boottime => project(&params.boottime),
+        // Cpu has no timebase and no anchor pair: each clock scales its own consumption, which
+        // only grows, so the line is continuous by construction and the read path keeps no state.
+        Family::Cpu => {
+            let rate = Rate(params.cpu_rate.load(Ordering::Relaxed));
+            Some(Nanos(rate.scale(platform::genuine_nanos(clock)?.0)))
+        }
+    }
+}
+
+#[inline]
+fn project(line: &layout::FamilyLine) -> Option<Nanos> {
+    Some(
+        line.load()
+            .project(platform::genuine_nanos(line.timebase())?),
+    )
 }
 
 // Creating a session reads a genuine clock and the system's randomness, so these cases need a
