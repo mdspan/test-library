@@ -14,6 +14,7 @@ use std::sync::{Mutex, PoisonError};
 use common::config::ENV_LOG;
 use common::log::{Level, Sink};
 use common::platform::clock;
+use common::session::layout::WriterState;
 use common::session::{self, Setup, clock_now};
 use common::time::Nanos;
 
@@ -89,6 +90,29 @@ fn reading_the_clock_allocates_nothing() {
         let now = clock_now(header, clock::REALTIME).unwrap();
         assert!(now >= last);
         last = now;
+    }
+    assert_eq!(ALLOCATIONS.load(Ordering::Relaxed), before);
+}
+
+#[test]
+fn the_abandoned_writer_fallback_allocates_nothing_either() {
+    let _measuring = measuring();
+    let dir = tempfile::tempdir().unwrap();
+    let session = session::create(&Setup::plain(dir.path().join("libtimewarp"))).unwrap();
+    let header = session.header();
+
+    // A writer that died between W3 and W7: every read in this process now waits out its patience
+    // and comes back through the fallback, which opens the lock file, probes it, and closes it.
+    header
+        .seqlock
+        .writer_state
+        .store(WriterState::writing(4321).word(), Ordering::Release);
+    header.seqlock.sequence.store(1, Ordering::Release);
+
+    assert!(clock_now(header, clock::REALTIME).is_some());
+    let before = ALLOCATIONS.load(Ordering::Relaxed);
+    for _ in 0..20 {
+        assert!(clock_now(header, clock::MONOTONIC).is_some());
     }
     assert_eq!(ALLOCATIONS.load(Ordering::Relaxed), before);
 }

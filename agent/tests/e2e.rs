@@ -21,7 +21,9 @@ fn session_files(dir: &Path) -> Vec<String> {
         return Vec::new();
     };
     entries
-        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .map(|e| e.unwrap().file_name())
+        .filter(|name| harness::is_session_file(name))
+        .map(|name| name.to_string_lossy().into_owned())
         .collect()
 }
 

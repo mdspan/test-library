@@ -28,7 +28,10 @@ fn session_files(dir: &Path) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(dir.join("libtimewarp")) else {
         return Vec::new();
     };
-    entries.map(|entry| entry.unwrap().path()).collect()
+    entries
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.file_name().is_some_and(harness::is_session_file))
+        .collect()
 }
 
 /// The one session a run left behind, mapped the way a controller would map it.

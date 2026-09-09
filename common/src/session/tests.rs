@@ -62,25 +62,24 @@ fn a_directory_anyone_can_write_is_refused() {
 }
 
 #[test]
-fn creation_leaves_one_whole_session_file_and_no_temporary() {
+fn creation_leaves_one_whole_session_file_and_its_lock_and_no_temporary() {
     let tmp = tempfile::tempdir().unwrap();
     let setup = setup_in(tmp.path());
     let session = create(&setup).unwrap();
 
-    let names: Vec<String> = fs::read_dir(&setup.dir)
+    let mut names: Vec<String> = fs::read_dir(&setup.dir)
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
-    assert_eq!(names.len(), 1, "{names:?}");
-    assert!(names[0].ends_with(".session"), "{names:?}");
+    names.sort();
+    let name = session.path().file_name().unwrap().to_string_lossy();
+    let stem = name.strip_suffix(naming::SESSION_SUFFIX).unwrap();
     assert!(
-        names[0].starts_with(&format!("pid-{}-", std::process::id())),
+        stem.starts_with(&format!("pid-{}-", std::process::id())),
         "{names:?}"
     );
-    assert_eq!(
-        session.path().file_name().unwrap().to_string_lossy(),
-        names[0]
-    );
+    // The lock file sits beside the session file under the same name, and nothing else is left.
+    assert_eq!(names, vec![format!("{stem}.lock"), name.into_owned()]);
 }
 
 #[test]
@@ -775,8 +774,9 @@ fn a_creator_that_fell_back_publishes_a_null_session_carrying_the_fault() {
     // The flags the session owns are still the environment's to say.
     assert_eq!(header.fail_closed, 1);
     assert_eq!(header.emulate_vdso, 0);
-    // And the file is whole and alone, so a child attaches to it as it would to any other.
-    assert_eq!(fs::read_dir(&setup.dir).unwrap().count(), 1);
+    // And the file is whole, beside its lock file alone, so a child attaches to it as it would to
+    // any other.
+    assert_eq!(fs::read_dir(&setup.dir).unwrap().count(), 2);
     assert_eq!(
         attach(session.path()).unwrap().header().fault(),
         Some(fault)

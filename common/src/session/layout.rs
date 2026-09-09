@@ -173,6 +173,15 @@ impl FamilyLine {
         clock_id(self.timebase.load(Ordering::Relaxed))
     }
 
+    /// The line and its timebase together, read word by word like [`FamilyLine::load`].
+    #[must_use]
+    pub fn value(&self) -> FamilyValue {
+        FamilyValue {
+            line: self.load(),
+            timebase: self.timebase(),
+        }
+    }
+
     /// Writes the line and its timebase.
     pub fn store(&self, line: Line, timebase: libc::clockid_t) {
         self.fake_anchor
@@ -181,6 +190,49 @@ impl FamilyLine {
             .store(line.timebase_anchor.0, Ordering::Relaxed);
         self.rate.store(line.rate.0, Ordering::Relaxed);
         self.timebase.store(clock_id(timebase), Ordering::Relaxed);
+    }
+}
+
+/// One family's parameters off shared memory, whole: the line and the clock it tracks passage
+/// against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FamilyValue {
+    /// The line the family projects along.
+    pub line: Line,
+    /// The genuine clock passage is measured against.
+    pub timebase: libc::clockid_t,
+}
+
+/// A whole copy of the parameters, off shared memory.
+///
+/// This is what a writer builds at W6 and what the reader's validation covers: the words are read
+/// or written one at a time, and the seqlock around them is what makes the copy whole.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ParamsValue {
+    /// The Realtime family, the one a wall clock reads.
+    pub realtime: FamilyValue,
+    /// The Monotonic family.
+    pub monotonic: FamilyValue,
+    /// The Boottime family, which counts suspended time too.
+    pub boottime: FamilyValue,
+    /// How fast the process clocks advance.
+    pub cpu_rate: Rate,
+    /// Whole seconds by which genuine `CLOCK_TAI` leads genuine `CLOCK_REALTIME`.
+    pub tai_offset: i64,
+    /// Bumped by `set_time`, left alone by a rate change.
+    pub epoch: u64,
+}
+
+impl ParamsValue {
+    /// The three families that carry a line, in the family table's order.
+    pub const fn lines_mut(&mut self) -> [&mut FamilyValue; 3] {
+        [&mut self.realtime, &mut self.monotonic, &mut self.boottime]
+    }
+
+    /// The same three, to read.
+    #[must_use]
+    pub const fn lines(&self) -> [&FamilyValue; 3] {
+        [&self.realtime, &self.monotonic, &self.boottime]
     }
 }
 
@@ -204,13 +256,94 @@ pub struct Params {
     pub padding: u64,
 }
 
+impl Params {
+    /// Every word of the copy, read one at a time. Ordering comes from the seqlock around it.
+    #[must_use]
+    pub fn load(&self) -> ParamsValue {
+        ParamsValue {
+            realtime: self.realtime.value(),
+            monotonic: self.monotonic.value(),
+            boottime: self.boottime.value(),
+            cpu_rate: Rate(self.cpu_rate.load(Ordering::Relaxed)),
+            tai_offset: self.tai_offset.load(Ordering::Relaxed),
+            epoch: self.epoch.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Writes every word of the copy, one at a time. The release that publishes them is the
+    /// seqlock's, not one of these stores.
+    pub fn store(&self, value: &ParamsValue) {
+        for (slot, family) in [
+            (&self.realtime, &value.realtime),
+            (&self.monotonic, &value.monotonic),
+            (&self.boottime, &value.boottime),
+        ] {
+            slot.store(family.line, family.timebase);
+        }
+        self.cpu_rate.store(value.cpu_rate.0, Ordering::Relaxed);
+        self.tai_offset.store(value.tai_offset, Ordering::Relaxed);
+        self.epoch.store(value.epoch, Ordering::Relaxed);
+    }
+}
+
+/// Who is inside the write section, and whether the shadow holds a whole copy of what that write
+/// intends to publish.
+///
+/// One machine word, so a reader loads the pair atomically: the pid in the high half and the flag
+/// in bit 0, with the bits between them unused. Zero is no writer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct WriterState {
+    /// The process inside the section. The lock, not this, decides liveness; the pid is for the
+    /// log line and the fault record.
+    pub pid: u32,
+    /// Whether the shadow holds a whole copy of the value this write intends to publish.
+    pub shadow_complete: bool,
+}
+
+impl WriterState {
+    /// The word a section opens with: the writer's own pid, shadow-complete clear.
+    #[must_use]
+    pub const fn writing(pid: u32) -> Self {
+        Self {
+            pid,
+            shadow_complete: false,
+        }
+    }
+
+    /// The same writer, with the shadow now whole.
+    #[must_use]
+    pub const fn published(pid: u32) -> Self {
+        Self {
+            pid,
+            shadow_complete: true,
+        }
+    }
+
+    /// The word the slot holds.
+    #[must_use]
+    pub const fn word(self) -> u64 {
+        ((self.pid as u64) << u32::BITS) | self.shadow_complete as u64
+    }
+
+    /// The state a word carries. Every bit pattern is a state, so a torn or stale word decodes
+    /// rather than failing: the reader's recheck is what catches one.
+    #[must_use]
+    pub const fn from_word(word: u64) -> Self {
+        Self {
+            // The high half is exactly a pid's width, so the shift cannot lose one.
+            pid: (word >> u32::BITS) as u32,
+            shadow_complete: word & 1 == 1,
+        }
+    }
+}
+
 /// The seqlock's two words, together on a line of their own.
 #[derive(Debug)]
 #[repr(C, align(128))]
 pub struct SeqBlock {
     /// Odd while a write is in flight, even between writes.
     pub sequence: AtomicU64,
-    /// The writing process's pid packed with the shadow-complete flag.
+    /// The [`WriterState`] word: who is writing, and whether the shadow is whole.
     pub writer_state: AtomicU64,
 }
 
@@ -467,6 +600,26 @@ mod tests {
             Fault::from_word(FaultCode::BadValue as u64),
             Some(Fault::new(FaultCode::BadValue, 0))
         );
+    }
+
+    #[test]
+    fn a_writer_state_word_carries_the_pid_above_and_the_flag_in_bit_zero() {
+        let writing = WriterState::writing(4321);
+        assert_eq!(writing.word() >> u32::BITS, 4321);
+        assert_eq!(writing.word() & 1, 0);
+        assert_eq!(WriterState::published(4321).word() & 1, 1);
+        for state in [writing, WriterState::published(4321)] {
+            assert_eq!(WriterState::from_word(state.word()), state);
+        }
+    }
+
+    #[test]
+    fn a_cleared_writer_state_word_is_zero_and_names_nobody() {
+        assert_eq!(WriterState::default().word(), 0);
+        assert_eq!(WriterState::from_word(0), WriterState::writing(0));
+        // The bits between the pid and the flag are unused, so a word carrying them still decodes.
+        let padded = WriterState::published(7).word() | 0x0f0;
+        assert_eq!(WriterState::from_word(padded), WriterState::published(7));
     }
 
     #[test]

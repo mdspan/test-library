@@ -16,6 +16,7 @@ use crate::config::{
     duration_var, flag_var, rate_var, timestamp_var,
 };
 use crate::platform::{self, clock};
+use crate::sync;
 use crate::time::{Family, Line, Nanos, Rate};
 
 use layout::{BadHeader, Fault, Header, Keeper};
@@ -613,6 +614,9 @@ pub fn create_named(
 
     let pid = std::process::id();
     let (path, tmp) = naming::session_paths(&setup.dir, name);
+    // The lock file carries no data, so it is made here and never touched again: writers take the
+    // lock on it and readers probe it, whichever generation of the state the session file holds.
+    sync::install(&naming::lock_path(&path))?;
 
     let page = page_size();
     let len = layout::file_size(page, 0);
@@ -737,19 +741,7 @@ unsafe fn initialize(
 }
 
 fn copy_params(from: &layout::Params, to: &layout::Params) {
-    for (src, dst) in [
-        (&from.realtime, &to.realtime),
-        (&from.monotonic, &to.monotonic),
-        (&from.boottime, &to.boottime),
-    ] {
-        dst.store(src.load(), src.timebase());
-    }
-    to.cpu_rate
-        .store(from.cpu_rate.load(Ordering::Relaxed), Ordering::Relaxed);
-    to.tai_offset
-        .store(from.tai_offset.load(Ordering::Relaxed), Ordering::Relaxed);
-    to.epoch
-        .store(from.epoch.load(Ordering::Relaxed), Ordering::Relaxed);
+    to.store(&from.load());
 }
 
 /// Maps an existing session file, applying the security checks.
@@ -813,24 +805,30 @@ pub fn attach(path: &Path) -> Result<Session, SessionError> {
         len,
         path: path.to_path_buf(),
     };
-    match session.header().validate(len, platform::PLATFORM_TAG) {
-        Ok(()) => Ok(session),
-        Err(why) => Err(SessionError::BadSessionFile(why)),
+    if let Err(why) = session.header().validate(len, platform::PLATFORM_TAG) {
+        return Err(SessionError::BadSessionFile(why));
     }
+    // So this process's readers can probe the write lock. A session made by an older process
+    // always has the file; one that somehow does not gets it here.
+    sync::install(&naming::lock_path(path))?;
+    Ok(session)
 }
 
 /// What the session shows for `clock`, or `None` when the call belongs to the genuine clock.
 ///
-/// The read path: the parameter words and one genuine clock sample. No lock, no allocation,
-/// nothing written to shared memory. The seqlock read flow goes around this later; today the
-/// parameters are written once, before the file is linked into place, and never change, and
-/// attach's acquire on `ready` is what orders them ahead of every read.
+/// The read path: the seqlock's read flow around the parameter words and one genuine clock sample.
+/// No lock, no allocation, nothing written to shared memory.
 ///
-/// Dispatch is static: the keeper is an enum, so choosing costs one predictable branch.
+/// The family is settled before the flow is entered, so a clock we leave alone costs one lookup
+/// rather than a wait on a writer whose parameters it was never going to read. Dispatch is static:
+/// the keeper is an enum, so choosing costs one predictable branch.
 #[inline]
 pub fn clock_now(header: &Header, clock: libc::clockid_t) -> Option<Nanos> {
     match Keeper::from_tag(header.keeper)? {
-        Keeper::Affine => affine_now(&header.live, clock),
+        Keeper::Affine => {
+            let family = clock::family_of(clock)?;
+            sync::read(header, |params| affine_now(params, family, clock))
+        }
         // The genuine reading, which the caller reaches by letting the call through untouched.
         Keeper::Null => None,
     }
@@ -842,8 +840,8 @@ pub fn clock_now(header: &Header, clock: libc::clockid_t) -> Option<Nanos> {
 /// and the arithmetic holds for any bit pattern. A torn read is discarded by the seqlock around
 /// this, not prevented inside it.
 #[inline]
-fn affine_now(params: &layout::Params, clock: libc::clockid_t) -> Option<Nanos> {
-    match clock::family_of(clock)? {
+fn affine_now(params: &layout::Params, family: Family, clock: libc::clockid_t) -> Option<Nanos> {
+    match family {
         Family::Realtime => {
             let now = project(&params.realtime)?;
             if clock::is_tai(clock) {

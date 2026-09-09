@@ -49,6 +49,22 @@ pub unsafe fn genuine_clock_gettime(
     unimplemented!("the macOS seam")
 }
 
+/// Takes the write lock on `fd`, once this arm exists.
+///
+/// # Safety
+/// `fd` must be an open descriptor on the lock file, opened for writing.
+pub unsafe fn take_write_lock(_fd: libc::c_int) -> libc::c_int {
+    unimplemented!("the macOS seam")
+}
+
+/// Asks the kernel whether the write lock on `fd` is held, once this arm exists.
+///
+/// # Safety
+/// `fd` must be an open descriptor on the lock file and `request` a live `flock`.
+pub unsafe fn probe_write_lock(_fd: libc::c_int, _request: *mut libc::flock) -> libc::c_int {
+    unimplemented!("the macOS seam")
+}
+
 /// Fills `buf` with randomness, once this arm exists.
 ///
 /// # Errors

@@ -7,6 +7,8 @@
 //! | `OS_TAG` | The value the session header's platform field carries for this OS. |
 //! | `clock` | The clock ids of the families, the names a user writes for them, which family each id belongs to, and which id carries the TAI offset. |
 //! | `genuine_clock_gettime` | Reads a genuine clock into the caller's `timespec`, libc's convention. Async-signal-safe, and never routed through a symbol we interpose. |
+//! | `take_write_lock` | Takes the write lock on a descriptor, blocking. libc's convention. |
+//! | `probe_write_lock` | Asks the kernel whether the write lock is held, taking nothing. |
 //! | `random_bytes` | Fills a buffer with randomness, for the session name. |
 
 use crate::time::{Family, Nanos};

@@ -92,6 +92,15 @@ fn compile(name: &str, extra: &[String]) -> PathBuf {
     binary
 }
 
+/// Whether a name in the session directory is a session file. The lock file beside each one is
+/// not: it carries no data, and what the cases counting these want is how many sessions a run
+/// made.
+pub(crate) fn is_session_file(name: &std::ffi::OsStr) -> bool {
+    Path::new(name)
+        .extension()
+        .is_some_and(|suffix| suffix == "session")
+}
+
 /// One run of a target program under the library.
 pub(crate) struct Run {
     program: PathBuf,

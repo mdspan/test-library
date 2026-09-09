@@ -92,6 +92,29 @@ pub unsafe fn genuine_clock_gettime(
     libc::c_int::try_from(result).unwrap_or(-1)
 }
 
+/// Takes the write lock on `fd`: an exclusive open-file-description lock on byte 0, blocking until
+/// the current holder releases it. libc's convention, so a caller retries `EINTR` itself.
+///
+/// # Safety
+/// `fd` must be an open descriptor on the lock file, opened for writing.
+#[must_use]
+pub unsafe fn take_write_lock(fd: libc::c_int) -> libc::c_int {
+    let request = crate::sync::lock_request();
+    // Safety: the caller guarantees `fd`, and `request` is a live `flock`.
+    unsafe { libc::fcntl(fd, libc::F_OFD_SETLKW, &raw const request) }
+}
+
+/// Asks the kernel whether the write lock on `fd` is held, taking nothing. Fills `request`, which
+/// the caller has zeroed and filled with the question.
+///
+/// # Safety
+/// `fd` must be an open descriptor on the lock file and `request` a live `flock`.
+#[must_use]
+pub unsafe fn probe_write_lock(fd: libc::c_int, request: *mut libc::flock) -> libc::c_int {
+    // Safety: the caller guarantees both arguments.
+    unsafe { libc::fcntl(fd, libc::F_OFD_GETLK, request) }
+}
+
 /// Fills `buf` with randomness from the kernel.
 ///
 /// # Errors

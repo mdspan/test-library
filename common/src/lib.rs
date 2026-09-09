@@ -5,4 +5,5 @@ pub mod config;
 pub mod log;
 pub mod platform;
 pub mod session;
+pub mod sync;
 pub mod time;
