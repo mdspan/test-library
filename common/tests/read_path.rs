@@ -8,6 +8,7 @@
 #![cfg(target_os = "linux")]
 
 use std::alloc::{GlobalAlloc, Layout, System};
+use std::cell::Cell;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, PoisonError};
 
@@ -20,6 +21,14 @@ use common::time::Nanos;
 
 static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
 
+// Whether the calling thread is the one measuring. A global counter would also catch the test
+// harness's own threads reporting a result beside us, which is one stray allocation charged to
+// whichever measurement happened to be open. `Cell<bool>` has no destructor, so reading this
+// registers nothing and allocates nothing on the way.
+thread_local! {
+    static COUNTING_HERE: Cell<bool> = const { Cell::new(false) };
+}
+
 /// The counter is one word for the whole binary, so two tests measuring at once would each see the
 /// other's allocations. Taken for the length of a test, poison and all: a test that already failed
 /// should not turn the next one into a second failure.
@@ -29,14 +38,36 @@ fn measuring() -> std::sync::MutexGuard<'static, ()> {
     MEASURING.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// Counts the allocations `body` makes on this thread, and nowhere else.
+fn allocations_in(body: impl FnOnce()) -> usize {
+    COUNTING_HERE.with(|counting| counting.set(true));
+    let before = ALLOCATIONS.load(Ordering::Relaxed);
+    body();
+    let counted = ALLOCATIONS.load(Ordering::Relaxed) - before;
+    COUNTING_HERE.with(|counting| counting.set(false));
+    counted
+}
+
 struct Counting;
+
+impl Counting {
+    /// Charges an allocation to the measurement open on this thread, if there is one.
+    fn count() {
+        // A thread on its way out has already destroyed its locals; nothing there is measuring.
+        let _ = COUNTING_HERE.try_with(|counting| {
+            if counting.get() {
+                ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+            }
+        });
+    }
+}
 
 // Safety: every call forwards to the system allocator unchanged.
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         // Safety: the caller's `layout` is passed on unchanged.
         unsafe {
-            ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+            Self::count();
             System.alloc(layout)
         }
     }
@@ -49,7 +80,7 @@ unsafe impl GlobalAlloc for Counting {
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         // Safety: the caller's arguments are passed on unchanged.
         unsafe {
-            ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+            Self::count();
             System.realloc(ptr, layout, new_size)
         }
     }
@@ -81,17 +112,18 @@ fn reading_the_clock_allocates_nothing() {
     for id in clocks {
         assert!(clock_now(header, id).is_some());
     }
-    let before = ALLOCATIONS.load(Ordering::Relaxed);
-    let mut last = Nanos::ZERO;
-    for _ in 0..1_000 {
-        for id in clocks {
-            assert!(clock_now(header, id).is_some());
+    let counted = allocations_in(|| {
+        let mut last = Nanos::ZERO;
+        for _ in 0..1_000 {
+            for id in clocks {
+                assert!(clock_now(header, id).is_some());
+            }
+            let now = clock_now(header, clock::REALTIME).unwrap();
+            assert!(now >= last);
+            last = now;
         }
-        let now = clock_now(header, clock::REALTIME).unwrap();
-        assert!(now >= last);
-        last = now;
-    }
-    assert_eq!(ALLOCATIONS.load(Ordering::Relaxed), before);
+    });
+    assert_eq!(counted, 0);
 }
 
 #[test]
@@ -110,11 +142,12 @@ fn the_abandoned_writer_fallback_allocates_nothing_either() {
     header.seqlock.sequence.store(1, Ordering::Release);
 
     assert!(clock_now(header, clock::REALTIME).is_some());
-    let before = ALLOCATIONS.load(Ordering::Relaxed);
-    for _ in 0..20 {
-        assert!(clock_now(header, clock::MONOTONIC).is_some());
-    }
-    assert_eq!(ALLOCATIONS.load(Ordering::Relaxed), before);
+    let counted = allocations_in(|| {
+        for _ in 0..20 {
+            assert!(clock_now(header, clock::MONOTONIC).is_some());
+        }
+    });
+    assert_eq!(counted, 0);
 }
 
 #[test]
@@ -126,12 +159,13 @@ fn writing_a_log_line_allocates_nothing() {
 
     // Warm anything the first line might touch, then measure.
     sink.write(Level::Error, format_args!("warm"));
-    let before = ALLOCATIONS.load(Ordering::Relaxed);
-    for line in 0..1_000 {
-        sink.write(
-            Level::Error,
-            format_args!("{line}: {} for {}", "a suspected writer death", 4321),
-        );
-    }
-    assert_eq!(ALLOCATIONS.load(Ordering::Relaxed), before);
+    let counted = allocations_in(|| {
+        for line in 0..1_000 {
+            sink.write(
+                Level::Error,
+                format_args!("{line}: {} for {}", "a suspected writer death", 4321),
+            );
+        }
+    });
+    assert_eq!(counted, 0);
 }
