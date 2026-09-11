@@ -159,6 +159,20 @@ pub unsafe fn genuine_syscall(
     result
 }
 
+/// The id the kernel gives this thread.
+///
+/// What names a thread where thread-local storage cannot: a runtime that makes its own threads
+/// without libc leaves the thread pointer holding something of its own.
+///
+/// The raw system call, because libc's wrapper reports a failure in `errno`, which is the storage
+/// this exists to avoid. `gettid` cannot fail.
+#[must_use]
+pub fn thread_id() -> u64 {
+    // Safety: `gettid` takes nothing, writes nothing, and answers this thread's own id.
+    let id = unsafe { raw_syscall(libc::SYS_gettid, [0; SYSCALL_ARGS]) };
+    u64::try_from(id).unwrap_or(0)
+}
+
 /// Sets this thread's `errno`, which is how a refused call reports itself in libc's convention.
 pub fn set_errno(value: libc::c_int) {
     // Safety: `__errno_location` answers this thread's own `errno`, taking nothing.
@@ -189,6 +203,44 @@ pub unsafe fn genuine_clock_gettime(
     };
     // The syscall answers 0 or -1, so the narrowing never changes what the caller sees.
     libc::c_int::try_from(result).unwrap_or(-1)
+}
+
+/// Reads a genuine clock the way the kernel's own vDSO answers: zero, or the negative of what it
+/// refused with, with `errno` left alone.
+///
+/// The convention a vDSO entry owes its caller, which is not libc's. `errno` lives in thread-local
+/// storage, and a runtime that calls the vDSO from a thread of its own making may have none set up
+/// the way libc expects, so an entry that can be reached from there reports the refusal in its
+/// answer instead of writing anywhere.
+///
+/// # Safety
+/// `ts` must be null or valid for writes of a `timespec`.
+#[must_use]
+#[inline]
+pub unsafe fn kernel_clock_gettime(
+    clock: libc::clockid_t,
+    ts: *mut libc::timespec,
+) -> libc::c_long {
+    // Safety: the caller guarantees `ts`, and the kernel takes the clock id as it comes.
+    unsafe {
+        raw_syscall(
+            libc::SYS_clock_gettime,
+            [libc::c_long::from(clock), as_arg(ts), 0, 0, 0, 0],
+        )
+    }
+}
+
+/// Reads the genuine wall clock into a `timeval`, in the convention [`kernel_clock_gettime`]
+/// answers in and for the same reason.
+///
+/// # Safety
+/// `tv` must be null or valid for writes of a `timeval`, and `tz` null or valid for writes of a
+/// `timezone`.
+#[must_use]
+#[inline]
+pub unsafe fn kernel_gettimeofday(tv: *mut libc::timeval, tz: *mut libc::c_void) -> libc::c_long {
+    // Safety: the caller guarantees both pointers, which the kernel writes and no more.
+    unsafe { raw_syscall(libc::SYS_gettimeofday, [as_arg(tv), as_arg(tz), 0, 0, 0, 0]) }
 }
 
 /// Reads the genuine process times: the fields of `buf`, and the elapsed ticks `times(2)` answers,

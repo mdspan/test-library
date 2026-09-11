@@ -351,7 +351,7 @@ impl Hook {
     /// `*out` starts at the keeper's own answer, so a hook that reports handled without writing it
     /// hands the program the keeper's number rather than whatever the stack held.
     #[inline]
-    fn ask(&self, _held: &gate::Held, call: &Call) -> Option<Nanos> {
+    fn ask(&self, _held: &gate::Held<'_>, call: &Call) -> Option<Nanos> {
         let mut out: i64 = call.keeper;
         // Safety: the call and the output live on this stack for the length of the call, which is
         // the whole of what the ABI asks of the caller.

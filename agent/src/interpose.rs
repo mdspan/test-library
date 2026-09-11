@@ -40,7 +40,7 @@ const NO_TICKS: libc::clock_t = !0;
 /// the program called, which a hook may switch on; every clock read is the same conversion, a
 /// genuine reading into a fake one.
 #[inline]
-fn faked(func: Func, clock: libc::clockid_t) -> Option<Nanos> {
+pub(crate) fn faked(func: Func, clock: libc::clockid_t) -> Option<Nanos> {
     let keeper = clock_now(state::session()?, clock);
     state::hook().map_or(keeper, |hook| {
         hook.read_clock(func, clock, keeper).or(keeper)

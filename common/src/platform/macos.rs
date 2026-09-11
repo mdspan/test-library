@@ -42,6 +42,20 @@ pub mod clock {
     }
 }
 
+/// The id the kernel gives this thread.
+///
+/// What names a thread where thread-local storage cannot: a runtime that makes its own threads
+/// without libc leaves the thread pointer holding something of its own.
+#[must_use]
+pub fn thread_id() -> u64 {
+    let mut id: u64 = 0;
+    // Safety: a null thread names the calling one, and the id lands in a live word.
+    if unsafe { libc::pthread_threadid_np(0, &raw mut id) } != 0 {
+        return 0;
+    }
+    id
+}
+
 /// Reads a genuine clock, once this arm exists.
 ///
 /// # Safety

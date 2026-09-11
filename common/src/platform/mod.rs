@@ -13,6 +13,7 @@
 //! | `may_set_the_clock` | Whether the kernel would let this process set the clock genuinely. |
 //! | `ADJTIME_SECONDS` | The widest delta the platform's own `adjtime` takes before it refuses. |
 //! | `set_errno` | Sets this thread's `errno`, which is how a refused call reports itself. |
+//! | `thread_id` | The id the kernel gives the calling thread, taking no thread-local storage to answer. |
 //! | `take_write_lock` | Takes the write lock on a descriptor, blocking. libc's convention. |
 //! | `probe_write_lock` | Asks the kernel whether the write lock is held, taking nothing. |
 //! | `random_bytes` | Fills a buffer with randomness, for the session name. |
@@ -21,7 +22,9 @@
 //! loader answers it the same way on all three platforms.
 //!
 //! An arm may hold more than the table: Linux also supplies `genuine_syscall`, because `syscall()`
-//! is one of the calls we take over there, and only that arm's interposers name it.
+//! is one of the calls we take over there, and only that arm's interposers name it, and
+//! `kernel_clock_gettime` with `kernel_gettimeofday`, which answer in the convention a vDSO entry
+//! owes its caller in place of libc's.
 
 use std::ffi::{c_char, c_void};
 use std::ptr::NonNull;

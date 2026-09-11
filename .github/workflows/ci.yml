@@ -33,6 +33,12 @@ jobs:
       - name: Install the toolchain rust-toolchain.toml pins
         run: rustup toolchain install
 
+      # The Go cases run a real Go runtime against the synthetic vDSO, which is the target the
+      # whole mechanism exists for. Without a toolchain they skip themselves and say so.
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
       # The cases that set the clock want CAP_SYS_TIME, which an ordinary user holds inside a user
       # namespace of their own. Ubuntu 24.04 restricts unprivileged namespaces by default; without
       # this those cases check the refusal and leave the move unexercised. Older images have no
@@ -48,6 +54,11 @@ jobs:
 
       - name: Clippy
         run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+
+      # The arm that says the vDSO is not in this build is the one no other job compiles, since
+      # every other one turns every feature on.
+      - name: Clippy without the vdso feature
+        run: cargo clippy --locked -p agent --no-default-features --all-targets -- -D warnings
 
       - name: Test
         shell: bash

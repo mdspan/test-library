@@ -20,29 +20,59 @@ static LIBRARY: OnceLock<PathBuf> = OnceLock::new();
 
 pub(crate) fn library() -> PathBuf {
     LIBRARY
-        .get_or_init(|| {
-            let dir = target_dir();
-            let mut cargo =
-                Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
-            cargo
-                .args(["build", "-p", "agent"])
-                .current_dir(env!("CARGO_MANIFEST_DIR"))
-                .env_remove("CARGO_MAKEFLAGS");
-            if dir.ends_with("release") {
-                cargo.arg("--release");
-            }
-            let status = cargo.status().expect("cargo builds the library under test");
-            assert!(status.success(), "building the library under test");
+        .get_or_init(|| build_library(&[], &target_dir()))
+        .clone()
+}
 
-            let path = dir.join(format!(
-                "{}timewarp{}",
-                std::env::consts::DLL_PREFIX,
-                std::env::consts::DLL_SUFFIX
-            ));
-            assert!(path.exists(), "{} was not built", path.display());
-            path
+static LIBRARY_WITHOUT_VDSO: OnceLock<PathBuf> = OnceLock::new();
+
+/// The same library, built without the `vdso` feature, so a case can run a target under a build
+/// that cannot pose as the vDSO at all.
+///
+/// A target directory of its own, because the two builds differ only in their features and would
+/// otherwise take turns overwriting one library.
+pub(crate) fn library_without_vdso() -> PathBuf {
+    LIBRARY_WITHOUT_VDSO
+        .get_or_init(|| {
+            let dir = target_dir().join("timewarp-tests/no-vdso");
+            let profile = if target_dir().ends_with("release") {
+                "release"
+            } else {
+                "debug"
+            };
+            build_library(
+                &[
+                    "--no-default-features",
+                    "--target-dir",
+                    &dir.to_string_lossy(),
+                ],
+                &dir.join(profile),
+            )
         })
         .clone()
+}
+
+/// Builds the library under test into `into`, with `extra` on the cargo command line.
+fn build_library(extra: &[&str], into: &Path) -> PathBuf {
+    let mut cargo = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
+    cargo
+        .args(["build", "-p", "agent"])
+        .args(extra)
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .env_remove("CARGO_MAKEFLAGS");
+    if target_dir().ends_with("release") {
+        cargo.arg("--release");
+    }
+    let status = cargo.status().expect("cargo builds the library under test");
+    assert!(status.success(), "building the library under test");
+
+    let path = into.join(format!(
+        "{}timewarp{}",
+        std::env::consts::DLL_PREFIX,
+        std::env::consts::DLL_SUFFIX
+    ));
+    assert!(path.exists(), "{} was not built", path.display());
+    path
 }
 
 static COMPILE: Mutex<()> = Mutex::new(());
@@ -128,6 +158,48 @@ fn compile(name: &str, extra: &[String]) -> PathBuf {
         &target_dir().join("timewarp-tests").join(name),
         extra,
     )
+}
+
+/// Compiles `agent/tests/progs/<name>.go` into a dynamically linked Go program, or `None` when
+/// this machine has no Go toolchain to build one with.
+///
+/// A position-independent executable with cgo enabled, because that is the Go binary the library
+/// can reach at all: it has an interpreter, so the loader runs and our constructor with it. The
+/// runtime inside still skips libc for every clock it reads, which is the point of running one.
+#[expect(
+    clippy::print_stderr,
+    reason = "a machine with no Go says the cases went unexercised, rather than passing quietly"
+)]
+pub(crate) fn go_program(name: &str) -> Option<PathBuf> {
+    let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/progs")
+        .join(format!("{name}.go"));
+    let binary = target_dir().join("timewarp-tests").join(name);
+    let out_dir = binary.parent().expect("a binary sits in a directory");
+
+    let _guard = COMPILE.lock().unwrap();
+    std::fs::create_dir_all(out_dir).unwrap();
+    let fresh = std::fs::metadata(&binary)
+        .and_then(|b| Ok(b.modified()? >= std::fs::metadata(&source)?.modified()?))
+        .unwrap_or(false);
+    if fresh {
+        return Some(binary);
+    }
+    let built = Command::new("go")
+        .args(["build", "-buildmode=pie", "-o"])
+        .arg(&binary)
+        .arg(&source)
+        .env("CGO_ENABLED", "1")
+        .env("GOCACHE", out_dir.join("gocache"))
+        .status();
+    match built {
+        Ok(status) if status.success() => Some(binary),
+        // A machine with no Go checks nothing here rather than failing the suite.
+        _ => {
+            eprintln!("no working go on this machine, so the Go cases went unexercised");
+            None
+        }
+    }
 }
 
 /// Compiles `source` into `binary`, once per test run, unless the binary is already newer.
@@ -232,6 +304,7 @@ pub(crate) struct Run {
     args: Vec<String>,
     env: BTreeMap<String, String>,
     preload: bool,
+    library: Option<PathBuf>,
     session_dir: Option<PathBuf>,
     through: Vec<String>,
 }
@@ -243,6 +316,7 @@ impl Run {
             args: Vec::new(),
             env: BTreeMap::new(),
             preload: true,
+            library: None,
             session_dir: None,
             through: Vec::new(),
         }
@@ -272,6 +346,12 @@ impl Run {
     /// Runs without the library, for a genuine reading to compare against.
     pub(crate) const fn without_library(mut self) -> Self {
         self.preload = false;
+        self
+    }
+
+    /// Runs under a build of the library other than the default one.
+    pub(crate) fn under_library(mut self, library: PathBuf) -> Self {
+        self.library = Some(library);
         self
     }
 
@@ -316,7 +396,7 @@ impl Run {
             .env_clear()
             .env("PATH", "/usr/bin:/bin");
         if self.preload {
-            command.env("LD_PRELOAD", library());
+            command.env("LD_PRELOAD", self.library.clone().unwrap_or_else(library));
         }
         if let Some(dir) = &self.session_dir {
             command.env("LIBTIMEWARP_SESSION_DIR", dir);

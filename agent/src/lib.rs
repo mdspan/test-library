@@ -15,13 +15,15 @@ mod state;
 // calls and the `clockwait` pair have no shape the three platforms share, and the other two answer
 // a wait with `kevent` and `mach_wait_until` besides, so each brings its own with its arm. The
 // file timestamps reach the genuine functions through that same Linux list, and `statx` and the
-// `64` names are Linux's, so they sit here with them.
+// `64` names are Linux's, so they sit here with them. The synthetic vDSO is Linux's own mechanism;
+// FreeBSD catches the same targets with a page of numbers instead.
 cfg_if::cfg_if! {
     if #[cfg(target_os = "linux")] {
         mod clocks;
         mod genuine;
         mod stamp;
         mod timer;
+        mod vdso;
         mod wait;
     }
 }
@@ -60,6 +62,11 @@ fn constructor() {
     // loader's own lock, and this is the one moment where nothing of the program's is holding it.
     #[cfg(target_os = "linux")]
     genuine::prime();
+    // The auxiliary vector, before the environment it sits behind can be moved: `publish` below
+    // writes one of ours, and a libc that grows the environment moves it off the stack the vector
+    // is on.
+    #[cfg(target_os = "linux")]
+    vdso::prime();
     // We are inside somebody else's program before its `main`. A panic here would abort a process
     // that has done nothing wrong, so the worst case is that the target runs on genuine time.
     drop(std::panic::catch_unwind(attach_or_create));
@@ -118,6 +125,10 @@ fn install(session: session::Session) {
     let lock_file = naming::lock_path(session.path());
     let (header, hook) = session.leak();
     state::install(header, hook, lock_file);
+    // After the session, so a target that finds the synthetic vDSO and calls straight into it
+    // reads the session rather than genuine time.
+    #[cfg(target_os = "linux")]
+    vdso::install(header);
 }
 
 /// Joins the session this process inherited, loading the hook it names.
