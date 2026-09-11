@@ -268,7 +268,7 @@ fn set_mask(mask: &libc::sigset_t) {
 }
 
 #[test]
-fn the_kernel_reports_the_write_lock_held_only_while_a_writer_holds_it() {
+fn the_probe_reports_the_write_lock_held_only_while_a_writer_holds_it() {
     let _one = one_at_a_time();
     let fixture = fixture().unwrap();
     assert_eq!(probe_held(), Some(false));
@@ -278,6 +278,23 @@ fn the_kernel_reports_the_write_lock_held_only_while_a_writer_holds_it() {
 
     drop(lock);
     assert_eq!(probe_held(), Some(false));
+}
+
+#[test]
+fn a_process_holding_the_write_lock_never_asks_the_kernel_about_it() {
+    let _one = one_at_a_time();
+    let fixture = fixture().unwrap();
+    let lock = WriteLock::acquire(&fixture.lock_path()).unwrap();
+
+    // With the file gone there is nothing to open, so an answer at all could only have come from
+    // this process's own state. FreeBSD's probe reports the byte held to its holder too, which is
+    // why a holder never asks.
+    std::fs::remove_file(fixture.lock_path()).unwrap();
+    assert_eq!(probe_held(), Some(true));
+
+    // And once it is not the holder, the question is the kernel's again: no file, no answer.
+    drop(lock);
+    assert_eq!(probe_held(), None);
 }
 
 #[test]

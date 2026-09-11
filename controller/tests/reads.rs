@@ -3,7 +3,7 @@
 //!
 //! Creating a session reads a genuine clock and the system's randomness, so these cases need a
 //! filled-in platform arm.
-#![cfg(target_os = "linux")]
+#![cfg(any(target_os = "linux", target_os = "freebsd"))]
 #![expect(
     dead_code,
     reason = "test support: not every helper of the shared fixture is used by every case"
@@ -23,7 +23,7 @@ use common::session::{self, Setup};
 use common::time::{Family, Nanos, Rate};
 use controller::{Code, Controller, Error};
 
-use fixture::{HOUR, SECOND, fixture, fixture_on, genuine, one_at_a_time};
+use fixture::{HOUR, SECOND, fixture, fixture_on, genuine, one_at_a_time, timebase_of};
 
 /// How far apart two readings of the same clock taken a few instructions apart may be before the
 /// answer is something other than "now". Generous: the budget is what a failure runs out of.
@@ -44,8 +44,8 @@ fn get_answers_what_the_family_shows_now() {
 
     for (family, clock) in [
         (Family::Realtime, clock::REALTIME),
-        (Family::Monotonic, clock::MONOTONIC),
-        (Family::Boottime, clock::BOOTTIME),
+        (Family::Monotonic, timebase_of(Family::Monotonic)),
+        (Family::Boottime, timebase_of(Family::Boottime)),
     ] {
         let showing = fixture.controller.get(family).unwrap();
         near(showing, fixture.showing(clock));
@@ -70,12 +70,12 @@ fn get_follows_a_transaction() {
     );
     near(
         fixture.controller.get(Family::Boottime).unwrap(),
-        Nanos(genuine(clock::BOOTTIME).0 + HOUR),
+        Nanos(genuine(timebase_of(Family::Boottime)).0 + HOUR),
     );
     // Untouched, so still on its own genuine clock.
     near(
         fixture.controller.get(Family::Monotonic).unwrap(),
-        genuine(clock::MONOTONIC),
+        genuine(timebase_of(Family::Monotonic)),
     );
 }
 
@@ -140,7 +140,10 @@ fn info_reports_the_rate_and_timebase_a_transaction_left() {
     assert_eq!(info.boottime.rate, Rate::UNITY);
     // A rate change moves no timebase.
     assert_eq!(info.realtime.timebase, Some(clock::REALTIME));
-    assert_eq!(info.monotonic.timebase, Some(clock::MONOTONIC));
+    assert_eq!(
+        info.monotonic.timebase,
+        Some(timebase_of(Family::Monotonic))
+    );
 }
 
 #[test]
@@ -152,8 +155,8 @@ fn a_null_session_reads_and_reports_and_takes_no_change() {
     // processes.
     for (family, clock) in [
         (Family::Realtime, clock::REALTIME),
-        (Family::Monotonic, clock::MONOTONIC),
-        (Family::Boottime, clock::BOOTTIME),
+        (Family::Monotonic, timebase_of(Family::Monotonic)),
+        (Family::Boottime, timebase_of(Family::Boottime)),
     ] {
         near(fixture.controller.get(family).unwrap(), genuine(clock));
     }

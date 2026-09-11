@@ -11,9 +11,9 @@ mod lock;
 mod read;
 mod write;
 
-pub use lock::{WriteLock, install, lock_request, probe_held};
+pub use lock::{WriteLock, create, install, lock_request, probe_held};
 pub use read::{READ_PATIENCE_NS, read};
 pub use write::{Anchor, WRITE_SETTLE_NS, begin};
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(all(test, any(target_os = "linux", target_os = "freebsd")))]
 mod tests;

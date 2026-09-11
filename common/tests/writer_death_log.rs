@@ -5,7 +5,7 @@
 //!
 //! Creating a session reads a genuine clock and the system's randomness, so this needs a
 //! filled-in platform arm.
-#![cfg(target_os = "linux")]
+#![cfg(any(target_os = "linux", target_os = "freebsd"))]
 
 use std::sync::atomic::Ordering;
 

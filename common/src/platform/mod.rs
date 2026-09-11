@@ -5,7 +5,9 @@
 //! | Item | Contract |
 //! |---|---|
 //! | `OS_TAG` | The value the session header's platform field carries for this OS. |
+//! | `HAS_TIMEKEEP_PAGE` | Whether Go reads the clock here from a page of kernel parameters, so a session that poses as that page keeps an updater and a lease file. |
 //! | `clock` | The clock ids of the families, the names a user writes for them, which family each id belongs to, and which id carries the TAI offset. |
+//! | `default_timebase` | The first clock in a family's column of the family table. FreeBSD answers from the running kernel, because the names crossed over at 15.0. |
 //! | `genuine_clock_gettime` | Reads a genuine clock into the caller's `timespec`, libc's convention. Async-signal-safe, and never routed through a symbol we interpose. |
 //! | `genuine_times` | Reads the genuine `tms` and the elapsed ticks `times` answers, libc's convention. Never routed through a symbol we interpose. |
 //! | `genuine_getrusage` | Reads the genuine `rusage` of a target, libc's convention. Never routed through a symbol we interpose. |
@@ -72,24 +74,10 @@ pub fn clock_id<U, T: TryFrom<U> + Default>(value: U) -> T {
     T::try_from(value).unwrap_or_default()
 }
 
-/// The first clock in the family's column of the family table.
-///
-/// A family's zero always comes from it, and with no override it is the timebase too. Cpu has
-/// none, because each of its clocks tracks passage through its own reading.
-#[must_use]
-pub const fn default_timebase(family: Family) -> Option<libc::clockid_t> {
-    match family {
-        Family::Realtime => Some(clock::REALTIME),
-        Family::Monotonic => Some(clock::MONOTONIC),
-        Family::Boottime => Some(clock::BOOTTIME),
-        Family::Cpu => None,
-    }
-}
-
 /// The clock id a user's timebase name refers to.
 #[must_use]
 pub fn clock_named(name: &str) -> Option<libc::clockid_t> {
-    clock::NAMED
+    clock::named()
         .iter()
         .find(|(known, _)| *known == name)
         .map(|&(_, id)| id)
@@ -160,21 +148,31 @@ pub fn genuine_nanos(clock: libc::clockid_t) -> Option<Nanos> {
     Some(Nanos::from_timespec(&ts))
 }
 
-// Only Linux has a filled-in arm to read.
-#[cfg(all(test, target_os = "linux"))]
+// The two arms that are filled in. Each also carries the cases for its own family table.
+#[cfg(all(test, any(target_os = "linux", target_os = "freebsd")))]
 mod tests {
     use std::io;
 
     use super::*;
 
-    #[test]
-    fn the_genuine_clocks_read() {
-        assert!(genuine_nanos(clock::REALTIME).unwrap() > Nanos(1_700_000_000 * Nanos::SECOND));
-        let monotonic = genuine_nanos(clock::MONOTONIC).unwrap();
-        assert!(monotonic >= Nanos::ZERO);
-        assert!(genuine_nanos(clock::BOOTTIME).unwrap() >= monotonic);
+    /// The three clocks a family's line starts on, which is what a portable case can name. Only
+    /// Cpu has none, and the case below is what holds that to be so.
+    fn family_clocks() -> [libc::clockid_t; 3] {
+        [Family::Realtime, Family::Monotonic, Family::Boottime]
+            .map(|family| default_timebase(family).unwrap_or(clock::REALTIME))
     }
 
+    #[test]
+    fn the_genuine_clocks_read() {
+        let [realtime, monotonic, boottime] = family_clocks();
+        assert!(genuine_nanos(realtime).unwrap() > Nanos(1_700_000_000 * Nanos::SECOND));
+        let elapsed = genuine_nanos(monotonic).unwrap();
+        assert!(elapsed >= Nanos::ZERO);
+        // Read second, and counting at least as much, so it can only be at or above the first.
+        assert!(genuine_nanos(boottime).unwrap() >= elapsed);
+    }
+
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_call_by_number_answers_the_way_libc_would() {
         // Safety: `getpid` takes no argument and touches nothing of ours.
@@ -236,8 +234,10 @@ mod tests {
     #[test]
     fn an_unknown_clock_id_fails_rather_than_lying() {
         assert_eq!(genuine_nanos(0x7fff_ffff), None);
+        assert_eq!(clock::family_of(0x7fff_ffff), None);
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn the_family_table_places_every_clock_of_the_linux_column() {
         for (id, family) in [
@@ -259,10 +259,13 @@ mod tests {
 
     #[test]
     fn every_named_clock_belongs_to_a_family_and_reads() {
-        // The two alarm clocks need CAP_WAKE_ALARM; without it the kernel refuses the id outright,
-        // so a reading is only demanded of the clocks any process may ask.
+        // Linux's two alarm clocks need CAP_WAKE_ALARM; without it the kernel refuses the id
+        // outright, so a reading is only demanded of the clocks any process may ask.
+        #[cfg(target_os = "linux")]
         let capability_gated = [clock::REALTIME_ALARM, clock::BOOTTIME_ALARM];
-        for &(name, id) in clock::NAMED {
+        #[cfg(not(target_os = "linux"))]
+        let capability_gated: [libc::clockid_t; 0] = [];
+        for &(name, id) in clock::named() {
             assert_eq!(clock_named(name), Some(id));
             assert!(clock::family_of(id).is_some(), "{name}");
             if !capability_gated.contains(&id) {
@@ -272,6 +275,7 @@ mod tests {
         assert_eq!(clock_named("CLOCK_YESTERDAY"), None);
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn the_clocks_that_measure_the_outside_world_pass_through() {
         // Dynamic clocks and the ids `clock_getcpuclockid` hands out are encoded below zero.
@@ -282,38 +286,26 @@ mod tests {
 
     #[test]
     fn only_the_realtime_family_may_track_the_wall_clock() {
-        assert!(timebase_allowed(Family::Realtime, clock::REALTIME));
-        assert!(!timebase_allowed(Family::Monotonic, clock::REALTIME));
-        assert!(!timebase_allowed(Family::Boottime, clock::REALTIME));
-        // And no family may track another wall clock, or a Cpu clock, or an unknown id.
+        let [realtime, monotonic, boottime] = family_clocks();
+        assert!(timebase_allowed(Family::Realtime, realtime));
+        assert!(!timebase_allowed(Family::Monotonic, realtime));
+        assert!(!timebase_allowed(Family::Boottime, realtime));
+        // And no family may track a Cpu clock or an unknown id, while every clock that measures
+        // elapsed time serves every family.
         for family in Family::ALL {
-            assert!(!timebase_allowed(family, clock::REALTIME_COARSE));
-            assert!(!timebase_allowed(family, clock::TAI));
             assert!(!timebase_allowed(family, clock::PROCESS_CPUTIME));
-            assert!(!timebase_allowed(family, -4));
+            assert!(!timebase_allowed(family, 0x7fff_ffff));
+            assert!(timebase_allowed(family, monotonic));
+            assert!(timebase_allowed(family, boottime));
         }
     }
 
     #[test]
-    fn every_monotonic_and_boottime_clock_serves_every_family() {
-        for family in Family::ALL {
-            for id in [
-                clock::MONOTONIC,
-                clock::MONOTONIC_COARSE,
-                clock::MONOTONIC_RAW,
-                clock::BOOTTIME,
-                clock::BOOTTIME_ALARM,
-            ] {
-                assert!(timebase_allowed(family, id), "{family} against {id}");
-            }
+    fn a_family_tracks_a_clock_of_its_own_and_cpu_tracks_none() {
+        for family in [Family::Realtime, Family::Monotonic, Family::Boottime] {
+            let timebase = default_timebase(family).unwrap();
+            assert_eq!(clock::family_of(timebase), Some(family), "{family}");
         }
-    }
-
-    #[test]
-    fn a_family_defaults_to_the_first_clock_of_its_column() {
-        assert_eq!(default_timebase(Family::Realtime), Some(clock::REALTIME));
-        assert_eq!(default_timebase(Family::Monotonic), Some(clock::MONOTONIC));
-        assert_eq!(default_timebase(Family::Boottime), Some(clock::BOOTTIME));
         // Cpu tracks passage through each clock's own reading, so it has none.
         assert_eq!(default_timebase(Family::Cpu), None);
     }

@@ -506,7 +506,7 @@ mod tests {
 /// The dispatch itself, against a hook in this process rather than one on disk.
 ///
 /// Reading a genuine clock needs a filled-in platform arm, so these cases apply where there is one.
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(all(test, any(target_os = "linux", target_os = "freebsd")))]
 mod answering {
     use std::cell::Cell;
 

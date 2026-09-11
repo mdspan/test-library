@@ -14,14 +14,33 @@ fn setup_in(dir: &Path) -> Setup {
     Setup::plain(dir.join("libtimewarp"))
 }
 
+/// The clock a family tracks by default here. FreeBSD picks between two columns of the family
+/// table by the running kernel's version, so a case that names a family's clock asks for it rather
+/// than spelling it.
+fn timebase_of(family: Family) -> libc::clockid_t {
+    platform::default_timebase(family).unwrap_or(clock::REALTIME)
+}
+
+fn monotonic() -> libc::clockid_t {
+    timebase_of(Family::Monotonic)
+}
+
+fn boottime() -> libc::clockid_t {
+    timebase_of(Family::Boottime)
+}
+
 /// Genuine readings a plan can be built against without waiting for a clock.
-const fn readings(clock: libc::clockid_t) -> Option<Nanos> {
-    match clock {
-        clock::REALTIME => Some(Nanos(1_700_000_000 * Nanos::SECOND)),
-        clock::TAI => Some(Nanos(1_700_000_037 * Nanos::SECOND)),
-        clock::MONOTONIC => Some(Nanos(3_600 * Nanos::SECOND)),
-        clock::BOOTTIME => Some(Nanos(7_200 * Nanos::SECOND)),
-        _ => None,
+fn readings(clock: libc::clockid_t) -> Option<Nanos> {
+    if clock == clock::REALTIME {
+        Some(Nanos(1_700_000_000 * Nanos::SECOND))
+    } else if clock == clock::TAI {
+        Some(Nanos(1_700_000_037 * Nanos::SECOND))
+    } else if clock == monotonic() {
+        Some(Nanos(3_600 * Nanos::SECOND))
+    } else if clock == boottime() {
+        Some(Nanos(7_200 * Nanos::SECOND))
+    } else {
+        None
     }
 }
 
@@ -64,7 +83,9 @@ fn a_directory_anyone_can_write_is_refused() {
 #[test]
 fn creation_leaves_one_whole_session_file_and_its_lock_and_no_temporary() {
     let tmp = tempfile::tempdir().unwrap();
-    let setup = setup_in(tmp.path());
+    let mut setup = setup_in(tmp.path());
+    // The page off, so the write lock's file is the only one beside the session on every platform.
+    setup.emulate_vdso = false;
     let session = create(&setup).unwrap();
 
     let mut names: Vec<String> = fs::read_dir(&setup.dir)
@@ -80,6 +101,48 @@ fn creation_leaves_one_whole_session_file_and_its_lock_and_no_temporary() {
     );
     // The lock file sits beside the session file under the same name, and nothing else is left.
     assert_eq!(names, vec![format!("{stem}.lock"), name.into_owned()]);
+}
+
+#[test]
+fn the_lease_file_belongs_to_a_session_with_the_timekeep_page_on() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut setup = setup_in(tmp.path());
+    setup.emulate_vdso = true;
+    let with_page = create(&setup).unwrap();
+
+    // The lease is the updater's, and an updater keeps a timekeep page fresh, so only a platform
+    // that has such a page has one.
+    assert!(naming::lock_path(with_page.path()).exists());
+    assert_eq!(
+        naming::lease_path(with_page.path()).exists(),
+        platform::HAS_TIMEKEEP_PAGE
+    );
+
+    setup.emulate_vdso = false;
+    let without_page = create(&setup).unwrap();
+    assert!(naming::lock_path(without_page.path()).exists());
+    assert!(!naming::lease_path(without_page.path()).exists());
+}
+
+#[test]
+fn a_lock_file_is_private_to_us() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut setup = setup_in(tmp.path());
+    setup.emulate_vdso = true;
+    let session = create(&setup).unwrap();
+
+    // A wider mode would let another user take a shared lock on one and block every writer for
+    // good, and every reader that probes one is its owner by the security checks.
+    for beside in [
+        naming::lock_path(session.path()),
+        naming::lease_path(session.path()),
+    ] {
+        if !beside.exists() {
+            continue;
+        }
+        let mode = fs::metadata(&beside).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "{}", beside.display());
+    }
 }
 
 #[test]
@@ -128,8 +191,8 @@ fn every_family_starts_on_its_own_default_timebase() {
 
     for (line, timebase) in [
         (&params.realtime, clock::REALTIME),
-        (&params.monotonic, clock::MONOTONIC),
-        (&params.boottime, clock::BOOTTIME),
+        (&params.monotonic, monotonic()),
+        (&params.boottime, boottime()),
     ] {
         assert_eq!(line.timebase(), timebase);
         assert_eq!(line.load().rate, Rate::UNITY);
@@ -291,14 +354,21 @@ fn a_file_from_another_platform_is_refused() {
     let path = session.path().to_path_buf();
     drop(session);
 
+    // The tag another supported OS would have written on this architecture. It says which OS's
+    // clock ids the parameters carry, so the same numbers name different clocks under it.
+    let elsewhere = if platform::OS_TAG == 1 { 2 } else { 1 };
     let mut bytes = fs::read(&path).unwrap();
-    bytes[12..16].copy_from_slice(&(platform::PLATFORM_TAG ^ 0xffff).to_ne_bytes());
+    bytes[12..16].copy_from_slice(&((elsewhere << 16) | platform::ARCH_TAG).to_ne_bytes());
     fs::write(&path, bytes).unwrap();
 
     let err = attach(&path).unwrap_err();
     assert!(
         matches!(err, SessionError::BadSessionFile(BadHeader::Platform)),
         "{err:?}"
+    );
+    assert!(
+        path.exists(),
+        "the file we could not read must be left for the user to delete"
     );
 }
 
@@ -477,17 +547,31 @@ fn a_family_variable_wins_over_the_bare_one() {
     assert_eq!(setup.cpu_rate, Rate::from_f64(2.0).unwrap());
 }
 
+/// Two clock names this platform's table carries, neither of them a family's default: one for
+/// Realtime to track and one for Monotonic, both of them clocks that measure elapsed time.
+#[cfg(target_os = "linux")]
+const OVERRIDE_NAMES: (&str, &str) = ("CLOCK_BOOTTIME", "CLOCK_MONOTONIC_RAW");
+#[cfg(not(target_os = "linux"))]
+const OVERRIDE_NAMES: (&str, &str) = ("CLOCK_BOOTTIME", "CLOCK_MONOTONIC_PRECISE");
+
 #[test]
 fn a_timebase_override_is_taken_by_name() {
+    let (for_realtime, for_monotonic) = OVERRIDE_NAMES;
     let setup = setup_from(&[
-        (ENV_REALTIME_TIMEBASE, "CLOCK_BOOTTIME"),
-        (ENV_MONOTONIC_TIMEBASE, "CLOCK_MONOTONIC_RAW"),
+        (ENV_REALTIME_TIMEBASE, for_realtime),
+        (ENV_MONOTONIC_TIMEBASE, for_monotonic),
     ])
     .unwrap();
-    assert_eq!(setup.realtime.timebase, clock::BOOTTIME);
-    assert_eq!(setup.monotonic.timebase, clock::MONOTONIC_RAW);
+    assert_eq!(
+        setup.realtime.timebase,
+        platform::clock_named(for_realtime).unwrap()
+    );
+    assert_eq!(
+        setup.monotonic.timebase,
+        platform::clock_named(for_monotonic).unwrap()
+    );
     // The one with no override keeps the first clock of its column.
-    assert_eq!(setup.boottime.timebase, clock::BOOTTIME);
+    assert_eq!(setup.boottime.timebase, boottime());
 }
 
 #[test]
@@ -564,7 +648,7 @@ fn a_plan_anchors_each_family_on_its_default_timebase() {
 #[test]
 fn an_override_changes_where_passage_comes_from_and_leaves_the_zero_alone() {
     let mut setup = setup_in(Path::new("/d"));
-    setup.realtime.timebase = clock::BOOTTIME;
+    setup.realtime.timebase = boottime();
     let plan = setup.plan(&readings).unwrap();
 
     assert_eq!(
@@ -657,14 +741,29 @@ fn every_family_reads_the_line_the_setup_asked_for() {
     setup.realtime.rate = Rate::FROZEN;
     setup.monotonic.rate = Rate::from_f64(10.0).unwrap();
     setup.cpu_rate = Rate::from_f64(4.0).unwrap();
-    setup.boottime.timebase = clock::MONOTONIC;
+    setup.boottime.timebase = monotonic();
     let session = create(&setup).unwrap();
     let params = &session.header().live;
 
     assert_eq!(params.realtime.load().rate, Rate::FROZEN);
     assert_eq!(params.monotonic.load().rate, Rate::from_f64(10.0).unwrap());
-    assert_eq!(params.boottime.timebase(), clock::MONOTONIC);
+    assert_eq!(params.boottime.timebase(), monotonic());
     assert_eq!(params.cpu_rate.load(Ordering::Relaxed), setup.cpu_rate.0);
+}
+
+/// Every clock of each family that carries a line, from this platform's own column of the family
+/// table. TAI is left out: it reads the Realtime line plus an offset, which the case below is for.
+fn family_groups() -> Vec<Vec<libc::clockid_t>> {
+    [Family::Realtime, Family::Monotonic, Family::Boottime]
+        .iter()
+        .map(|&family| {
+            clock::named()
+                .iter()
+                .map(|&(_, id)| id)
+                .filter(|&id| clock::family_of(id) == Some(family) && !clock::is_tai(id))
+                .collect()
+        })
+        .collect()
 }
 
 #[test]
@@ -673,19 +772,8 @@ fn every_clock_of_a_family_reads_the_family_value() {
     let session = create(&setup_in(tmp.path())).unwrap();
     let header = session.header();
 
-    for group in [
-        vec![
-            clock::REALTIME,
-            clock::REALTIME_COARSE,
-            clock::REALTIME_ALARM,
-        ],
-        vec![
-            clock::MONOTONIC,
-            clock::MONOTONIC_COARSE,
-            clock::MONOTONIC_RAW,
-        ],
-        vec![clock::BOOTTIME, clock::BOOTTIME_ALARM],
-    ] {
+    for group in family_groups() {
+        assert!(group.len() > 1, "{group:?} is not a group");
         let readings: Vec<i64> = group
             .iter()
             .map(|&id| clock_now(header, id).unwrap().0)
@@ -741,7 +829,7 @@ fn an_amount_of_consumed_cpu_scales_by_the_cpu_rate() {
     }
     // A clock of any other family has no such amount to convert, and neither has one we leave
     // alone: the reading of those comes from the clock itself.
-    for id in [clock::REALTIME, clock::MONOTONIC, clock::BOOTTIME, -4] {
+    for id in [clock::REALTIME, monotonic(), boottime(), -4] {
         assert_eq!(cpu_scaled(header, id, Nanos(250)), None, "{id}");
     }
 }
@@ -772,7 +860,7 @@ fn a_timer_query_converts_the_genuine_remaining_into_the_familys_own_units() {
     // units, which is what it armed the timer for.
     let tenth = Nanos(Nanos::SECOND / 10);
     assert_eq!(
-        timer_remaining(header, clock::MONOTONIC, tenth),
+        timer_remaining(header, monotonic(), tenth),
         Some(Nanos(Nanos::SECOND))
     );
     // The Realtime family is left at real speed here, so its timers count down as they were armed.
@@ -797,7 +885,7 @@ fn a_disarmed_timer_has_nothing_left_and_an_armed_one_never_has_nothing() {
 
     // Zero is what a disarmed timer reports, on any rate at all, so it converts to itself rather
     // than to the duration a frozen family owes.
-    for clock in [clock::MONOTONIC, clock::REALTIME] {
+    for clock in [monotonic(), clock::REALTIME] {
         assert_eq!(
             timer_remaining(header, clock, Nanos::ZERO),
             Some(Nanos::ZERO)
@@ -806,7 +894,7 @@ fn a_disarmed_timer_has_nothing_left_and_an_armed_one_never_has_nothing() {
     // A frozen family's clock never advances, so a timer still armed under it is owed every
     // nanosecond we can name.
     assert_eq!(
-        timer_remaining(header, clock::MONOTONIC, Nanos(1)),
+        timer_remaining(header, monotonic(), Nanos(1)),
         Some(Nanos(i64::MAX))
     );
     // And the slowest rate there is leaves a timer with the nanosecond that says it is armed,
@@ -951,7 +1039,7 @@ fn a_null_session_leaves_a_timers_remaining_alone() {
     let session = create(&setup).unwrap();
 
     assert_eq!(
-        timer_remaining(session.header(), clock::MONOTONIC, Nanos(250)),
+        timer_remaining(session.header(), monotonic(), Nanos(250)),
         None
     );
 }
@@ -975,7 +1063,7 @@ fn the_null_keeper_hands_every_clock_back_to_the_genuine_call() {
     let session = create(&setup).unwrap();
     let header = session.header();
 
-    for id in [clock::REALTIME, clock::MONOTONIC, clock::PROCESS_CPUTIME] {
+    for id in [clock::REALTIME, monotonic(), clock::PROCESS_CPUTIME] {
         assert_eq!(clock_now(header, id), None, "{id}");
     }
     // No seqlock read and no write section: the words the write flow uses are as the creator left
@@ -996,8 +1084,8 @@ fn a_null_session_publishes_the_genuine_parameters_it_never_reads() {
     assert!(header.creation_time > 1_700_000_000 * Nanos::SECOND);
     for (line, timebase) in [
         (&header.live.realtime, clock::REALTIME),
-        (&header.live.monotonic, clock::MONOTONIC),
-        (&header.live.boottime, clock::BOOTTIME),
+        (&header.live.monotonic, monotonic()),
+        (&header.live.boottime, boottime()),
     ] {
         assert_eq!(line.load().rate, Rate::UNITY);
         assert_eq!(line.load().fake_anchor, line.load().timebase_anchor);

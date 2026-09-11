@@ -13,6 +13,9 @@ pub const TMP_SUFFIX: &str = ".session.tmp";
 /// What the write lock's file is called.
 pub const LOCK_SUFFIX: &str = ".lock";
 
+/// What the updater's lease file is called. Only a session with the timekeep page on has one.
+pub const LEASE_SUFFIX: &str = ".lease";
+
 /// The directory holding session files: the first rule that applies.
 #[must_use]
 pub fn session_dir(env: &impl EnvLookup, euid: u32, tmp: &Path) -> PathBuf {
@@ -56,11 +59,26 @@ pub fn session_paths(dir: &Path, name: &str) -> (PathBuf, PathBuf) {
 /// whole name and gains the suffix, so two such paths still get two different lock files.
 #[must_use]
 pub fn lock_path(session: &Path) -> PathBuf {
+    beside(session, LOCK_SUFFIX)
+}
+
+/// The updater's lease file, beside the session file it belongs to, named the way [`lock_path`]
+/// names the write lock's.
+///
+/// A file of its own because a FreeBSD lock covers the whole file: sharing one with the write lock
+/// would put the updater in the same table as every writer and block them all.
+#[must_use]
+pub fn lease_path(session: &Path) -> PathBuf {
+    beside(session, LEASE_SUFFIX)
+}
+
+/// A file beside `session`, under the session's name with `suffix` in place of [`SESSION_SUFFIX`].
+fn beside(session: &Path, suffix: &str) -> PathBuf {
     let name = session
         .file_name()
         .map_or_else(String::new, |name| name.to_string_lossy().into_owned());
     let stem = name.strip_suffix(SESSION_SUFFIX).unwrap_or(&name);
-    session.with_file_name(format!("{stem}{LOCK_SUFFIX}"))
+    session.with_file_name(format!("{stem}{suffix}"))
 }
 
 fn uuid_v4(mut bytes: [u8; 16]) -> String {
@@ -169,6 +187,14 @@ mod tests {
             lock_path(&session_paths(Path::new("/d"), "pid-2-x").0)
         );
         assert_eq!(lock_path(Path::new("/d/plain")), Path::new("/d/plain.lock"));
+    }
+
+    #[test]
+    fn the_lease_file_sits_beside_the_session_file_too() {
+        let (path, _) = session_paths(Path::new("/d"), "pid-1-x");
+        assert_eq!(lease_path(&path), Path::new("/d/pid-1-x.lease"));
+        // Two locks, two files: a whole-file lock on one would otherwise block the other's holder.
+        assert_ne!(lease_path(&path), lock_path(&path));
     }
 
     #[test]

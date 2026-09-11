@@ -8,17 +8,25 @@
 //!
 //! Creating a session reads a genuine clock and the system's randomness, so this needs a
 //! filled-in platform arm.
-#![cfg(target_os = "linux")]
+#![cfg(any(target_os = "linux", target_os = "freebsd"))]
 
+use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
-use common::platform::{clock, genuine_nanos};
+use common::platform::{clock, default_timebase, genuine_nanos};
 use common::session::layout::{Header, Params, ParamsValue, WriterState};
 use common::session::{self, Session, SessionError, Setup, clock_now, naming};
-use common::sync::{begin, read};
-use common::time::{Nanos, Rate};
+use common::sync::{WriteLock, begin, lock_request, probe_held, read};
+use common::time::{Family, Nanos, Rate};
+
+/// The clock a family tracks by default here. FreeBSD picks between two columns of the family
+/// table by the running kernel's version, so a case that names a family's clock asks for it rather
+/// than spelling it.
+fn timebase_of(family: Family) -> libc::clockid_t {
+    default_timebase(family).unwrap_or(clock::REALTIME)
+}
 
 /// Readers per case. Enough to have several in flight at once on any machine that runs the tests.
 const READERS: usize = 6;
@@ -105,7 +113,7 @@ fn whole(params: &ParamsValue) -> bool {
 }
 
 fn now() -> Nanos {
-    genuine_nanos(clock::MONOTONIC).unwrap_or(Nanos::ZERO)
+    genuine_nanos(timebase_of(Family::Monotonic)).unwrap_or(Nanos::ZERO)
 }
 
 fn deadline(after: i64) -> Nanos {
@@ -117,7 +125,7 @@ fn reading_until(header: &Header, until: Nanos, expected: Option<ParamsValue>) -
     let mut last = Nanos(i64::MIN);
     let mut reads: u64 = 0;
     loop {
-        let Some(monotonic) = clock_now(header, clock::MONOTONIC) else {
+        let Some(monotonic) = clock_now(header, timebase_of(Family::Monotonic)) else {
             return verdict::NO_READING;
         };
         if monotonic < last {
@@ -237,6 +245,55 @@ fn wait_to_be_killed() -> ! {
         // Safety: `pause` waits for a signal and touches nothing of ours.
         unsafe { libc::pause() };
     }
+}
+
+/// What the kernel fills in when asked about a lock another process holds.
+fn probe_of(lock_path: &Path) -> libc::flock {
+    // An empty path names nothing, so a name with a NUL in it fails the open below rather than
+    // here. No path a case builds has one.
+    let path = std::ffi::CString::new(lock_path.as_os_str().as_bytes()).unwrap_or_default();
+    // Safety: `path` is a live NUL-terminated path.
+    let fd = unsafe { libc::open(path.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
+    assert!(fd >= 0, "open: {}", std::io::Error::last_os_error());
+    let mut request = lock_request();
+    // Safety: `fd` is open on the lock file and `request` is a live `flock`.
+    let answered = unsafe { common::platform::probe_write_lock(fd, &raw mut request) };
+    // Safety: we opened this descriptor and nothing else holds it.
+    unsafe { libc::close(fd) };
+    assert_eq!(answered, 0, "{}", std::io::Error::last_os_error());
+    request
+}
+
+/// One probe parser serves all three platforms: a held lock is a `l_type` other than `F_UNLCK`
+/// with a `l_pid` of -1, which is what a lock owned by an open file description answers to.
+#[test]
+fn a_held_lock_answers_the_probe_the_same_way_wherever_it_is_asked() {
+    let _one = one_at_a_time();
+    let fixture = fixture().unwrap();
+    let lock_path = fixture.lock_path();
+    assert_eq!(probe_held(), Some(false));
+
+    // The holder is a process of its own, so this really is the kernel's answer rather than ours.
+    let doorbell = Doorbell::new();
+    let holder = fork_child(|| {
+        let _lock = WriteLock::acquire(&lock_path).unwrap();
+        doorbell.ring();
+        wait_to_be_killed()
+    });
+    doorbell.wait();
+
+    let answered = probe_of(&lock_path);
+    assert_ne!(i64::from(answered.l_type), i64::from(libc::F_UNLCK));
+    assert_eq!(answered.l_pid, -1, "the answer named a pid");
+    assert_eq!(probe_held(), Some(true));
+
+    // And death releases it, which is the whole reason a reader may ask.
+    kill_and_reap(holder);
+    assert_eq!(probe_held(), Some(false));
+    assert_eq!(
+        i64::from(probe_of(&lock_path).l_type),
+        i64::from(libc::F_UNLCK)
+    );
 }
 
 #[test]

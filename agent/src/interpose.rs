@@ -3,21 +3,22 @@
 //! Every path here is a read path: no lock, no allocation, nothing written to shared memory, and
 //! nothing that could recurse into a symbol we took over.
 
-// Only the Linux arm exports these so far, so on the other platforms nothing calls them yet.
+// Every body here is reached through a platform arm, and no arm but Linux names all of them yet.
 #![cfg_attr(
     not(target_os = "linux"),
     allow(
         dead_code,
-        reason = "reached only through a platform arm, and only Linux has one"
+        reason = "reached only through a platform arm, and the arms below Linux name a part of \
+                  these so far"
     )
 )]
 
 use common::hook::{Func, Kind};
 use common::platform::{
-    clock, genuine_clock_gettime, genuine_getrusage, genuine_nanos, genuine_times,
+    clock, default_timebase, genuine_clock_gettime, genuine_getrusage, genuine_nanos, genuine_times,
 };
 use common::session::{clock_now, cpu_scaled};
-use common::time::Nanos;
+use common::time::{Family, Nanos};
 
 use crate::state;
 
@@ -239,7 +240,7 @@ pub(crate) unsafe fn times(buf: *mut libc::tms) -> libc::clock_t {
     if elapsed == NO_TICKS {
         return elapsed;
     }
-    faked(Func::Times, clock::MONOTONIC).map_or(elapsed, |now| to_ticks(now, per_second))
+    faked(Func::Times, monotonic()).map_or(elapsed, |now| to_ticks(now, per_second))
 }
 
 /// The resource usage of `who`, with the user and system times scaled by the Cpu family and every
@@ -264,6 +265,15 @@ pub(crate) unsafe fn getrusage(who: libc::c_int, usage: *mut libc::rusage) -> li
         }
     }
     0
+}
+
+/// The clock the Monotonic family tracks here, which is what the elapsed time of `times` follows.
+///
+/// Asked rather than spelled, because FreeBSD picks between two columns of the family table by the
+/// running kernel's version. Cpu is the one family with no timebase, and this is not it.
+#[inline]
+fn monotonic() -> libc::clockid_t {
+    default_timebase(Family::Monotonic).unwrap_or(clock::REALTIME)
 }
 
 /// Which Cpu clock a `getrusage` target names: the whole process for itself and its children, the

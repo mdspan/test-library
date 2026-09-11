@@ -12,7 +12,7 @@ use std::os::raw::c_char;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::ptr;
-use std::sync::atomic::{AtomicPtr, Ordering};
+use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use crate::platform;
@@ -24,6 +24,18 @@ use crate::platform;
 /// wait. It covers the process rather than a single session, which costs a process writing two
 /// sessions at once a wait it did not need and is otherwise the same lock.
 static WRITERS: Mutex<()> = Mutex::new(());
+
+/// How many write locks this process is holding.
+///
+/// What a probe answers from when it is nonzero, in place of asking the kernel. FreeBSD's probe
+/// reports the byte held even to the process holding it, so a self-probe there says nothing, and
+/// a process that is itself the writer already knows: only a reader has a question for the kernel.
+///
+/// The count goes up after the kernel grants the lock and down before the descriptor closes, so
+/// the window it covers sits inside the kernel's own and an answer of "held" is never ahead of
+/// one. It covers the process rather than a single session, like the mutex above it, so a process
+/// writing one session while reading another spins a moment longer before its fallback.
+static HELD_HERE: AtomicUsize = AtomicUsize::new(0);
 
 /// The lock file a reader probes, NUL-terminated and ready for `open`.
 ///
@@ -53,20 +65,21 @@ fn kind<T: Into<i64>>(value: T) -> libc::c_short {
     libc::c_short::try_from(value.into()).unwrap_or(0)
 }
 
-/// Names the lock file this process's readers probe, creating it if it is missing.
+/// Creates a lock file if it is missing, and checks it is one of ours.
 ///
-/// Called once by whoever creates or attaches to the session, which is also where the file's half
-/// of the session's security checks happens: a reader's probe is three syscalls and no more, so
-/// the file it will open is vetted here instead, once. A lock file carries no data, so creating
-/// one is a plain `O_CREAT` with nothing to initialize and no creation race to lose.
-///
-/// One path per process, because a process reads the clock from one session: the path a target
-/// attached to. A writer names the lock file it wants outright, so a controller holding several
-/// sessions open at once is unaffected.
+/// A lock file carries no data, so creating one is a plain `O_CREAT` with nothing to initialize and
+/// no creation race to lose. `0600`, because a wider mode would let another user take a shared lock
+/// on it and block every writer for good.
 ///
 /// # Errors
 /// [`io::Error`] when the file cannot be created or opened, or is not one of ours.
-pub fn install(path: &Path) -> io::Result<()> {
+pub fn create(path: &Path) -> io::Result<()> {
+    drop(open_checked(path)?);
+    Ok(())
+}
+
+/// Opens a lock file read-only, creating it if it is missing, and gives back the checked path.
+fn open_checked(path: &Path) -> io::Result<CString> {
     let c_path = c_path(path)?;
     // Safety: `c_path` is a live NUL-terminated path.
     let fd = unsafe { libc::open(c_path.as_ptr(), READ_FLAGS | libc::O_CREAT, 0o600) };
@@ -77,6 +90,23 @@ pub fn install(path: &Path) -> io::Result<()> {
     // Safety: we opened this descriptor and nothing else holds it.
     unsafe { libc::close(fd) };
     checked?;
+    Ok(c_path)
+}
+
+/// Names the lock file this process's readers probe, creating it if it is missing.
+///
+/// Called once by whoever creates or attaches to the session, which is also where the file's half
+/// of the session's security checks happens: a reader's probe is three syscalls and no more, so
+/// the file it will open is vetted here instead, once.
+///
+/// One path per process, because a process reads the clock from one session: the path a target
+/// attached to. A writer names the lock file it wants outright, so a controller holding several
+/// sessions open at once is unaffected.
+///
+/// # Errors
+/// [`io::Error`] when the file cannot be created or opened, or is not one of ours.
+pub fn install(path: &Path) -> io::Result<()> {
+    let c_path = open_checked(path)?;
     PROBE_PATH.store(c_path.into_raw(), Ordering::Release);
     Ok(())
 }
@@ -92,6 +122,10 @@ const READ_FLAGS: libc::c_int =
 /// `None` when there is no lock file to ask about, which a caller reads as an unanswered question
 /// rather than as a released lock.
 ///
+/// A process that holds the lock itself answers from [`HELD_HERE`] and asks nobody: on FreeBSD the
+/// kernel reports the byte held to its holder too, so a self-probe would be a syscall that told it
+/// nothing it did not already know. Only a process holding nothing has a question for the kernel.
+///
 /// Async-signal-safe: an `open`, one `fcntl`, and a `close`, which is every syscall this makes.
 /// The file was vetted by [`install`], so nothing here has to. The descriptor is opened here and
 /// closed before returning, so it is never a number the program can see, and a daemon that closes
@@ -100,6 +134,11 @@ const READ_FLAGS: libc::c_int =
 /// cannot make it wrong.
 #[must_use]
 pub fn probe_held() -> Option<bool> {
+    if HELD_HERE.load(Ordering::Acquire) > 0 {
+        // A writer of ours holds it, so the answer is here rather than in the kernel. This is the
+        // one answer a self-probe could not give: FreeBSD reports the byte held to its holder too.
+        return Some(true);
+    }
     let path = PROBE_PATH.load(Ordering::Acquire);
     if path.is_null() {
         return None;
@@ -143,22 +182,26 @@ impl WriteLock {
         // converting one description's lock.
         let writers = WRITERS.lock().unwrap_or_else(PoisonError::into_inner);
         let fd = open_for_writing(path)?;
-        let lock = Self {
-            fd: Cell::new(fd),
-            _writers: writers,
-        };
         loop {
             // Safety: `fd` is open on the lock file, for writing.
             if unsafe { platform::take_write_lock(fd) } == 0 {
-                return Ok(lock);
+                break;
             }
             let err = io::Error::last_os_error();
             // A signal can interrupt the wait on every platform, including where the
             // documentation does not say so.
             if err.kind() != io::ErrorKind::Interrupted {
+                // Safety: we opened this descriptor and nothing else holds it.
+                unsafe { libc::close(fd) };
                 return Err(err);
             }
         }
+        // Only once the kernel has granted it, so a refused acquire leaves the count where it was.
+        HELD_HERE.fetch_add(1, Ordering::Release);
+        Ok(Self {
+            fd: Cell::new(fd),
+            _writers: writers,
+        })
     }
 
     /// Drops this process's reference to the lock without releasing it, for a fork that keeps
@@ -170,6 +213,9 @@ impl WriteLock {
     pub fn close_in_forked_child(&self) {
         let fd = self.fd.replace(-1);
         if fd >= 0 {
+            // The count goes first: from here on this process is a reader of the lock like any
+            // other, and its probe belongs to the kernel again.
+            HELD_HERE.fetch_sub(1, Ordering::Release);
             // Safety: this child inherited the descriptor and nothing else here holds it.
             unsafe { libc::close(fd) };
         }

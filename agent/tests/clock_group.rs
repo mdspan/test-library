@@ -3,7 +3,7 @@
 //!
 //! The target is linked against the library rather than preloading it, which is how it reaches the
 //! genuine-clock symbol and glibc's internal aliases in one process.
-#![cfg(target_os = "linux")]
+#![cfg(any(target_os = "linux", target_os = "freebsd"))]
 #![expect(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -17,10 +17,13 @@ mod harness;
 
 use std::path::{Path, PathBuf};
 
+use common::platform::{clock, default_timebase};
+use common::time::Family;
 use harness::{HOUR, Report, Run, Seen, calls_seen, only_session};
 
 /// Every function that answers the wall clock, by the key `clocks` reports it under. The three
 /// `sys_` keys are `syscall()` asked for the same three numbers libc would use.
+#[cfg(target_os = "linux")]
 const WALL_CLOCK_READS: &[&str] = &[
     "clock_gettime",
     "gettimeofday",
@@ -34,6 +37,11 @@ const WALL_CLOCK_READS: &[&str] = &[
     "sys_clock_gettime",
     "sys_gettimeofday",
 ];
+
+/// The same for FreeBSD, whose libc has no `ftime` and no internal aliases, and whose `syscall()`
+/// the library does not take over.
+#[cfg(target_os = "freebsd")]
+const WALL_CLOCK_READS: &[&str] = &["clock_gettime", "gettimeofday", "time", "timespec_get"];
 
 /// A second, which is the slack every wall-clock comparison here allows: the coarsest of these
 /// functions answers in whole seconds.
@@ -89,16 +97,18 @@ fn every_way_of_asking_the_wall_clock_is_faked() {
     for key in WALL_CLOCK_READS {
         assert_near(key, report.nanos(key), genuine - 2 * HOUR);
     }
-    if report.nanos("has_sys_time") == 1 {
-        assert_near("sys_time", report.nanos("sys_time"), genuine - 2 * HOUR);
-    }
-
     // `timespec_get` answers the base it was given, and zero for a base no C library defines.
     assert_eq!(report.nanos("timespec_get.base"), 1);
     assert_eq!(report.nanos("timespec_get.bad_base"), 0);
-    // `ftime`'s other two fields are the ones libc left at zero.
-    assert_eq!(report.nanos("ftime.timezone"), 0);
-    assert_eq!(report.nanos("ftime.dstflag"), 0);
+    #[cfg(target_os = "linux")]
+    {
+        if report.nanos("has_sys_time") == 1 {
+            assert_near("sys_time", report.nanos("sys_time"), genuine - 2 * HOUR);
+        }
+        // `ftime`'s other two fields are the ones libc left at zero.
+        assert_eq!(report.nanos("ftime.timezone"), 0);
+        assert_eq!(report.nanos("ftime.dstflag"), 0);
+    }
 }
 
 #[test]
@@ -239,9 +249,12 @@ fn the_calls_that_must_stay_genuine_stay_genuine() {
         assert_eq!(faked.nanos(key), plain.nanos(key), "{key} was faked");
     }
     // `adjtimex` and `ntp_adjtime` read the kernel's own clock, which our shift never reaches.
+    // FreeBSD's `timex` carries no clock reading at all, so there the call itself is the claim.
+    #[cfg(target_os = "linux")]
     for key in ["adjtimex.time", "ntp_adjtime.time"] {
         assert_near(key, faked.nanos(key), faked.nanos("realtime.genuine"));
     }
+    assert!(faked.nanos("ntp_adjtime.rc") >= 0);
     // An id from `clock_getcpuclockid` or `pthread_getcpuclockid` is a reading about somebody, so
     // it stays genuine even when it names this very process.
     for key in ["own_cpuclockid", "pthread_cpuclockid"] {
@@ -254,13 +267,20 @@ fn the_calls_that_must_stay_genuine_stay_genuine() {
         );
     }
     // And a dynamic clock id reaches the kernel, which refuses it the same way either side.
-    assert_eq!(faked.nanos("dynamic.rc"), -1);
-    assert_eq!(
-        faked.nanos("dynamic.errno"),
-        faked.nanos("dynamic.genuine_errno")
-    );
+    // Only Linux has such ids; FreeBSD names a hardware clock no other way.
+    #[cfg(target_os = "linux")]
+    {
+        assert_eq!(faked.nanos("dynamic.rc"), -1);
+        assert_eq!(
+            faked.nanos("dynamic.errno"),
+            faked.nanos("dynamic.genuine_errno")
+        );
+    }
 }
 
+/// `syscall()` is Linux's own way of asking for a call by number, and the one platform where the
+/// library takes the function over.
+#[cfg(target_os = "linux")]
 #[test]
 fn syscall_hands_every_other_number_to_the_kernel_untouched() {
     let dir = tempfile::tempdir().unwrap();
@@ -305,23 +325,34 @@ fn every_function_of_the_group_reaches_the_hook_with_its_own_func_and_kind() {
     // Every function of the clock group, with the clock it names. A call that names no clock reads
     // CLOCK_REALTIME; `times` is two answers from two families, and `getrusage` names the thread
     // when the program asked about the thread.
-    let realtime = i64::from(libc::CLOCK_REALTIME);
-    let process_cpu = i64::from(libc::CLOCK_PROCESS_CPUTIME_ID);
-    let thread_cpu = i64::from(libc::CLOCK_THREAD_CPUTIME_ID);
-    let monotonic = i64::from(libc::CLOCK_MONOTONIC);
-    for (what, func, clock) in [
+    let realtime = i64::from(clock::REALTIME);
+    let process_cpu = i64::from(clock::PROCESS_CPUTIME);
+    let thread_cpu = i64::from(clock::THREAD_CPUTIME);
+    // The clock the Monotonic family tracks, which the elapsed time of `times` follows and which
+    // the target reads by name. FreeBSD picks it from the running kernel.
+    let monotonic = i64::from(default_timebase(Family::Monotonic).unwrap());
+    let named_monotonic = i64::from(libc::CLOCK_MONOTONIC);
+    // `ftime` is glibc's, and the FreeBSD arm has no such call to catch.
+    let ftime: &[(&str, i64, i64)] = if cfg!(target_os = "linux") {
+        &[("ftime", 5, i64::from(libc::CLOCK_REALTIME))]
+    } else {
+        &[]
+    };
+    for &(what, func, clock) in [
         ("clock_gettime", 1, realtime),
-        ("clock_gettime on the monotonic clock", 1, monotonic),
+        ("clock_gettime on the monotonic clock", 1, named_monotonic),
         ("gettimeofday", 2, realtime),
         ("time", 3, realtime),
         ("timespec_get", 4, realtime),
-        ("ftime", 5, realtime),
         ("clock", 6, process_cpu),
         ("the fields of times", 7, process_cpu),
         ("the elapsed time of times", 7, monotonic),
         ("getrusage", 8, process_cpu),
         ("getrusage on the calling thread", 8, thread_cpu),
-    ] {
+    ]
+    .iter()
+    .chain(ftime)
+    {
         assert!(
             seen.contains(&Seen {
                 func,

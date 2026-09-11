@@ -1,12 +1,13 @@
 //! The session this process reads, the hook in front of its keeper, and the lock file a setter
 //! takes the write lock on.
 
-// Only the Linux arm exports these so far, so on the other platforms nothing calls them yet.
+// Each of these is reached through a platform arm, and no arm but Linux names all of them yet.
 #![cfg_attr(
     not(target_os = "linux"),
     allow(
         dead_code,
-        reason = "reached only through a platform arm, and only Linux has one"
+        reason = "reached only through a platform arm, and the arms below Linux name a part of \
+                  these so far"
     )
 )]
 

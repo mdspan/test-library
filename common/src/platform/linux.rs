@@ -2,8 +2,14 @@
 
 use std::io;
 
+use crate::time::Family;
+
 /// What the header's platform field carries for Linux.
 pub const OS_TAG: u32 = 1;
+
+/// Go reads the clock here through the vDSO rather than from a page of parameters, so no session
+/// keeps an updater or a lease file.
+pub const HAS_TIMEKEEP_PAGE: bool = false;
 
 /// The clock ids of the families, by the names the family table gives them.
 pub mod clock {
@@ -35,7 +41,7 @@ pub mod clock {
     pub const THREAD_CPUTIME: clockid_t = libc::CLOCK_THREAD_CPUTIME_ID;
 
     /// Every clock a family holds, by the name a user writes for a timebase.
-    pub const NAMED: &[(&str, clockid_t)] = &[
+    const NAMED: &[(&str, clockid_t)] = &[
         ("CLOCK_REALTIME", REALTIME),
         ("CLOCK_REALTIME_COARSE", REALTIME_COARSE),
         ("CLOCK_REALTIME_ALARM", REALTIME_ALARM),
@@ -48,6 +54,13 @@ pub mod clock {
         ("CLOCK_PROCESS_CPUTIME_ID", PROCESS_CPUTIME),
         ("CLOCK_THREAD_CPUTIME_ID", THREAD_CPUTIME),
     ];
+
+    /// The clocks a user may name as a timebase. One list, because no clock here moves between the
+    /// families with the kernel's version.
+    #[must_use]
+    pub const fn named() -> &'static [(&'static str, clockid_t)] {
+        NAMED
+    }
 
     /// The family a clock id belongs to, or `None` when the id is left on genuine time.
     ///
@@ -69,6 +82,20 @@ pub mod clock {
     #[must_use]
     pub const fn is_tai(clock: clockid_t) -> bool {
         clock == TAI
+    }
+}
+
+/// The first clock in the family's column of the family table.
+///
+/// A family's zero always comes from it, and with no override it is the timebase too. Cpu has
+/// none, because each of its clocks tracks passage through its own reading.
+#[must_use]
+pub const fn default_timebase(family: Family) -> Option<libc::clockid_t> {
+    match family {
+        Family::Realtime => Some(clock::REALTIME),
+        Family::Monotonic => Some(clock::MONOTONIC),
+        Family::Boottime => Some(clock::BOOTTIME),
+        Family::Cpu => None,
     }
 }
 

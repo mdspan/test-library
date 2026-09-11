@@ -3,7 +3,7 @@
 //!
 //! Creating a session reads a genuine clock and the system's randomness, so these cases need a
 //! filled-in platform arm.
-#![cfg(target_os = "linux")]
+#![cfg(any(target_os = "linux", target_os = "freebsd"))]
 #![expect(
     clippy::unwrap_used,
     reason = "test support: a failed assumption should fail the test loudly"
@@ -26,7 +26,7 @@ use common::sync::read;
 use common::time::{Family, Nanos, Rate};
 use controller::{Controller, Error, Transaction};
 
-use fixture::{HOUR, SECOND, fixture, fixture_on, genuine, one_at_a_time};
+use fixture::{HOUR, SECOND, fixture, fixture_on, genuine, one_at_a_time, timebase_of};
 
 /// Runs `body` with a thread reading the parameters through the seqlock the whole time, and
 /// asserts that every copy it read was `expected`.
@@ -155,13 +155,13 @@ fn a_transaction_touching_three_families_samples_each_timebase_inside_the_one_se
     // different clocks read inside one section.
     let live = fixture.live();
     assert_eq!(live.realtime.timebase, clock::REALTIME);
-    assert_eq!(live.monotonic.timebase, clock::MONOTONIC);
-    assert_eq!(live.boottime.timebase, clock::BOOTTIME);
+    assert_eq!(live.monotonic.timebase, timebase_of(Family::Monotonic));
+    assert_eq!(live.boottime.timebase, timebase_of(Family::Boottime));
 
     let before = [
         genuine(clock::REALTIME),
-        genuine(clock::MONOTONIC),
-        genuine(clock::BOOTTIME),
+        genuine(timebase_of(Family::Monotonic)),
+        genuine(timebase_of(Family::Boottime)),
     ];
     let mut transaction = fixture.controller.begin().unwrap();
     transaction.shift(Family::Realtime, Nanos(HOUR)).unwrap();
@@ -172,8 +172,8 @@ fn a_transaction_touching_three_families_samples_each_timebase_inside_the_one_se
     transaction.commit().unwrap();
     let after = [
         genuine(clock::REALTIME),
-        genuine(clock::MONOTONIC),
-        genuine(clock::BOOTTIME),
+        genuine(timebase_of(Family::Monotonic)),
+        genuine(timebase_of(Family::Boottime)),
     ];
 
     assert_eq!(
@@ -229,8 +229,8 @@ fn monotonic_and_boottime_refuse_a_move_backwards() {
     let before = fixture.live();
 
     for (family, clock) in [
-        (Family::Monotonic, clock::MONOTONIC),
-        (Family::Boottime, clock::BOOTTIME),
+        (Family::Monotonic, timebase_of(Family::Monotonic)),
+        (Family::Boottime, timebase_of(Family::Boottime)),
     ] {
         let mut transaction = fixture.controller.begin().unwrap();
         transaction
@@ -377,9 +377,9 @@ fn a_rate_crosses_the_edge_as_a_double() {
     assert_eq!(live.monotonic.line.rate, Rate::FROZEN);
 
     // A frozen family stays where the commit left it, however much genuine time passes.
-    let frozen = fixture.showing(clock::MONOTONIC);
+    let frozen = fixture.showing(timebase_of(Family::Monotonic));
     std::thread::sleep(std::time::Duration::from_millis(20));
-    assert_eq!(fixture.showing(clock::MONOTONIC), frozen);
+    assert_eq!(fixture.showing(timebase_of(Family::Monotonic)), frozen);
 }
 
 #[test]

@@ -154,15 +154,15 @@ const DEFAULT_TIMEKEEP_INTERVAL: Nanos = Nanos(1_000_000);
 impl Setup {
     /// A session that fakes nothing: every family where its genuine clock is, at real speed.
     #[must_use]
-    pub const fn plain(dir: PathBuf) -> Self {
+    pub fn plain(dir: PathBuf) -> Self {
         Self {
             dir,
             keeper: Keeper::Affine,
             hook: None,
             realtime_at: None,
-            realtime: FamilySetup::tracking(clock::REALTIME),
-            monotonic: FamilySetup::tracking(clock::MONOTONIC),
-            boottime: FamilySetup::tracking(clock::BOOTTIME),
+            realtime: FamilySetup::tracking(line_timebase(Family::Realtime)),
+            monotonic: FamilySetup::tracking(line_timebase(Family::Monotonic)),
+            boottime: FamilySetup::tracking(line_timebase(Family::Boottime)),
             cpu_rate: Rate::UNITY,
             emulate_vdso: true,
             fail_closed: false,
@@ -266,6 +266,12 @@ impl Setup {
     }
 }
 
+/// The clock a family's line starts on: its default timebase, and the wall clock for the one
+/// family that has none, which is Cpu and which carries no line.
+fn line_timebase(family: Family) -> libc::clockid_t {
+    platform::default_timebase(family).unwrap_or(clock::REALTIME)
+}
+
 /// Whole seconds by which genuine `CLOCK_TAI` leads genuine `CLOCK_REALTIME`: today's offset
 /// whatever era Realtime is set to, and exact because it is whole seconds. A kernel that never had
 /// the offset set reports the wall clock, so zero.
@@ -344,11 +350,11 @@ fn genuine_plan(read: &dyn Fn(libc::clockid_t) -> Option<Nanos>) -> Plan {
             rate: Rate::UNITY,
         }
     };
-    let realtime = identity(clock::REALTIME);
+    let realtime = identity(line_timebase(Family::Realtime));
     Plan {
         realtime,
-        monotonic: identity(clock::MONOTONIC),
-        boottime: identity(clock::BOOTTIME),
+        monotonic: identity(line_timebase(Family::Monotonic)),
+        boottime: identity(line_timebase(Family::Boottime)),
         cpu_rate: Rate::UNITY,
         // What the kernel says, like everything else here: a null session's TAI leads its wall
         // clock by exactly what the genuine pair does.
@@ -739,8 +745,13 @@ pub fn create_named(
 
     // The lock file carries no data, so it is made here and never touched again: writers take the
     // lock on it and readers probe it, whichever generation of the state the session file holds. It
-    // comes last of the two files, so a creator that gives up leaves neither behind.
+    // comes after the session file, so a creator that gives up leaves neither behind.
     sync::install(&naming::lock_path(&path))?;
+    // The lease belongs to the updater that keeps the timekeep page fresh, so a session with the
+    // page off has no lease to keep and gets the write lock's file alone.
+    if platform::HAS_TIMEKEEP_PAGE && setup.emulate_vdso {
+        sync::create(&naming::lease_path(&path))?;
+    }
 
     let c_path = cstring(&path)?;
     // Safety: `c_tmp` and `c_path` are live NUL-terminated paths.
@@ -1194,5 +1205,5 @@ fn project(line: &layout::FamilyLine) -> Option<Nanos> {
 
 // Creating a session reads a genuine clock and the system's randomness, so these cases need a
 // filled-in platform arm.
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(all(test, any(target_os = "linux", target_os = "freebsd")))]
 mod tests;

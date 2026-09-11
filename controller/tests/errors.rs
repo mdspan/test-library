@@ -3,7 +3,7 @@
 //!
 //! Creating a session reads a genuine clock and the system's randomness, so these cases need a
 //! filled-in platform arm.
-#![cfg(target_os = "linux")]
+#![cfg(any(target_os = "linux", target_os = "freebsd"))]
 #![expect(
     dead_code,
     reason = "test support: not every helper of the shared fixture is used by every case"

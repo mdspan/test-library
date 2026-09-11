@@ -2,7 +2,7 @@
 //!
 //! `LD_PRELOAD` needs a platform arm that exports the interposed names, and the target needs one
 //! that can read a genuine clock, so these cases only apply where both exist.
-#![cfg(target_os = "linux")]
+#![cfg(any(target_os = "linux", target_os = "freebsd"))]
 #![expect(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -16,6 +16,8 @@ mod harness;
 
 use std::path::Path;
 
+use common::platform::clock;
+use common::time::Family;
 use harness::{HOUR, Run};
 
 fn session_files(dir: &Path) -> Vec<String> {
@@ -253,6 +255,7 @@ fn the_session_directory_follows_xdg_runtime_dir_when_no_dir_is_named() {
 /// an object of the program's was built with, and the one symbol of our own that a hook or a
 /// controller calls. Nothing else: a name here that the interposition table does not list would be
 /// a name we answer for by accident.
+#[cfg(target_os = "linux")]
 const INTERPOSED: &[&str] = &[
     "__clock_gettime",
     "__ftime",
@@ -326,6 +329,20 @@ const INTERPOSED: &[&str] = &[
     "utimes",
 ];
 
+/// The same for FreeBSD, where the clock group is what the arm names so far. `ftime` is not among
+/// them: the platform's libc dropped the function, so there is no call of a program's to catch.
+#[cfg(target_os = "freebsd")]
+const INTERPOSED: &[&str] = &[
+    "clock",
+    "clock_gettime",
+    "getrusage",
+    "gettimeofday",
+    "libtimewarp_genuine_clock_gettime",
+    "time",
+    "times",
+    "timespec_get",
+];
+
 /// The names glibc routed `stat` and its neighbours through until 2.33, which only a build
 /// targeting such a glibc defines.
 const LEGACY_STAT: &[&str] = &[
@@ -341,7 +358,7 @@ const LEGACY_STAT: &[&str] = &[
 
 /// Every name the library should define, sorted the way `nm` reports them.
 fn interposed_names() -> Vec<String> {
-    let legacy = if cfg!(glibc_pre_2_33) {
+    let legacy = if cfg!(all(target_os = "linux", glibc_pre_2_33)) {
         LEGACY_STAT
     } else {
         &[]
@@ -463,15 +480,40 @@ fn a_bare_rate_covers_elapsed_time_and_leaves_consumption_alone() {
     assert_rate(&report, "process_cpu", 1);
 }
 
+/// The clocks the target read, grouped by the family the library's own table puts each in.
+///
+/// The target reports the id behind every name it read, so the grouping is this platform's, and on
+/// FreeBSD the running kernel's. TAI is left out: it reads the Realtime line plus an offset, which
+/// a case of its own covers.
+fn by_family(report: &harness::Report) -> Vec<(Family, Vec<String>)> {
+    Family::ALL
+        .into_iter()
+        .map(|family| {
+            let group = report
+                .under("id.")
+                .into_iter()
+                .filter(|(_, id)| {
+                    let id: libc::clockid_t = id.parse().unwrap();
+                    clock::family_of(id) == Some(family) && !clock::is_tai(id)
+                })
+                .map(|(name, _)| name)
+                .collect();
+            (family, group)
+        })
+        .collect()
+}
+
 #[test]
 fn every_clock_of_a_family_reads_the_family_value() {
     let report = families(&[("LIBTIMEWARP_RATE", "5"), ("LIBTIMEWARP_SHIFT", "-2h")]);
 
-    for group in [
-        ["realtime", "realtime_coarse", "realtime_alarm"],
-        ["monotonic", "monotonic_coarse", "monotonic_raw"],
-        ["boottime", "boottime_alarm", "boottime"],
-    ] {
+    // Realtime, Monotonic, Boottime and Cpu, each with more than one clock in it here.
+    for (family, group) in by_family(&report) {
+        // Cpu scales each clock's own consumption, so its clocks have no one value to share.
+        if family == Family::Cpu {
+            continue;
+        }
+        assert!(group.len() > 1, "{family} holds only {group:?}");
         let readings: Vec<i64> = group
             .iter()
             .map(|clock| report.nanos(&format!("a.{clock}")))
@@ -485,7 +527,14 @@ fn every_clock_of_a_family_reads_the_family_value() {
 fn the_cpu_family_scales_each_clock_on_its_own() {
     let report = families(&[("LIBTIMEWARP_CPU_RATE", "8")]);
 
-    for clock in ["process_cpu", "thread_cpu"] {
+    // Every clock of the family this platform has, which on FreeBSD includes the two slices of
+    // process CPU time that exist nowhere else.
+    let (_, group) = by_family(&report)
+        .into_iter()
+        .find(|(family, _)| *family == Family::Cpu)
+        .unwrap();
+    assert!(group.contains(&"process_cpu".to_owned()), "{group:?}");
+    for clock in group {
         let faked = report.nanos(&format!("a.{clock}"));
         let genuine = report.nanos(&format!("a.{clock}.genuine"));
         assert!(genuine > 10_000_000, "{clock} consumed only {genuine} ns");
@@ -502,6 +551,11 @@ fn the_cpu_family_scales_each_clock_on_its_own() {
 #[test]
 fn the_tai_clock_keeps_its_offset_from_the_wall_clock() {
     let report = families(&[("LIBTIMEWARP_TIME", "1990-01-01T00:00:00Z")]);
+    if !clock::is_tai(report.nanos("id.tai").try_into().unwrap()) {
+        // FreeBSD grew a TAI clock at 15.0, so a kernel below that has none to read.
+        eprintln!("this kernel has no TAI clock, so that case went unexercised");
+        return;
+    }
 
     let genuine_offset =
         report.nanos("a.tai.genuine") - report.nanos("a.realtime.genuine") + HOUR / 3_600 / 2;

@@ -401,6 +401,12 @@ impl Run {
         if let Some(dir) = &self.session_dir {
             command.env("LIBTIMEWARP_SESSION_DIR", dir);
         }
+        // FreeBSD's timekeep page, and the updater that keeps it fresh, land later; until they do
+        // a target there runs the configuration the platform has, which is the page off. A case
+        // that says otherwise still wins, because its own settings go on below.
+        if cfg!(target_os = "freebsd") {
+            command.env("LIBTIMEWARP_EMULATE_VDSO", "0");
+        }
         for (name, value) in &self.env {
             command.env(name, value);
         }
@@ -444,6 +450,14 @@ pub(crate) struct Report {
 }
 
 impl Report {
+    /// Every fact whose key starts with `prefix`, under what is left of the key.
+    pub(crate) fn under(&self, prefix: &str) -> Vec<(String, String)> {
+        self.facts
+            .iter()
+            .filter_map(|(key, value)| Some((key.strip_prefix(prefix)?.to_owned(), value.clone())))
+            .collect()
+    }
+
     pub(crate) fn get(&self, key: &str) -> &str {
         self.facts
             .get(key)

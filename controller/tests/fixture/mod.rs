@@ -10,14 +10,21 @@ use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
-use common::platform::genuine_nanos;
+use common::platform::{clock, default_timebase, genuine_nanos};
 use common::session::layout::{Header, Keeper, ParamsValue};
 use common::session::{self, Session, Setup, clock_now};
-use common::time::Nanos;
+use common::time::{Family, Nanos};
 use controller::Controller;
 
 pub(crate) const SECOND: i64 = Nanos::SECOND;
 pub(crate) const HOUR: i64 = 3_600 * SECOND;
+
+/// The clock a family tracks by default here. FreeBSD picks between two columns of the family
+/// table by the running kernel's version, so a case that names a family's clock asks for it rather
+/// than spelling it.
+pub(crate) fn timebase_of(family: Family) -> libc::clockid_t {
+    default_timebase(family).unwrap_or(clock::REALTIME)
+}
 
 /// Every case takes this, for two reasons. A fork while another thread of this process is inside a
 /// transaction would hand the child the in-process half of the write lock already held, and the

@@ -5,7 +5,7 @@
 //!
 //! Creating a session reads a genuine clock and the system's randomness, so this needs a
 //! filled-in platform arm.
-#![cfg(target_os = "linux")]
+#![cfg(any(target_os = "linux", target_os = "freebsd"))]
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
@@ -14,10 +14,17 @@ use std::sync::{Mutex, PoisonError};
 
 use common::config::ENV_LOG;
 use common::log::{Level, Sink};
-use common::platform::clock;
+use common::platform::{clock, default_timebase};
 use common::session::layout::WriterState;
 use common::session::{self, Setup, clock_now, timestamp_shown, timestamp_stored};
-use common::time::Nanos;
+use common::time::{Family, Nanos};
+
+/// The clock a family tracks by default here. FreeBSD picks between two columns of the family
+/// table by the running kernel's version, so a case that names a family's clock asks for it rather
+/// than spelling it.
+fn timebase_of(family: Family) -> libc::clockid_t {
+    default_timebase(family).unwrap_or(clock::REALTIME)
+}
 
 static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
 
@@ -102,8 +109,8 @@ fn reading_the_clock_allocates_nothing() {
     let clocks = [
         clock::REALTIME,
         clock::TAI,
-        clock::MONOTONIC,
-        clock::BOOTTIME,
+        timebase_of(Family::Monotonic),
+        timebase_of(Family::Boottime),
         clock::PROCESS_CPUTIME,
         clock::THREAD_CPUTIME,
     ];
@@ -175,7 +182,7 @@ fn the_abandoned_writer_fallback_allocates_nothing_either() {
     assert!(clock_now(header, clock::REALTIME).is_some());
     let counted = allocations_in(|| {
         for _ in 0..20 {
-            assert!(clock_now(header, clock::MONOTONIC).is_some());
+            assert!(clock_now(header, timebase_of(Family::Monotonic)).is_some());
         }
     });
     assert_eq!(counted, 0);

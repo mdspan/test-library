@@ -2,8 +2,12 @@
 
    Linked against the library rather than preloading it, so the genuine reading of a clock comes
    from the library's own symbol and the two can be compared here. The genuine `times` and
-   `getrusage` come through `syscall()`, whose other numbers the library passes through untouched,
-   which is the same claim from the other side.
+   `getrusage` come through `syscall()`, which on Linux is a call the library passes every other
+   number of through untouched, and which on FreeBSD it does not take over at all.
+
+   What only one platform has is behind `__FreeBSD__`: glibc's internal aliases, `ftime`, the
+   numbers a program can ask `syscall()` for, dynamic clock ids, `adjtimex`, and the `times`
+   system call, which FreeBSD does not have at all.
 
    argv[1], when given, names a file of two pages whose second page this maps through `syscall()`,
    so a system call using all six argument registers proves they are forwarded. */
@@ -25,6 +29,7 @@
 
 extern int libtimewarp_genuine_clock_gettime(clockid_t clock, struct timespec *ts);
 
+#ifndef __FreeBSD__
 /* glibc dropped <sys/timeb.h> at 2.33 and kept the symbol, so the shape is declared here. */
 struct timeb {
     time_t time;
@@ -41,6 +46,7 @@ extern time_t __time(time_t *t);
 
 /* A dynamic clock id, the way the kernel encodes one from a descriptor. */
 #define FD_TO_CLOCKID(fd) ((clockid_t)((~(unsigned int)(fd) << 3) | 3u))
+#endif
 
 #define NS_PER_S 1000000000LL
 
@@ -74,7 +80,6 @@ static void burn(long long ns) {
 static void wall_clocks(void) {
     struct timespec ts;
     struct timeval tv;
-    struct timeb tb;
     time_t seconds;
 
     clock_gettime(CLOCK_REALTIME, &ts);
@@ -88,18 +93,22 @@ static void wall_clocks(void) {
     say("timespec_get.base", timespec_get(&ts, TIME_UTC));
     say("timespec_get", nanos(&ts));
     say("timespec_get.bad_base", timespec_get(&ts, 99));
-    ftime(&tb);
-    say("ftime", (long long)tb.time * NS_PER_S + (long long)tb.millitm * 1000000LL);
-    say("ftime.timezone", tb.timezone);
-    say("ftime.dstflag", tb.dstflag);
+#ifndef __FreeBSD__
+    {
+        struct timeb tb;
+        ftime(&tb);
+        say("ftime", (long long)tb.time * NS_PER_S + (long long)tb.millitm * 1000000LL);
+        say("ftime.timezone", tb.timezone);
+        say("ftime.dstflag", tb.dstflag);
 
-    __clock_gettime(CLOCK_REALTIME, &ts);
-    say("__clock_gettime", nanos(&ts));
-    __gettimeofday(&tv, NULL);
-    say("__gettimeofday", (long long)tv.tv_sec * NS_PER_S + tv.tv_usec * 1000LL);
-    say("__time", (long long)__time(NULL) * NS_PER_S);
-    __ftime(&tb);
-    say("__ftime", (long long)tb.time * NS_PER_S + (long long)tb.millitm * 1000000LL);
+        __clock_gettime(CLOCK_REALTIME, &ts);
+        say("__clock_gettime", nanos(&ts));
+        __gettimeofday(&tv, NULL);
+        say("__gettimeofday", (long long)tv.tv_sec * NS_PER_S + tv.tv_usec * 1000LL);
+        say("__time", (long long)__time(NULL) * NS_PER_S);
+        __ftime(&tb);
+        say("__ftime", (long long)tb.time * NS_PER_S + (long long)tb.millitm * 1000000LL);
+    }
 
     ts.tv_sec = 0;
     ts.tv_nsec = 0;
@@ -113,11 +122,38 @@ static void wall_clocks(void) {
 #else
     say("has_sys_time", 0);
 #endif
+#endif
 
     say("realtime.genuine", genuine(CLOCK_REALTIME));
     clock_gettime(CLOCK_MONOTONIC, &ts);
     say("monotonic", nanos(&ts));
     say("monotonic.genuine", genuine(CLOCK_MONOTONIC));
+}
+
+/* The genuine `times`, through the numbers the library leaves alone. FreeBSD has no `times`
+   system call: its libc builds the answer out of two `getrusage` calls and one clock read, and so
+   does this. */
+static clock_t genuine_times(struct tms *out) {
+#ifdef SYS_times
+    return (clock_t)syscall(SYS_times, out);
+#else
+    long hz = sysconf(_SC_CLK_TCK);
+    struct rusage mine, theirs;
+    struct timespec ts;
+
+    if (syscall(SYS_getrusage, RUSAGE_SELF, &mine) != 0
+        || syscall(SYS_getrusage, RUSAGE_CHILDREN, &theirs) != 0
+        || syscall(SYS_clock_gettime, CLOCK_MONOTONIC, &ts) != 0) {
+        return (clock_t)-1;
+    }
+    out->tms_utime = (clock_t)(mine.ru_utime.tv_sec * hz + mine.ru_utime.tv_usec / (1000000 / hz));
+    out->tms_stime = (clock_t)(mine.ru_stime.tv_sec * hz + mine.ru_stime.tv_usec / (1000000 / hz));
+    out->tms_cutime =
+        (clock_t)(theirs.ru_utime.tv_sec * hz + theirs.ru_utime.tv_usec / (1000000 / hz));
+    out->tms_cstime =
+        (clock_t)(theirs.ru_stime.tv_sec * hz + theirs.ru_stime.tv_usec / (1000000 / hz));
+    return (clock_t)(ts.tv_sec * hz + ts.tv_nsec / (1000000000 / hz));
+#endif
 }
 
 /* `clock`, `times` and `getrusage`: consumption follows the Cpu family, and `times`' elapsed return
@@ -140,7 +176,7 @@ static void cpu_group(const char *tag) {
     memset(&faked_tms, 0, sizeof faked_tms);
     memset(&real_tms, 0, sizeof real_tms);
     elapsed = times(&faked_tms);
-    real_elapsed = (clock_t)syscall(SYS_times, &real_tms);
+    real_elapsed = genuine_times(&real_tms);
     snprintf(key, sizeof key, "%s.times.elapsed", tag);
     say(key, (long long)elapsed);
     snprintf(key, sizeof key, "%s.times.elapsed.genuine", tag);
@@ -191,6 +227,7 @@ static void passed_through(void) {
     struct timex tx;
     clockid_t own = 0;
     struct timespec ts;
+    (void)ts;
 
     clock_getres(CLOCK_REALTIME, &res);
     say("getres.realtime", nanos(&res));
@@ -200,11 +237,13 @@ static void passed_through(void) {
     say("getres.process_cpu", nanos(&res));
 
     memset(&tx, 0, sizeof tx);
+    say("ntp_adjtime.rc", ntp_adjtime(&tx));
+#ifndef __FreeBSD__
+    say("ntp_adjtime.time", (long long)tx.time.tv_sec * NS_PER_S);
+    memset(&tx, 0, sizeof tx);
     say("adjtimex.rc", adjtimex(&tx));
     say("adjtimex.time", (long long)tx.time.tv_sec * NS_PER_S);
-    memset(&tx, 0, sizeof tx);
-    say("ntp_adjtime.rc", ntp_adjtime(&tx));
-    say("ntp_adjtime.time", (long long)tx.time.tv_sec * NS_PER_S);
+#endif
 
     /* An id naming this process's CPU clock, and one naming this thread's, are readings about
        somebody rather than clocks this process consumes, so they stay genuine. */
@@ -219,6 +258,7 @@ static void passed_through(void) {
         say("pthread_cpuclockid.genuine", genuine(own));
     }
 
+#ifndef __FreeBSD__
     /* A dynamic clock id names a hardware device. Ours names a descriptor that is no such device,
        so the kernel refuses it, faked and genuine alike. */
     errno = 0;
@@ -228,7 +268,8 @@ static void passed_through(void) {
     say("dynamic.genuine_rc", libtimewarp_genuine_clock_gettime(FD_TO_CLOCKID(3), &ts));
     say("dynamic.genuine_errno", errno);
 
-    /* Numbers `syscall()` must hand to the kernel exactly as they came. */
+    /* Numbers `syscall()` must hand to the kernel exactly as they came. Only Linux takes the
+       function over, so only there is there anything to prove. */
     say("sys_getpid", (long long)syscall(SYS_getpid));
     say("getpid", (long long)getpid());
     memset(&res, 0, sizeof res);
@@ -237,8 +278,10 @@ static void passed_through(void) {
     errno = 0;
     say("sys_unknown.rc", (long long)syscall(-1L));
     say("sys_unknown.errno", errno);
+#endif
 }
 
+#ifndef __FreeBSD__
 /* A system call that uses all six argument registers: the second page of `path`, mapped through
    `syscall()`, whose last argument is the offset. */
 static void six_arguments(const char *path) {
@@ -258,6 +301,7 @@ static void six_arguments(const char *path) {
     }
     close(fd);
 }
+#endif
 
 int main(int argc, char **argv) {
     const char *shared;
@@ -275,9 +319,14 @@ int main(int argc, char **argv) {
     cpu_group("b");
 
     passed_through();
+#ifndef __FreeBSD__
     if (argc > 1) {
         six_arguments(argv[1]);
     }
+#else
+    (void)argc;
+    (void)argv;
+#endif
 
     shared = getenv("LIBTIMEWARP__SHARED_FILE");
     printf("shared=%s\n", shared ? shared : "");
