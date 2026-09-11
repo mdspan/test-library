@@ -1032,6 +1032,45 @@ pub fn wait_duration(header: &Header, clock: libc::clockid_t, fake: Nanos) -> Op
     }
 }
 
+/// The fake duration a timer's genuine remaining stands for, or `None` when the timer belongs to
+/// the genuine clock.
+///
+/// The other direction from [`wait_duration`], and the one a timer query needs: the kernel counts
+/// down in genuine time, and the program is owed the count in its own. So the remaining is
+/// multiplied by the rate of the family the timer follows.
+///
+/// The same read path as [`clock_now`]: no lock, no allocation, nothing written to shared memory.
+#[inline]
+pub fn timer_remaining(header: &Header, clock: libc::clockid_t, genuine: Nanos) -> Option<Nanos> {
+    match Keeper::from_tag(header.keeper)? {
+        Keeper::Affine => {
+            let family = clock::family_of(clock)?;
+            sync::read(header, |params| {
+                Some(remaining_of(family_rate(params, family), genuine))
+            })
+        }
+        // Genuine time underneath, so a timer counts down in exactly the units it was armed in.
+        Keeper::Null => None,
+    }
+}
+
+/// One timer query's arithmetic.
+///
+/// Nothing left stays nothing left, because a timer with no remaining is a disarmed one rather
+/// than one about to fire. Something left never becomes nothing: a frozen family owes the timer
+/// the longest duration there is, the way it owes a wait one, and a family too slow for the
+/// remaining to round to a nanosecond still owes it the nanosecond that says it is armed.
+#[inline]
+fn remaining_of(rate: Rate, genuine: Nanos) -> Nanos {
+    if genuine.0 <= 0 {
+        return Nanos::ZERO;
+    }
+    if rate == Rate::FROZEN {
+        return Nanos(i64::MAX);
+    }
+    Nanos(rate.scale(genuine.0).max(1))
+}
+
 /// How fast one family runs, off shared memory a writer may be changing. Every bit pattern is a
 /// rate, so a torn read is discarded by the seqlock around this rather than caught inside it.
 #[inline]

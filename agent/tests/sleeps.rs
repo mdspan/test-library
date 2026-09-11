@@ -28,7 +28,7 @@ use std::process::{Child, Command, Stdio};
 
 use common::time::Family;
 use controller::Controller;
-use harness::{Report, Run, arena_words, only_session};
+use harness::{Report, Run, Seen, calls_seen, only_session};
 
 const MILLI: i64 = 1_000_000;
 
@@ -311,29 +311,6 @@ fn a_frozen_clock_holds_a_sleeper_and_thawing_does_not_release_it() {
     // Killing the process is the only exit, which is what the design says to expect.
     child.kill().unwrap();
     drop(child.wait());
-}
-
-/// What the hook recorded: one triple per call, in the order they arrived.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Seen {
-    func: i64,
-    kind: i64,
-    clock: i64,
-}
-
-/// The log `clock_group.c` left in the arena.
-fn calls_seen(session: &common::session::Session) -> Vec<Seen> {
-    let count = arena_words(session, 1).first().copied().unwrap_or(0);
-    let words = arena_words(session, 1 + usize::try_from(count).unwrap() * 3);
-    words
-        .get(1..)
-        .unwrap_or_default()
-        .chunks_exact(3)
-        .filter_map(|triple| match *triple {
-            [func, kind, clock] => Some(Seen { func, kind, clock }),
-            _ => None,
-        })
-        .collect()
 }
 
 /// Every function of the sleeps and timeouts rows, the number the ABI gives it, and the clock of

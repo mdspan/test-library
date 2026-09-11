@@ -11,12 +11,14 @@ mod platform;
 mod setter;
 mod state;
 
-// The waits are Linux's own. `epoll`, the timed message queues, the C11 threads calls and the
-// `clockwait` pair have no shape the three platforms share, and the other two answer a wait with
-// `kevent` and `mach_wait_until` besides, so each brings its own with its arm.
+// The waits and the timers are Linux's own. `epoll`, the timed message queues, the C11 threads
+// calls and the `clockwait` pair have no shape the three platforms share, and the other two answer
+// a wait with `kevent` and `mach_wait_until` besides, so each brings its own with its arm.
 cfg_if::cfg_if! {
     if #[cfg(target_os = "linux")] {
+        mod clocks;
         mod genuine;
+        mod timer;
         mod wait;
     }
 }

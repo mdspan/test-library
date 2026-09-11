@@ -15,6 +15,9 @@
 //!
 //! Every path here converts and then blocks in the genuine function. Nothing is written to shared
 //! memory, nothing is allocated, and nothing recurses into a symbol we took over.
+//!
+//! A timer converts by the same rules when it is armed, so [`crate::timer`] reaches these
+//! conversions through [`genuine_duration`] and [`deadline`] rather than building its own.
 
 pub(crate) mod cond;
 
@@ -34,7 +37,7 @@ const NANOS_PER_MILLI: i64 = 1_000_000;
 const NANOS_PER_MICRO: i64 = 1_000;
 
 /// The first microsecond a `timeval`'s fraction may not name, in the width the field has.
-const MICROS_PER_SECOND: libc::suseconds_t = 1_000_000;
+pub(crate) const MICROS_PER_SECOND: libc::suseconds_t = 1_000_000;
 
 /// One wait's conversion: the fake duration the program asked for, and the genuine duration it
 /// blocks in.
@@ -88,6 +91,13 @@ fn converted(func: Func, clock: libc::clockid_t, fake: Nanos) -> Option<Wait> {
     })
 }
 
+/// The genuine duration a fake one becomes, or `None` when it passes through as the program wrote
+/// it, under the rules [`converted`] applies. What a timer arm needs, which carries no remainder.
+#[inline]
+pub(crate) fn genuine_duration(func: Func, clock: libc::clockid_t, fake: Nanos) -> Option<Nanos> {
+    Some(converted(func, clock, fake)?.genuine)
+}
+
 /// The genuine deadline on `clock` that a fake deadline becomes, or `None` when the wait passes
 /// through as the program wrote it.
 ///
@@ -96,7 +106,7 @@ fn converted(func: Func, clock: libc::clockid_t, fake: Nanos) -> Option<Wait> {
 /// duration was measured from. A wait that lands a hair late keeps its promise; one that lands
 /// early breaks it.
 #[inline]
-fn deadline(func: Func, clock: libc::clockid_t, at: Nanos) -> Option<Nanos> {
+pub(crate) fn deadline(func: Func, clock: libc::clockid_t, at: Nanos) -> Option<Nanos> {
     let showing = interpose::reading(func, clock)?;
     let remaining = Nanos(at.saturating_sub(showing).0.max(0));
     let wait = converted(func, clock, remaining)?;
@@ -115,7 +125,7 @@ fn instant_of(ts: &libc::timespec) -> Option<Nanos> {
 
 /// The duration a relative `timespec` names, or `None` when the pair is one the genuine function
 /// would refuse.
-fn duration_of(ts: &libc::timespec) -> Option<Nanos> {
+pub(crate) fn duration_of(ts: &libc::timespec) -> Option<Nanos> {
     (ts.tv_sec >= 0 && (0..Nanos::SECOND).contains(&ts.tv_nsec)).then(|| Nanos::from_timespec(ts))
 }
 
@@ -184,7 +194,7 @@ fn to_millis(genuine: Nanos) -> libc::c_int {
 
 /// What a call reports when this libc defines no function by that name, which only a program
 /// calling a name its own libc never had can reach. libc's convention.
-fn unsupported() -> libc::c_int {
+pub(crate) fn unsupported() -> libc::c_int {
     platform::set_errno(libc::ENOSYS);
     -1
 }

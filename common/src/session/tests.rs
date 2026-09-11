@@ -760,6 +760,77 @@ fn a_null_session_leaves_an_amount_of_consumed_cpu_alone() {
 }
 
 #[test]
+fn a_timer_query_converts_the_genuine_remaining_into_the_familys_own_units() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut setup = setup_in(tmp.path());
+    setup.monotonic.rate = Rate::from_f64(10.0).unwrap();
+    setup.cpu_rate = Rate::from_f64(0.5).unwrap();
+    let session = create(&setup).unwrap();
+    let header = session.header();
+
+    // A tenth of a genuine second left on a ten-times clock is a whole second in the program's own
+    // units, which is what it armed the timer for.
+    let tenth = Nanos(Nanos::SECOND / 10);
+    assert_eq!(
+        timer_remaining(header, clock::MONOTONIC, tenth),
+        Some(Nanos(Nanos::SECOND))
+    );
+    // The Realtime family is left at real speed here, so its timers count down as they were armed.
+    assert_eq!(timer_remaining(header, clock::REALTIME, tenth), Some(tenth),);
+    // And a Cpu timer follows the Cpu rate, which is the one setting that family has.
+    assert_eq!(
+        timer_remaining(header, clock::PROCESS_CPUTIME, tenth),
+        Some(Nanos(Nanos::SECOND / 20))
+    );
+    // A clock the family table leaves alone counts down in genuine units.
+    assert_eq!(timer_remaining(header, -4, tenth), None);
+}
+
+#[test]
+fn a_disarmed_timer_has_nothing_left_and_an_armed_one_never_has_nothing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut setup = setup_in(tmp.path());
+    setup.monotonic.rate = Rate::FROZEN;
+    setup.realtime.rate = Rate(1);
+    let session = create(&setup).unwrap();
+    let header = session.header();
+
+    // Zero is what a disarmed timer reports, on any rate at all, so it converts to itself rather
+    // than to the duration a frozen family owes.
+    for clock in [clock::MONOTONIC, clock::REALTIME] {
+        assert_eq!(
+            timer_remaining(header, clock, Nanos::ZERO),
+            Some(Nanos::ZERO)
+        );
+    }
+    // A frozen family's clock never advances, so a timer still armed under it is owed every
+    // nanosecond we can name.
+    assert_eq!(
+        timer_remaining(header, clock::MONOTONIC, Nanos(1)),
+        Some(Nanos(i64::MAX))
+    );
+    // And the slowest rate there is leaves a timer with the nanosecond that says it is armed,
+    // rather than the nothing that would say it is not.
+    assert_eq!(
+        timer_remaining(header, clock::REALTIME, Nanos(1)),
+        Some(Nanos(1))
+    );
+}
+
+#[test]
+fn a_null_session_leaves_a_timers_remaining_alone() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut setup = setup_in(tmp.path());
+    setup.keeper = Keeper::Null;
+    let session = create(&setup).unwrap();
+
+    assert_eq!(
+        timer_remaining(session.header(), clock::MONOTONIC, Nanos(250)),
+        None
+    );
+}
+
+#[test]
 fn the_clocks_the_family_table_leaves_alone_read_genuine() {
     let tmp = tempfile::tempdir().unwrap();
     let session = create(&setup_in(tmp.path())).unwrap();

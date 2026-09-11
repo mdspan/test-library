@@ -2,13 +2,15 @@
 //!
 //! The clock group reaches the kernel by number, because those calls have one. A wait does not:
 //! `pthread_cond_timedwait` and its neighbours are libc's own constructions over futexes, so the
-//! genuine side comes from the loader, by name. Every name below is one we export ourselves, which
-//! is why calling it directly would come straight back to us.
+//! genuine side comes from the loader, by name. A timer is the same: `timer_create` and its
+//! neighbours carry libc state of their own. Every name below is one we export ourselves, which is
+//! why calling it directly would come straight back to us.
 //!
 //! Adding a function is one entry in [`genuine!`]: the slot, the lookup, and the wrapper all come
 //! from there, and [`prime`] finds it with the rest at load.
 //!
-//! Linux's list, because the waits it takes over are Linux's; the other two arms bring their own.
+//! Linux's list, because the waits and the timers it takes over are Linux's; the other two arms
+//! bring their own.
 
 use std::ffi::c_void;
 use std::ptr::{self, NonNull};
@@ -273,4 +275,48 @@ genuine! {
         priority: *mut libc::c_uint,
         abstime: *const libc::timespec,
     ) -> libc::ssize_t;
+
+    /// The genuine `setitimer`, which every interval timer of ours is armed through, `alarm`
+    /// included.
+    fn setitimer(
+        which: libc::c_int,
+        new_value: *const libc::itimerval,
+        old_value: *mut libc::itimerval,
+    ) -> libc::c_int;
+
+    /// The genuine `getitimer`.
+    fn getitimer(which: libc::c_int, curr_value: *mut libc::itimerval) -> libc::c_int;
+
+    /// The genuine `timer_create`, which reads no time and hands back the id we record a clock
+    /// against.
+    fn timer_create(
+        clock: libc::clockid_t,
+        sevp: *mut libc::sigevent,
+        timerid: *mut libc::timer_t,
+    ) -> libc::c_int;
+
+    /// The genuine `timer_settime`.
+    fn timer_settime(
+        timerid: libc::timer_t,
+        flags: libc::c_int,
+        new_value: *const libc::itimerspec,
+        old_value: *mut libc::itimerspec,
+    ) -> libc::c_int;
+
+    /// The genuine `timer_gettime`.
+    fn timer_gettime(timerid: libc::timer_t, curr_value: *mut libc::itimerspec) -> libc::c_int;
+
+    /// The genuine `timerfd_create`, which reads no time either.
+    fn timerfd_create(clock: libc::clockid_t, flags: libc::c_int) -> libc::c_int;
+
+    /// The genuine `timerfd_settime`.
+    fn timerfd_settime(
+        fd: libc::c_int,
+        flags: libc::c_int,
+        new_value: *const libc::itimerspec,
+        old_value: *mut libc::itimerspec,
+    ) -> libc::c_int;
+
+    /// The genuine `timerfd_gettime`.
+    fn timerfd_gettime(fd: libc::c_int, curr_value: *mut libc::itimerspec) -> libc::c_int;
 }

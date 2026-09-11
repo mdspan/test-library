@@ -8,6 +8,7 @@ use common::platform::{SYSCALL_ARGS, genuine_syscall, set_errno};
 
 use crate::interpose::{self, Timeb};
 use crate::setter;
+use crate::timer;
 use crate::wait;
 
 /// # Safety
@@ -612,4 +613,104 @@ pub(super) unsafe extern "C" fn mq_timedreceive(
 ) -> libc::ssize_t {
     // Safety: the caller is the program, calling under libc's contract.
     unsafe { wait::mq_timedreceive(mqdes, msg, len, priority, abstime) }
+}
+
+// The timers. Each arm converts the duration or the expiry the program asked for, and each query
+// converts the genuine remaining back into the program's own units; `timer` has the rules.
+
+/// # Safety
+/// Called by the program with libc's contract for this function.
+#[unsafe(no_mangle)]
+pub(super) unsafe extern "C" fn setitimer(
+    which: libc::c_int,
+    new_value: *const libc::itimerval,
+    old_value: *mut libc::itimerval,
+) -> libc::c_int {
+    // Safety: the caller is the program, calling under libc's contract.
+    unsafe { timer::setitimer(which, new_value, old_value) }
+}
+
+/// # Safety
+/// Called by the program with libc's contract for this function.
+#[unsafe(no_mangle)]
+pub(super) unsafe extern "C" fn getitimer(
+    which: libc::c_int,
+    curr_value: *mut libc::itimerval,
+) -> libc::c_int {
+    // Safety: the caller is the program, calling under libc's contract.
+    unsafe { timer::getitimer(which, curr_value) }
+}
+
+/// Whole seconds of wall-clock alarm, which takes a count and so needs no contract.
+#[unsafe(no_mangle)]
+pub(super) extern "C" fn alarm(seconds: libc::c_uint) -> libc::c_uint {
+    timer::alarm(seconds)
+}
+
+/// Reads no time: it learns which clock the timer it creates arms against.
+///
+/// # Safety
+/// Called by the program with libc's contract for this function.
+#[unsafe(no_mangle)]
+pub(super) unsafe extern "C" fn timer_create(
+    clock: libc::clockid_t,
+    sevp: *mut libc::sigevent,
+    timerid: *mut libc::timer_t,
+) -> libc::c_int {
+    // Safety: the caller is the program, calling under libc's contract.
+    unsafe { timer::timer_create(clock, sevp, timerid) }
+}
+
+/// # Safety
+/// Called by the program with libc's contract for this function.
+#[unsafe(no_mangle)]
+pub(super) unsafe extern "C" fn timer_settime(
+    timerid: libc::timer_t,
+    flags: libc::c_int,
+    new_value: *const libc::itimerspec,
+    old_value: *mut libc::itimerspec,
+) -> libc::c_int {
+    // Safety: the caller is the program, calling under libc's contract.
+    unsafe { timer::timer_settime(timerid, flags, new_value, old_value) }
+}
+
+/// # Safety
+/// Called by the program with libc's contract for this function.
+#[unsafe(no_mangle)]
+pub(super) unsafe extern "C" fn timer_gettime(
+    timerid: libc::timer_t,
+    curr_value: *mut libc::itimerspec,
+) -> libc::c_int {
+    // Safety: the caller is the program, calling under libc's contract.
+    unsafe { timer::timer_gettime(timerid, curr_value) }
+}
+
+/// Reads no time either: it learns which clock the timerfd it creates arms against.
+#[unsafe(no_mangle)]
+pub(super) extern "C" fn timerfd_create(clock: libc::clockid_t, flags: libc::c_int) -> libc::c_int {
+    timer::timerfd_create(clock, flags)
+}
+
+/// # Safety
+/// Called by the program with libc's contract for this function.
+#[unsafe(no_mangle)]
+pub(super) unsafe extern "C" fn timerfd_settime(
+    fd: libc::c_int,
+    flags: libc::c_int,
+    new_value: *const libc::itimerspec,
+    old_value: *mut libc::itimerspec,
+) -> libc::c_int {
+    // Safety: the caller is the program, calling under libc's contract.
+    unsafe { timer::timerfd_settime(fd, flags, new_value, old_value) }
+}
+
+/// # Safety
+/// Called by the program with libc's contract for this function.
+#[unsafe(no_mangle)]
+pub(super) unsafe extern "C" fn timerfd_gettime(
+    fd: libc::c_int,
+    curr_value: *mut libc::itimerspec,
+) -> libc::c_int {
+    // Safety: the caller is the program, calling under libc's contract.
+    unsafe { timer::timerfd_gettime(fd, curr_value) }
 }

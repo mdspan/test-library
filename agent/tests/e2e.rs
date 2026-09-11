@@ -264,10 +264,11 @@ fn the_library_exports_the_interposed_names_and_nothing_else() {
         .collect();
     exported.sort();
 
-    // Every name the clock group, the sleeps, the timeouts and the setters take over, glibc's
-    // internal aliases among them, the two calls that learn a condition variable's clock, and the
-    // one symbol of our own that a hook or a controller calls. Nothing else: a name here that the
-    // interposition table does not list would be a name we answer for by accident.
+    // Every name the clock group, the sleeps, the timeouts, the timers and the setters take over,
+    // glibc's internal aliases among them, the three calls that learn which clock an object of the
+    // program's was built with, and the one symbol of our own that a hook or a controller calls.
+    // Nothing else: a name here that the interposition table does not list would be a name we
+    // answer for by accident.
     assert_eq!(
         exported,
         [
@@ -277,6 +278,7 @@ fn the_library_exports_the_interposed_names_and_nothing_else() {
             "__time",
             "adjtime",
             "aio_suspend",
+            "alarm",
             "clock",
             "clock_gettime",
             "clock_nanosleep",
@@ -286,6 +288,7 @@ fn the_library_exports_the_interposed_names_and_nothing_else() {
             "epoll_pwait2",
             "epoll_wait",
             "ftime",
+            "getitimer",
             "getrusage",
             "gettimeofday",
             "libtimewarp_genuine_clock_gettime",
@@ -308,12 +311,19 @@ fn the_library_exports_the_interposed_names_and_nothing_else() {
             "select",
             "sem_clockwait",
             "sem_timedwait",
+            "setitimer",
             "settimeofday",
             "sigtimedwait",
             "sleep",
             "syscall",
             "thrd_sleep",
             "time",
+            "timer_create",
+            "timer_gettime",
+            "timer_settime",
+            "timerfd_create",
+            "timerfd_gettime",
+            "timerfd_settime",
             "times",
             "timespec_get",
             "usleep",

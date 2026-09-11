@@ -198,6 +198,29 @@ pub(crate) fn arena_words(session: &common::session::Session, count: usize) -> V
         .collect()
 }
 
+/// What the `clock_group` hook recorded: one triple per call, in the order they arrived.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Seen {
+    pub(crate) func: i64,
+    pub(crate) kind: i64,
+    pub(crate) clock: i64,
+}
+
+/// The log `clock_group.c` left in the arena.
+pub(crate) fn calls_seen(session: &common::session::Session) -> Vec<Seen> {
+    let count = arena_words(session, 1).first().copied().unwrap_or(0);
+    let words = arena_words(session, 1 + usize::try_from(count).unwrap() * 3);
+    words
+        .get(1..)
+        .unwrap_or_default()
+        .chunks_exact(3)
+        .filter_map(|triple| match *triple {
+            [func, kind, clock] => Some(Seen { func, kind, clock }),
+            _ => None,
+        })
+        .collect()
+}
+
 /// Whatever a run wrote to the log file it was given, or nothing when it wrote none.
 pub(crate) fn log_of(path: &Path) -> String {
     std::fs::read_to_string(path).unwrap_or_default()

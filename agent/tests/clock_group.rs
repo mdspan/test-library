@@ -17,7 +17,7 @@ mod harness;
 
 use std::path::{Path, PathBuf};
 
-use harness::{HOUR, Report, Run, arena_words, only_session};
+use harness::{HOUR, Report, Run, Seen, calls_seen, only_session};
 
 /// Every function that answers the wall clock, by the key `clocks` reports it under. The three
 /// `sys_` keys are `syscall()` asked for the same three numbers libc would use.
@@ -283,29 +283,6 @@ fn syscall_hands_every_other_number_to_the_kernel_untouched() {
         i64::from(b'B'),
         "the six arguments of mmap did not reach the kernel"
     );
-}
-
-/// What the hook recorded: one triple per call, in the order they arrived.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Seen {
-    func: i64,
-    kind: i64,
-    clock: i64,
-}
-
-/// The log `clock_group.c` left in the arena.
-fn calls_seen(session: &common::session::Session) -> Vec<Seen> {
-    let count = arena_words(session, 1).first().copied().unwrap_or(0);
-    let words = arena_words(session, 1 + usize::try_from(count).unwrap() * 3);
-    words
-        .get(1..)
-        .unwrap_or_default()
-        .chunks_exact(3)
-        .filter_map(|triple| match *triple {
-            [func, kind, clock] => Some(Seen { func, kind, clock }),
-            _ => None,
-        })
-        .collect()
 }
 
 #[test]
