@@ -133,10 +133,15 @@ mod tests {
 
     #[test]
     fn every_named_clock_belongs_to_a_family_and_reads() {
+        // The two alarm clocks need CAP_WAKE_ALARM; without it the kernel refuses the id outright,
+        // so a reading is only demanded of the clocks any process may ask.
+        let capability_gated = [clock::REALTIME_ALARM, clock::BOOTTIME_ALARM];
         for &(name, id) in clock::NAMED {
             assert_eq!(clock_named(name), Some(id));
             assert!(clock::family_of(id).is_some(), "{name}");
-            assert!(genuine_nanos(id).is_some(), "{name}");
+            if !capability_gated.contains(&id) {
+                assert!(genuine_nanos(id).is_some(), "{name}");
+            }
         }
         assert_eq!(clock_named("CLOCK_YESTERDAY"), None);
     }
