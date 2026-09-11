@@ -16,7 +16,7 @@ use common::config::ENV_LOG;
 use common::log::{Level, Sink};
 use common::platform::clock;
 use common::session::layout::WriterState;
-use common::session::{self, Setup, clock_now};
+use common::session::{self, Setup, clock_now, timestamp_shown, timestamp_stored};
 use common::time::Nanos;
 
 static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
@@ -121,6 +121,37 @@ fn reading_the_clock_allocates_nothing() {
             let now = clock_now(header, clock::REALTIME).unwrap();
             assert!(now >= last);
             last = now;
+        }
+    });
+    assert_eq!(counted, 0);
+}
+
+#[test]
+fn converting_a_file_timestamp_allocates_nothing() {
+    let _measuring = measuring();
+    let dir = tempfile::tempdir().unwrap();
+    let mut setup = Setup::plain(dir.path().join("libtimewarp"));
+    setup.realtime.shift = Nanos(-7_200 * Nanos::SECOND);
+    let session = session::create(&setup).unwrap();
+    let header = session.header();
+
+    // A `stat` and a `utime` run wherever the program can make one, so both directions are read
+    // paths and neither may allocate.
+    let stamps = [
+        Nanos::ZERO,
+        Nanos(1_700_000_000 * Nanos::SECOND),
+        Nanos(i64::MAX),
+    ];
+    for stamp in stamps {
+        assert!(timestamp_shown(header, stamp).is_some());
+        assert!(timestamp_stored(header, stamp).is_some());
+    }
+    let counted = allocations_in(|| {
+        for _ in 0..1_000 {
+            for stamp in stamps {
+                assert!(timestamp_shown(header, stamp).is_some());
+                assert!(timestamp_stored(header, stamp).is_some());
+            }
         }
     });
     assert_eq!(counted, 0);

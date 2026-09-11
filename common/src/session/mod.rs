@@ -1054,6 +1054,74 @@ pub fn timer_remaining(header: &Header, clock: libc::clockid_t, genuine: Nanos) 
     }
 }
 
+/// What the session shows for a genuine file timestamp, or `None` when the timestamp stands as the
+/// filesystem recorded it.
+///
+/// A timestamp must agree with the clock: a file written just now shows a modification time of
+/// about now. So the genuine instant is placed against a paired sample of the two nows and carried
+/// forward at the family's rate, `fake_now + rate * (ts - real_now)`. A result below zero clamps
+/// there: that case is a clock set far into the past with an old file, and no timestamp reads
+/// before the epoch because of us.
+///
+/// The rule is the Realtime family's alone, because a file timestamp is a wall-clock instant.
+///
+/// The same read path as [`clock_now`]: no lock, no allocation, nothing written to shared memory.
+#[inline]
+pub fn timestamp_shown(header: &Header, stamp: Nanos) -> Option<Nanos> {
+    match Keeper::from_tag(header.keeper)? {
+        Keeper::Affine => sync::read(header, |params| {
+            let (fake_now, real_now) = realtime_pair(params)?;
+            let rate = family_rate(params, Family::Realtime);
+            let carried = Nanos(rate.scale(stamp.saturating_sub(real_now).0));
+            Some(Nanos(fake_now.saturating_add(carried).0.max(0)))
+        }),
+        // Genuine time underneath, so a timestamp reads as the filesystem wrote it.
+        Keeper::Null => None,
+    }
+}
+
+/// The genuine instant a file timestamp the program asked for is stored as, or `None` when it is
+/// stored as the program wrote it.
+///
+/// The other direction from [`timestamp_shown`]: the program names an instant in the faked wall
+/// clock and the filesystem keeps genuine ones, so the instant is measured back from the pair,
+/// `real_now + (ts - fake_now) / rate`. A frozen family stores the genuine now, because a clock
+/// that never advances puts every instant it could name infinitely far away.
+///
+/// The same read path as [`clock_now`]: no lock, no allocation, nothing written to shared memory.
+#[inline]
+pub fn timestamp_stored(header: &Header, stamp: Nanos) -> Option<Nanos> {
+    match Keeper::from_tag(header.keeper)? {
+        Keeper::Affine => sync::read(header, |params| {
+            let (fake_now, real_now) = realtime_pair(params)?;
+            let rate = family_rate(params, Family::Realtime);
+            if rate == Rate::FROZEN {
+                return Some(real_now);
+            }
+            let measured = Nanos(rate.unscale(stamp.saturating_sub(fake_now).0));
+            Some(real_now.saturating_add(measured))
+        }),
+        Keeper::Null => None,
+    }
+}
+
+/// One paired sample of faked and genuine `CLOCK_REALTIME`, which is what a file timestamp is
+/// converted against.
+///
+/// With no timebase override the two come from a single reading, so the pair is exact. An override
+/// makes the family track another clock, which has a reading of its own to take.
+#[inline]
+fn realtime_pair(params: &layout::Params) -> Option<(Nanos, Nanos)> {
+    let real_now = platform::genuine_nanos(clock::REALTIME)?;
+    let timebase = params.realtime.timebase();
+    let passage = if timebase == clock::REALTIME {
+        real_now
+    } else {
+        platform::genuine_nanos(timebase)?
+    };
+    Some((params.realtime.load().project(passage), real_now))
+}
+
 /// One timer query's arithmetic.
 ///
 /// Nothing left stays nothing left, because a timer with no remaining is a disarmed one rather

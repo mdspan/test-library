@@ -9,6 +9,10 @@
 //! Adding a function is one entry in [`genuine!`]: the slot, the lookup, and the wrapper all come
 //! from there, and [`prime`] finds it with the rest at load.
 //!
+//! The file timestamps come by name too. `stat` has no one system call across the architectures
+//! we support, and the buffer libc fills is libc's own shape rather than the kernel's, so the
+//! honest way past ours is the definition the loader would have bound.
+//!
 //! Linux's list, because the waits and the timers it takes over are Linux's; the other two arms
 //! bring their own.
 
@@ -319,4 +323,125 @@ genuine! {
 
     /// The genuine `timerfd_gettime`.
     fn timerfd_gettime(fd: libc::c_int, curr_value: *mut libc::itimerspec) -> libc::c_int;
+
+    /// The genuine `stat`, which glibc exports under this name only from 2.33.
+    fn stat(path: *const libc::c_char, buf: *mut libc::stat) -> libc::c_int;
+
+    /// The genuine `stat64`.
+    fn stat64(path: *const libc::c_char, buf: *mut libc::stat64) -> libc::c_int;
+
+    /// The genuine `fstat`.
+    fn fstat(fd: libc::c_int, buf: *mut libc::stat) -> libc::c_int;
+
+    /// The genuine `fstat64`.
+    fn fstat64(fd: libc::c_int, buf: *mut libc::stat64) -> libc::c_int;
+
+    /// The genuine `lstat`.
+    fn lstat(path: *const libc::c_char, buf: *mut libc::stat) -> libc::c_int;
+
+    /// The genuine `lstat64`.
+    fn lstat64(path: *const libc::c_char, buf: *mut libc::stat64) -> libc::c_int;
+
+    /// The genuine `fstatat`.
+    fn fstatat(
+        dirfd: libc::c_int,
+        path: *const libc::c_char,
+        buf: *mut libc::stat,
+        flags: libc::c_int,
+    ) -> libc::c_int;
+
+    /// The genuine `fstatat64`.
+    fn fstatat64(
+        dirfd: libc::c_int,
+        path: *const libc::c_char,
+        buf: *mut libc::stat64,
+        flags: libc::c_int,
+    ) -> libc::c_int;
+
+    /// The genuine `statx`, which libc has only from glibc 2.28. Its buffer is the kernel's own
+    /// shape, which [`crate::stamp`] declares, so it travels here as the block of bytes it is.
+    fn statx(
+        dirfd: libc::c_int,
+        path: *const libc::c_char,
+        flags: libc::c_int,
+        mask: libc::c_uint,
+        buf: *mut c_void,
+    ) -> libc::c_int;
+
+    /// The genuine `__xstat`, the name glibc before 2.33 routes `stat` through. Still exported by
+    /// a newer one, for the programs built against an older one, which is what makes it the way
+    /// back to the genuine call on both.
+    fn __xstat(
+        version: libc::c_int,
+        path: *const libc::c_char,
+        buf: *mut libc::stat,
+    ) -> libc::c_int;
+
+    /// The genuine `__xstat64`.
+    fn __xstat64(
+        version: libc::c_int,
+        path: *const libc::c_char,
+        buf: *mut libc::stat64,
+    ) -> libc::c_int;
+
+    /// The genuine `__fxstat`.
+    fn __fxstat(version: libc::c_int, fd: libc::c_int, buf: *mut libc::stat) -> libc::c_int;
+
+    /// The genuine `__fxstat64`.
+    fn __fxstat64(version: libc::c_int, fd: libc::c_int, buf: *mut libc::stat64) -> libc::c_int;
+
+    /// The genuine `__lxstat`.
+    fn __lxstat(
+        version: libc::c_int,
+        path: *const libc::c_char,
+        buf: *mut libc::stat,
+    ) -> libc::c_int;
+
+    /// The genuine `__lxstat64`.
+    fn __lxstat64(
+        version: libc::c_int,
+        path: *const libc::c_char,
+        buf: *mut libc::stat64,
+    ) -> libc::c_int;
+
+    /// The genuine `__fxstatat`.
+    fn __fxstatat(
+        version: libc::c_int,
+        dirfd: libc::c_int,
+        path: *const libc::c_char,
+        buf: *mut libc::stat,
+        flags: libc::c_int,
+    ) -> libc::c_int;
+
+    /// The genuine `__fxstatat64`.
+    fn __fxstatat64(
+        version: libc::c_int,
+        dirfd: libc::c_int,
+        path: *const libc::c_char,
+        buf: *mut libc::stat64,
+        flags: libc::c_int,
+    ) -> libc::c_int;
+
+    /// The genuine `utime`.
+    fn utime(path: *const libc::c_char, times: *const libc::utimbuf) -> libc::c_int;
+
+    /// The genuine `utimes`.
+    fn utimes(path: *const libc::c_char, times: *const libc::timeval) -> libc::c_int;
+
+    /// The genuine `futimes`.
+    fn futimes(fd: libc::c_int, times: *const libc::timeval) -> libc::c_int;
+
+    /// The genuine `lutimes`.
+    fn lutimes(path: *const libc::c_char, times: *const libc::timeval) -> libc::c_int;
+
+    /// The genuine `utimensat`.
+    fn utimensat(
+        dirfd: libc::c_int,
+        path: *const libc::c_char,
+        times: *const libc::timespec,
+        flags: libc::c_int,
+    ) -> libc::c_int;
+
+    /// The genuine `futimens`.
+    fn futimens(fd: libc::c_int, times: *const libc::timespec) -> libc::c_int;
 }

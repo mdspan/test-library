@@ -4,10 +4,13 @@
 //! built to call them, and one is `syscall()`, which is Linux's way of asking for a call by number.
 //! The synthetic vDSO that catches Go lands here later.
 
+use std::ffi::c_char;
+
 use common::platform::{SYSCALL_ARGS, genuine_syscall, set_errno};
 
 use crate::interpose::{self, Timeb};
 use crate::setter;
+use crate::stamp::{self, Statx};
 use crate::timer;
 use crate::wait;
 
@@ -713,4 +716,281 @@ pub(super) unsafe extern "C" fn timerfd_gettime(
 ) -> libc::c_int {
     // Safety: the caller is the program, calling under libc's contract.
     unsafe { timer::timerfd_gettime(fd, curr_value) }
+}
+
+// The file timestamps. A read converts the buffer the genuine call filled, and a set converts a
+// copy of what the program asked for; `stamp` has the rules.
+
+/// # Safety
+/// Called by the program with libc's contract for this function.
+#[unsafe(no_mangle)]
+pub(super) unsafe extern "C" fn stat(path: *const c_char, buf: *mut libc::stat) -> libc::c_int {
+    // Safety: the caller is the program, calling under libc's contract.
+    unsafe { stamp::stat(path, buf) }
+}
+
+/// The same buffer under the name a program built for large files calls it by.
+///
+/// # Safety
+/// Called by the program with libc's contract for this function.
+#[unsafe(no_mangle)]
+pub(super) unsafe extern "C" fn stat64(path: *const c_char, buf: *mut libc::stat64) -> libc::c_int {
+    // Safety: the caller is the program, calling under libc's contract.
+    unsafe { stamp::stat64(path, buf) }
+}
+
+/// # Safety
+/// Called by the program with libc's contract for this function.
+#[unsafe(no_mangle)]
+pub(super) unsafe extern "C" fn fstat(fd: libc::c_int, buf: *mut libc::stat) -> libc::c_int {
+    // Safety: the caller is the program, calling under libc's contract.
+    unsafe { stamp::fstat(fd, buf) }
+}
+
+/// # Safety
+/// Called by the program with libc's contract for this function.
+#[unsafe(no_mangle)]
+pub(super) unsafe extern "C" fn fstat64(fd: libc::c_int, buf: *mut libc::stat64) -> libc::c_int {
+    // Safety: the caller is the program, calling under libc's contract.
+    unsafe { stamp::fstat64(fd, buf) }
+}
+
+/// # Safety
+/// Called by the program with libc's contract for this function.
+#[unsafe(no_mangle)]
+pub(super) unsafe extern "C" fn lstat(path: *const c_char, buf: *mut libc::stat) -> libc::c_int {
+    // Safety: the caller is the program, calling under libc's contract.
+    unsafe { stamp::lstat(path, buf) }
+}
+
+/// # Safety
+/// Called by the program with libc's contract for this function.
+#[unsafe(no_mangle)]
+pub(super) unsafe extern "C" fn lstat64(
+    path: *const c_char,
+    buf: *mut libc::stat64,
+) -> libc::c_int {
+    // Safety: the caller is the program, calling under libc's contract.
+    unsafe { stamp::lstat64(path, buf) }
+}
+
+/// # Safety
+/// Called by the program with libc's contract for this function.
+#[unsafe(no_mangle)]
+pub(super) unsafe extern "C" fn fstatat(
+    dirfd: libc::c_int,
+    path: *const c_char,
+    buf: *mut libc::stat,
+    flags: libc::c_int,
+) -> libc::c_int {
+    // Safety: the caller is the program, calling under libc's contract.
+    unsafe { stamp::fstatat(dirfd, path, buf, flags) }
+}
+
+/// # Safety
+/// Called by the program with libc's contract for this function.
+#[unsafe(no_mangle)]
+pub(super) unsafe extern "C" fn fstatat64(
+    dirfd: libc::c_int,
+    path: *const c_char,
+    buf: *mut libc::stat64,
+    flags: libc::c_int,
+) -> libc::c_int {
+    // Safety: the caller is the program, calling under libc's contract.
+    unsafe { stamp::fstatat64(dirfd, path, buf, flags) }
+}
+
+/// Linux's own `stat`, the one call that carries a birth time.
+///
+/// # Safety
+/// Called by the program with libc's contract for this function.
+#[unsafe(no_mangle)]
+pub(super) unsafe extern "C" fn statx(
+    dirfd: libc::c_int,
+    path: *const c_char,
+    flags: libc::c_int,
+    mask: libc::c_uint,
+    buf: *mut Statx,
+) -> libc::c_int {
+    // Safety: the caller is the program, calling under libc's contract.
+    unsafe { stamp::statx(dirfd, path, flags, mask, buf) }
+}
+
+/// # Safety
+/// Called by the program with libc's contract for this function.
+#[unsafe(no_mangle)]
+pub(super) unsafe extern "C" fn utime(
+    path: *const c_char,
+    times: *const libc::utimbuf,
+) -> libc::c_int {
+    // Safety: the caller is the program, calling under libc's contract.
+    unsafe { stamp::utime(path, times) }
+}
+
+/// # Safety
+/// Called by the program with libc's contract for this function.
+#[unsafe(no_mangle)]
+pub(super) unsafe extern "C" fn utimes(
+    path: *const c_char,
+    times: *const libc::timeval,
+) -> libc::c_int {
+    // Safety: the caller is the program, calling under libc's contract.
+    unsafe { stamp::utimes(path, times) }
+}
+
+/// # Safety
+/// Called by the program with libc's contract for this function.
+#[unsafe(no_mangle)]
+pub(super) unsafe extern "C" fn futimes(
+    fd: libc::c_int,
+    times: *const libc::timeval,
+) -> libc::c_int {
+    // Safety: the caller is the program, calling under libc's contract.
+    unsafe { stamp::futimes(fd, times) }
+}
+
+/// # Safety
+/// Called by the program with libc's contract for this function.
+#[unsafe(no_mangle)]
+pub(super) unsafe extern "C" fn lutimes(
+    path: *const c_char,
+    times: *const libc::timeval,
+) -> libc::c_int {
+    // Safety: the caller is the program, calling under libc's contract.
+    unsafe { stamp::lutimes(path, times) }
+}
+
+/// # Safety
+/// Called by the program with libc's contract for this function.
+#[unsafe(no_mangle)]
+pub(super) unsafe extern "C" fn utimensat(
+    dirfd: libc::c_int,
+    path: *const c_char,
+    times: *const libc::timespec,
+    flags: libc::c_int,
+) -> libc::c_int {
+    // Safety: the caller is the program, calling under libc's contract.
+    unsafe { stamp::utimensat(dirfd, path, times, flags) }
+}
+
+/// # Safety
+/// Called by the program with libc's contract for this function.
+#[unsafe(no_mangle)]
+pub(super) unsafe extern "C" fn futimens(
+    fd: libc::c_int,
+    times: *const libc::timespec,
+) -> libc::c_int {
+    // Safety: the caller is the program, calling under libc's contract.
+    unsafe { stamp::futimens(fd, times) }
+}
+
+// The `__xstat` family, exported only by a build targeting a glibc from before 2.33: a program
+// built against such a glibc reaches `stat` and its neighbours through these names alone.
+
+/// # Safety
+/// Called by the program with libc's contract for this function.
+#[cfg(glibc_pre_2_33)]
+#[unsafe(no_mangle)]
+pub(super) unsafe extern "C" fn __xstat(
+    version: libc::c_int,
+    path: *const c_char,
+    buf: *mut libc::stat,
+) -> libc::c_int {
+    // Safety: the caller is the program, calling under libc's contract.
+    unsafe { stamp::xstat(version, path, buf) }
+}
+
+/// # Safety
+/// Called by the program with libc's contract for this function.
+#[cfg(glibc_pre_2_33)]
+#[unsafe(no_mangle)]
+pub(super) unsafe extern "C" fn __xstat64(
+    version: libc::c_int,
+    path: *const c_char,
+    buf: *mut libc::stat64,
+) -> libc::c_int {
+    // Safety: the caller is the program, calling under libc's contract.
+    unsafe { stamp::xstat64(version, path, buf) }
+}
+
+/// # Safety
+/// Called by the program with libc's contract for this function.
+#[cfg(glibc_pre_2_33)]
+#[unsafe(no_mangle)]
+pub(super) unsafe extern "C" fn __fxstat(
+    version: libc::c_int,
+    fd: libc::c_int,
+    buf: *mut libc::stat,
+) -> libc::c_int {
+    // Safety: the caller is the program, calling under libc's contract.
+    unsafe { stamp::fxstat(version, fd, buf) }
+}
+
+/// # Safety
+/// Called by the program with libc's contract for this function.
+#[cfg(glibc_pre_2_33)]
+#[unsafe(no_mangle)]
+pub(super) unsafe extern "C" fn __fxstat64(
+    version: libc::c_int,
+    fd: libc::c_int,
+    buf: *mut libc::stat64,
+) -> libc::c_int {
+    // Safety: the caller is the program, calling under libc's contract.
+    unsafe { stamp::fxstat64(version, fd, buf) }
+}
+
+/// # Safety
+/// Called by the program with libc's contract for this function.
+#[cfg(glibc_pre_2_33)]
+#[unsafe(no_mangle)]
+pub(super) unsafe extern "C" fn __lxstat(
+    version: libc::c_int,
+    path: *const c_char,
+    buf: *mut libc::stat,
+) -> libc::c_int {
+    // Safety: the caller is the program, calling under libc's contract.
+    unsafe { stamp::lxstat(version, path, buf) }
+}
+
+/// # Safety
+/// Called by the program with libc's contract for this function.
+#[cfg(glibc_pre_2_33)]
+#[unsafe(no_mangle)]
+pub(super) unsafe extern "C" fn __lxstat64(
+    version: libc::c_int,
+    path: *const c_char,
+    buf: *mut libc::stat64,
+) -> libc::c_int {
+    // Safety: the caller is the program, calling under libc's contract.
+    unsafe { stamp::lxstat64(version, path, buf) }
+}
+
+/// # Safety
+/// Called by the program with libc's contract for this function.
+#[cfg(glibc_pre_2_33)]
+#[unsafe(no_mangle)]
+pub(super) unsafe extern "C" fn __fxstatat(
+    version: libc::c_int,
+    dirfd: libc::c_int,
+    path: *const c_char,
+    buf: *mut libc::stat,
+    flags: libc::c_int,
+) -> libc::c_int {
+    // Safety: the caller is the program, calling under libc's contract.
+    unsafe { stamp::fxstatat(version, dirfd, path, buf, flags) }
+}
+
+/// # Safety
+/// Called by the program with libc's contract for this function.
+#[cfg(glibc_pre_2_33)]
+#[unsafe(no_mangle)]
+pub(super) unsafe extern "C" fn __fxstatat64(
+    version: libc::c_int,
+    dirfd: libc::c_int,
+    path: *const c_char,
+    buf: *mut libc::stat64,
+    flags: libc::c_int,
+) -> libc::c_int {
+    // Safety: the caller is the program, calling under libc's contract.
+    unsafe { stamp::fxstatat64(version, dirfd, path, buf, flags) }
 }

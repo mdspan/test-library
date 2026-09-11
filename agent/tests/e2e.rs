@@ -248,6 +248,113 @@ fn the_session_directory_follows_xdg_runtime_dir_when_no_dir_is_named() {
     );
 }
 
+/// Every name the clock group, the sleeps, the timeouts, the timers, the file timestamps and the
+/// setters take over, glibc's internal aliases among them, the three calls that learn which clock
+/// an object of the program's was built with, and the one symbol of our own that a hook or a
+/// controller calls. Nothing else: a name here that the interposition table does not list would be
+/// a name we answer for by accident.
+const INTERPOSED: &[&str] = &[
+    "__clock_gettime",
+    "__ftime",
+    "__gettimeofday",
+    "__time",
+    "adjtime",
+    "aio_suspend",
+    "alarm",
+    "clock",
+    "clock_gettime",
+    "clock_nanosleep",
+    "clock_settime",
+    "cnd_timedwait",
+    "epoll_pwait",
+    "epoll_pwait2",
+    "epoll_wait",
+    "fstat",
+    "fstat64",
+    "fstatat",
+    "fstatat64",
+    "ftime",
+    "futimens",
+    "futimes",
+    "getitimer",
+    "getrusage",
+    "gettimeofday",
+    "libtimewarp_genuine_clock_gettime",
+    "lstat",
+    "lstat64",
+    "lutimes",
+    "mq_timedreceive",
+    "mq_timedsend",
+    "mtx_timedlock",
+    "nanosleep",
+    "poll",
+    "ppoll",
+    "pselect",
+    "pthread_cond_clockwait",
+    "pthread_cond_destroy",
+    "pthread_cond_init",
+    "pthread_cond_timedwait",
+    "pthread_mutex_timedlock",
+    "pthread_rwlock_timedrdlock",
+    "pthread_rwlock_timedwrlock",
+    "pthread_timedjoin_np",
+    "recvmmsg",
+    "select",
+    "sem_clockwait",
+    "sem_timedwait",
+    "setitimer",
+    "settimeofday",
+    "sigtimedwait",
+    "sleep",
+    "stat",
+    "stat64",
+    "statx",
+    "syscall",
+    "thrd_sleep",
+    "time",
+    "timer_create",
+    "timer_gettime",
+    "timer_settime",
+    "timerfd_create",
+    "timerfd_gettime",
+    "timerfd_settime",
+    "times",
+    "timespec_get",
+    "usleep",
+    "utime",
+    "utimensat",
+    "utimes",
+];
+
+/// The names glibc routed `stat` and its neighbours through until 2.33, which only a build
+/// targeting such a glibc defines.
+const LEGACY_STAT: &[&str] = &[
+    "__fxstat",
+    "__fxstat64",
+    "__fxstatat",
+    "__fxstatat64",
+    "__lxstat",
+    "__lxstat64",
+    "__xstat",
+    "__xstat64",
+];
+
+/// Every name the library should define, sorted the way `nm` reports them.
+fn interposed_names() -> Vec<String> {
+    let legacy = if cfg!(glibc_pre_2_33) {
+        LEGACY_STAT
+    } else {
+        &[]
+    };
+    let mut wanted: Vec<String> = INTERPOSED
+        .iter()
+        .chain(legacy)
+        .map(|name| (*name).to_owned())
+        .collect();
+    wanted.sort();
+    wanted
+}
+
 #[test]
 fn the_library_exports_the_interposed_names_and_nothing_else() {
     let output = std::process::Command::new("nm")
@@ -264,72 +371,7 @@ fn the_library_exports_the_interposed_names_and_nothing_else() {
         .collect();
     exported.sort();
 
-    // Every name the clock group, the sleeps, the timeouts, the timers and the setters take over,
-    // glibc's internal aliases among them, the three calls that learn which clock an object of the
-    // program's was built with, and the one symbol of our own that a hook or a controller calls.
-    // Nothing else: a name here that the interposition table does not list would be a name we
-    // answer for by accident.
-    assert_eq!(
-        exported,
-        [
-            "__clock_gettime",
-            "__ftime",
-            "__gettimeofday",
-            "__time",
-            "adjtime",
-            "aio_suspend",
-            "alarm",
-            "clock",
-            "clock_gettime",
-            "clock_nanosleep",
-            "clock_settime",
-            "cnd_timedwait",
-            "epoll_pwait",
-            "epoll_pwait2",
-            "epoll_wait",
-            "ftime",
-            "getitimer",
-            "getrusage",
-            "gettimeofday",
-            "libtimewarp_genuine_clock_gettime",
-            "mq_timedreceive",
-            "mq_timedsend",
-            "mtx_timedlock",
-            "nanosleep",
-            "poll",
-            "ppoll",
-            "pselect",
-            "pthread_cond_clockwait",
-            "pthread_cond_destroy",
-            "pthread_cond_init",
-            "pthread_cond_timedwait",
-            "pthread_mutex_timedlock",
-            "pthread_rwlock_timedrdlock",
-            "pthread_rwlock_timedwrlock",
-            "pthread_timedjoin_np",
-            "recvmmsg",
-            "select",
-            "sem_clockwait",
-            "sem_timedwait",
-            "setitimer",
-            "settimeofday",
-            "sigtimedwait",
-            "sleep",
-            "syscall",
-            "thrd_sleep",
-            "time",
-            "timer_create",
-            "timer_gettime",
-            "timer_settime",
-            "timerfd_create",
-            "timerfd_gettime",
-            "timerfd_settime",
-            "times",
-            "timespec_get",
-            "usleep",
-        ]
-        .map(str::to_owned)
-    );
+    assert_eq!(exported, interposed_names());
 
     // And the pass-through list is not there at all: the way these stay genuine is that we never
     // define the name, so the program's call reaches libc as it would without us.

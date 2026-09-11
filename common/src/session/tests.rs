@@ -818,6 +818,132 @@ fn a_disarmed_timer_has_nothing_left_and_an_armed_one_never_has_nothing() {
 }
 
 #[test]
+fn a_file_timestamp_is_carried_forward_from_the_two_nows() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut setup = setup_in(tmp.path());
+    setup.realtime.shift = Nanos(-7_200 * Nanos::SECOND);
+    let session = create(&setup).unwrap();
+    let header = session.header();
+
+    // The clock runs at real speed two hours back, so a file written now shows two hours back and
+    // one written an hour ago shows three.
+    let genuine = platform::genuine_nanos(clock::REALTIME).unwrap();
+    let shown = timestamp_shown(header, genuine).unwrap();
+    assert!((shown.0 - genuine.0 + 7_200 * Nanos::SECOND).abs() < Nanos::SECOND);
+
+    let older = genuine.saturating_sub(Nanos(3_600 * Nanos::SECOND));
+    let shown = timestamp_shown(header, older).unwrap();
+    assert!((shown.0 - genuine.0 + 10_800 * Nanos::SECOND).abs() < Nanos::SECOND);
+}
+
+#[test]
+fn a_faster_clock_stretches_the_distance_back_to_a_timestamp() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut setup = setup_in(tmp.path());
+    setup.realtime.rate = Rate::from_f64(10.0).unwrap();
+    let session = create(&setup).unwrap();
+    let header = session.header();
+
+    // A file a genuine minute old is ten of the program's own minutes old.
+    let genuine = platform::genuine_nanos(clock::REALTIME).unwrap();
+    let minute = Nanos(60 * Nanos::SECOND);
+    let now = timestamp_shown(header, genuine).unwrap();
+    let older = timestamp_shown(header, genuine.saturating_sub(minute)).unwrap();
+    assert!(
+        (now.0 - older.0 - 600 * Nanos::SECOND).abs() < Nanos::SECOND,
+        "{now:?} against {older:?}"
+    );
+}
+
+#[test]
+fn a_timestamp_never_reads_before_the_epoch() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut setup = setup_in(tmp.path());
+    setup.realtime_at = Some(Nanos(Nanos::SECOND));
+    let session = create(&setup).unwrap();
+    let header = session.header();
+
+    // The wall clock is a second past the epoch, so a file older than that second is older than
+    // the epoch in the clock's own terms. It reads at zero and not below it.
+    let genuine = platform::genuine_nanos(clock::REALTIME).unwrap();
+    for age in [2, 3_600, 86_400] {
+        let older = genuine.saturating_sub(Nanos(age * Nanos::SECOND));
+        assert_eq!(timestamp_shown(header, older), Some(Nanos::ZERO), "{age} s");
+    }
+    // And a timestamp the filesystem wrote at the epoch itself, which is older still.
+    assert_eq!(timestamp_shown(header, Nanos::ZERO), Some(Nanos::ZERO));
+}
+
+#[test]
+fn a_set_timestamp_is_measured_back_to_a_genuine_instant() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut setup = setup_in(tmp.path());
+    setup.realtime.shift = Nanos(-7_200 * Nanos::SECOND);
+    let session = create(&setup).unwrap();
+    let header = session.header();
+
+    // The program asks for the instant its own clock shows now, which is the genuine now.
+    let genuine = platform::genuine_nanos(clock::REALTIME).unwrap();
+    let asked = genuine.saturating_sub(Nanos(7_200 * Nanos::SECOND));
+    let stored = timestamp_stored(header, asked).unwrap();
+    assert!((stored.0 - genuine.0).abs() < Nanos::SECOND, "{stored:?}");
+
+    // And what it stores reads back as what it asked for, which is the whole point of the pair.
+    let shown = timestamp_shown(header, stored).unwrap();
+    assert!((shown.0 - asked.0).abs() < Nanos::SECOND, "{shown:?}");
+}
+
+#[test]
+fn a_frozen_clock_stores_the_genuine_now() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut setup = setup_in(tmp.path());
+    setup.realtime.rate = Rate::FROZEN;
+    let session = create(&setup).unwrap();
+    let header = session.header();
+
+    // A clock that never advances puts every instant the program could name infinitely far away,
+    // so there is no distance to measure and the genuine now is what lands on the file.
+    let genuine = platform::genuine_nanos(clock::REALTIME).unwrap();
+    for asked in [Nanos::ZERO, genuine, Nanos(i64::MAX)] {
+        let stored = timestamp_stored(header, asked).unwrap();
+        assert!((stored.0 - genuine.0).abs() < Nanos::SECOND, "{stored:?}");
+    }
+}
+
+#[test]
+fn only_the_realtime_family_reaches_a_file_timestamp() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut setup = setup_in(tmp.path());
+    setup.monotonic.rate = Rate::from_f64(10.0).unwrap();
+    setup.boottime.rate = Rate::FROZEN;
+    setup.cpu_rate = Rate::from_f64(8.0).unwrap();
+    let session = create(&setup).unwrap();
+    let header = session.header();
+
+    // Every other family is moved and the wall clock is not, so a timestamp is left where the
+    // filesystem wrote it.
+    let genuine = platform::genuine_nanos(clock::REALTIME).unwrap();
+    for asked in [Nanos::ZERO, genuine.saturating_sub(Nanos(Nanos::SECOND))] {
+        let shown = timestamp_shown(header, asked).unwrap();
+        assert!((shown.0 - asked.0).abs() < Nanos::SECOND, "{shown:?}");
+        let stored = timestamp_stored(header, asked).unwrap();
+        assert!((stored.0 - asked.0).abs() < Nanos::SECOND, "{stored:?}");
+    }
+}
+
+#[test]
+fn a_null_session_leaves_a_file_timestamp_as_the_filesystem_wrote_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut setup = setup_in(tmp.path());
+    setup.keeper = Keeper::Null;
+    let session = create(&setup).unwrap();
+    let header = session.header();
+
+    assert_eq!(timestamp_shown(header, Nanos(250)), None);
+    assert_eq!(timestamp_stored(header, Nanos(250)), None);
+}
+
+#[test]
 fn a_null_session_leaves_a_timers_remaining_alone() {
     let tmp = tempfile::tempdir().unwrap();
     let mut setup = setup_in(tmp.path());
