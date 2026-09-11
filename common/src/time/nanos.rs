@@ -7,6 +7,12 @@ fn micros<T: TryFrom<i64> + Default>(nanos: i64) -> T {
     T::try_from(nanos / 1_000).unwrap_or_default()
 }
 
+/// The other direction: the nanoseconds a `timeval`'s microseconds field holds, in whatever width
+/// the platform gives that field.
+fn nanos_of<T: Into<i64>>(micros: T) -> i64 {
+    micros.into().saturating_mul(1_000)
+}
+
 /// A signed count of nanoseconds. As an instant it is a Unix time, so it spans about 1678 to 2262.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
 pub struct Nanos(pub i64);
@@ -27,6 +33,16 @@ impl Nanos {
             ts.tv_sec
                 .saturating_mul(Self::SECOND)
                 .saturating_add(ts.tv_nsec),
+        )
+    }
+
+    /// Reads a `timeval`, saturating rather than wrapping on an absurd `tv_sec`.
+    #[must_use]
+    pub fn from_timeval(tv: &libc::timeval) -> Self {
+        Self(
+            tv.tv_sec
+                .saturating_mul(Self::SECOND)
+                .saturating_add(nanos_of(tv.tv_usec)),
         )
     }
 
@@ -84,6 +100,17 @@ mod tests {
         for ns in [0, 1, 999_999_999, 1_000_000_000, 1_700_000_000_123_456_789] {
             assert_eq!(Nanos::from_timespec(&Nanos(ns).to_timespec()), Nanos(ns));
         }
+    }
+
+    #[test]
+    fn a_timeval_reads_to_the_microsecond() {
+        let tv = Nanos(1_700_000_000_123_456_789).to_timeval();
+        assert_eq!(Nanos::from_timeval(&tv), Nanos(1_700_000_000_123_456_000));
+        assert_eq!(Nanos::from_timeval(&Nanos::ZERO.to_timeval()), Nanos::ZERO);
+        assert_eq!(
+            Nanos::from_timeval(&Nanos(-1_500_000_000).to_timeval()),
+            Nanos(-1_500_000_000)
+        );
     }
 
     #[test]

@@ -72,12 +72,101 @@ pub mod clock {
     }
 }
 
+/// How many arguments a Linux system call takes at most.
+pub const SYSCALL_ARGS: usize = 6;
+
+/// The highest negative return the kernel uses for an error. Anything below it is a value.
+const ERRNO_CEILING: libc::c_long = -4095;
+
+/// A pointer as a system call argument.
+fn as_arg<T>(ptr: *mut T) -> libc::c_long {
+    libc::c_long::try_from(ptr.addr().cast_signed()).unwrap_or(0)
+}
+
+/// Makes a system call, returning exactly what the kernel returned: a value, or the negative of
+/// what it refused with.
+///
+/// The instruction rather than libc's `syscall`, because the agent exports that symbol too: a call
+/// to it from inside the library would come back to our own interposer. It takes no lock, allocates
+/// nothing, and touches no shared state, so it is async-signal-safe wherever the program is.
+///
+/// # Safety
+/// The number and the arguments must be a call the kernel will accept, with every pointer among
+/// them valid for what that call does with it.
+#[inline]
+unsafe fn raw_syscall(number: libc::c_long, args: [libc::c_long; SYSCALL_ARGS]) -> libc::c_long {
+    let [a0, a1, a2, a3, a4, a5] = args;
+    let result: libc::c_long;
+    #[cfg(target_arch = "x86_64")]
+    // Safety: the caller guarantees the call. The kernel takes the number in `rax` and the
+    // arguments in these six registers, answers in `rax`, and clobbers `rcx` and `r11`.
+    unsafe {
+        std::arch::asm!(
+            "syscall",
+            inlateout("rax") number => result,
+            in("rdi") a0,
+            in("rsi") a1,
+            in("rdx") a2,
+            in("r10") a3,
+            in("r8") a4,
+            in("r9") a5,
+            lateout("rcx") _,
+            lateout("r11") _,
+            options(nostack),
+        );
+    }
+    #[cfg(target_arch = "aarch64")]
+    // Safety: as above. The kernel takes the number in `x8` and the arguments in `x0` through
+    // `x5`, and answers in `x0`.
+    unsafe {
+        std::arch::asm!(
+            "svc 0",
+            in("x8") number,
+            inlateout("x0") a0 => result,
+            in("x1") a1,
+            in("x2") a2,
+            in("x3") a3,
+            in("x4") a4,
+            in("x5") a5,
+            options(nostack),
+        );
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    compile_error!(
+        "libtimewarp supports x86_64 and aarch64. Add the system call instruction of the \
+         architecture to raw_syscall in common/src/platform/linux.rs."
+    );
+    result
+}
+
+/// Makes a system call the way libc's own `syscall` does: the kernel's answer, or -1 with `errno`
+/// set to what it refused with.
+///
+/// # Safety
+/// As [`raw_syscall`]: the number and the arguments must be a call the kernel will accept.
+#[must_use]
+#[inline]
+pub unsafe fn genuine_syscall(
+    number: libc::c_long,
+    args: [libc::c_long; SYSCALL_ARGS],
+) -> libc::c_long {
+    // Safety: the caller guarantees the call.
+    let result = unsafe { raw_syscall(number, args) };
+    if (ERRNO_CEILING..0).contains(&result) {
+        // Safety: `__errno_location` answers this thread's own `errno`, taking nothing.
+        let errno = unsafe { libc::__errno_location() };
+        // Safety: the location libc just named is live for as long as this thread is.
+        unsafe { *errno = libc::c_int::try_from(-result).unwrap_or(libc::EINVAL) };
+        return -1;
+    }
+    result
+}
+
 /// Reads a genuine clock through the raw syscall.
 ///
 /// Not through libc: the agent exports `clock_gettime`, so calling it under `LD_PRELOAD` would
-/// resolve back to our own interposer and recurse until the stack ran out. `syscall` is a symbol we
-/// never take over, and the raw call is async-signal-safe. The genuine vDSO goes in front of this
-/// later, for speed.
+/// resolve back to our own interposer and recurse until the stack ran out. The genuine vDSO goes in
+/// front of this later, for speed.
 ///
 /// # Safety
 /// `ts` must be valid for writes of a `timespec`.
@@ -86,9 +175,47 @@ pub unsafe fn genuine_clock_gettime(
     clock: libc::clockid_t,
     ts: *mut libc::timespec,
 ) -> libc::c_int {
-    // Safety: the caller guarantees `ts`, and the kernel takes the rest as it comes.
-    let result = unsafe { libc::syscall(libc::SYS_clock_gettime, clock, ts) };
+    // Safety: the caller guarantees `ts`, and the kernel takes the clock id as it comes.
+    let result = unsafe {
+        genuine_syscall(
+            libc::SYS_clock_gettime,
+            [libc::c_long::from(clock), as_arg(ts), 0, 0, 0, 0],
+        )
+    };
     // The syscall answers 0 or -1, so the narrowing never changes what the caller sees.
+    libc::c_int::try_from(result).unwrap_or(-1)
+}
+
+/// Reads the genuine process times: the fields of `buf`, and the elapsed ticks `times(2)` answers,
+/// or -1 when the kernel refused. libc's convention, and `buf` may be null.
+///
+/// Through the raw syscall for the reason [`genuine_clock_gettime`] is: the agent exports `times`.
+///
+/// # Safety
+/// `buf` must be null or valid for writes of a `tms`.
+#[inline]
+pub unsafe fn genuine_times(buf: *mut libc::tms) -> libc::clock_t {
+    // Safety: the caller guarantees `buf`.
+    let result = unsafe { genuine_syscall(libc::SYS_times, [as_arg(buf), 0, 0, 0, 0, 0]) };
+    libc::clock_t::try_from(result).unwrap_or(-1)
+}
+
+/// Reads the genuine resource usage of `who` into `usage`. libc's convention.
+///
+/// Through the raw syscall for the reason [`genuine_clock_gettime`] is: the agent exports
+/// `getrusage`.
+///
+/// # Safety
+/// `usage` must be valid for writes of a `rusage`.
+#[inline]
+pub unsafe fn genuine_getrusage(who: libc::c_int, usage: *mut libc::rusage) -> libc::c_int {
+    // Safety: the caller guarantees `usage`, and the kernel takes `who` as it comes.
+    let result = unsafe {
+        genuine_syscall(
+            libc::SYS_getrusage,
+            [libc::c_long::from(who), as_arg(usage), 0, 0, 0, 0],
+        )
+    };
     libc::c_int::try_from(result).unwrap_or(-1)
 }
 

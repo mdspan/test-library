@@ -169,6 +169,22 @@ pub(crate) fn only_session(dir: &Path) -> common::session::Session {
     common::session::attach(path).unwrap()
 }
 
+/// The first `count` words of a session's arena, as a hook left them.
+pub(crate) fn arena_words(session: &common::session::Session, count: usize) -> Vec<i64> {
+    let header = session.header();
+    let offset = usize::try_from(header.arena_offset).unwrap();
+    let bytes = std::fs::read(session.path()).unwrap();
+    (0..count)
+        .map(|index| {
+            let at = offset + index * size_of::<i64>();
+            let word = bytes
+                .get(at..at + size_of::<i64>())
+                .expect("inside the arena");
+            i64::from_le_bytes(word.try_into().unwrap())
+        })
+        .collect()
+}
+
 /// Whatever a run wrote to the log file it was given, or nothing when it wrote none.
 pub(crate) fn log_of(path: &Path) -> String {
     std::fs::read_to_string(path).unwrap_or_default()

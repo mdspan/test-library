@@ -984,6 +984,32 @@ pub fn clock_now(header: &Header, clock: libc::clockid_t) -> Option<Nanos> {
     }
 }
 
+/// What the session shows for an amount of CPU time already consumed on `clock`, `value` genuine
+/// nanoseconds of it, or `None` when the amount belongs to the genuine clock.
+///
+/// This is what `times` and `getrusage` need: the consumption is in the call's own fields rather
+/// than in a clock the keeper could read for itself. The Cpu family scales each reading on its own,
+/// so a quantity of it converts with nothing but the family's rate, and a clock of any other family
+/// has no such quantity to convert.
+///
+/// The same read path as [`clock_now`]: no lock, no allocation, nothing written to shared memory.
+#[inline]
+pub fn cpu_scaled(header: &Header, clock: libc::clockid_t, value: Nanos) -> Option<Nanos> {
+    match Keeper::from_tag(header.keeper)? {
+        Keeper::Affine => {
+            if clock::family_of(clock) != Some(Family::Cpu) {
+                return None;
+            }
+            sync::read(header, |params| {
+                Some(Nanos(
+                    Rate(params.cpu_rate.load(Ordering::Relaxed)).scale(value.0),
+                ))
+            })
+        }
+        Keeper::Null => None,
+    }
+}
+
 /// The affine keeper: the family's line projected over a genuine reading of its timebase.
 ///
 /// Every value here comes out of shared memory a writer may be changing, so every step saturates

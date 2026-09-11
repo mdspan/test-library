@@ -264,15 +264,38 @@ fn the_library_exports_the_interposed_names_and_nothing_else() {
         .collect();
     exported.sort();
 
+    // Every name the clock group takes over, glibc's internal aliases among them, and the one
+    // symbol of our own that a hook or a controller calls. Nothing else: a name here that the
+    // interposition table does not list would be a name we answer for by accident.
     assert_eq!(
         exported,
-        vec![
-            "clock_gettime".to_owned(),
-            "gettimeofday".to_owned(),
-            "libtimewarp_genuine_clock_gettime".to_owned(),
-            "time".to_owned(),
+        [
+            "__clock_gettime",
+            "__ftime",
+            "__gettimeofday",
+            "__time",
+            "clock",
+            "clock_gettime",
+            "ftime",
+            "getrusage",
+            "gettimeofday",
+            "libtimewarp_genuine_clock_gettime",
+            "syscall",
+            "time",
+            "times",
+            "timespec_get",
         ]
+        .map(str::to_owned)
     );
+
+    // And the pass-through list is not there at all: the way these stay genuine is that we never
+    // define the name, so the program's call reaches libc as it would without us.
+    for absent in ["clock_getres", "adjtimex", "ntp_adjtime", "stime"] {
+        assert!(
+            !exported.iter().any(|name| name == absent),
+            "{absent} is interposed, and it should pass through"
+        );
+    }
 }
 
 #[test]

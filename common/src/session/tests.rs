@@ -728,6 +728,38 @@ fn the_cpu_family_scales_each_reading_on_its_own() {
 }
 
 #[test]
+fn an_amount_of_consumed_cpu_scales_by_the_cpu_rate() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut setup = setup_in(tmp.path());
+    setup.cpu_rate = Rate::from_f64(8.0).unwrap();
+    let session = create(&setup).unwrap();
+    let header = session.header();
+
+    for id in [clock::PROCESS_CPUTIME, clock::THREAD_CPUTIME] {
+        assert_eq!(cpu_scaled(header, id, Nanos(250)), Some(Nanos(2_000)));
+        assert_eq!(cpu_scaled(header, id, Nanos::ZERO), Some(Nanos::ZERO));
+    }
+    // A clock of any other family has no such amount to convert, and neither has one we leave
+    // alone: the reading of those comes from the clock itself.
+    for id in [clock::REALTIME, clock::MONOTONIC, clock::BOOTTIME, -4] {
+        assert_eq!(cpu_scaled(header, id, Nanos(250)), None, "{id}");
+    }
+}
+
+#[test]
+fn a_null_session_leaves_an_amount_of_consumed_cpu_alone() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut setup = setup_in(tmp.path());
+    setup.keeper = Keeper::Null;
+    let session = create(&setup).unwrap();
+
+    assert_eq!(
+        cpu_scaled(session.header(), clock::PROCESS_CPUTIME, Nanos(250)),
+        None
+    );
+}
+
+#[test]
 fn the_clocks_the_family_table_leaves_alone_read_genuine() {
     let tmp = tempfile::tempdir().unwrap();
     let session = create(&setup_in(tmp.path())).unwrap();

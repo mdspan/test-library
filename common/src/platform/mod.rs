@@ -7,9 +7,14 @@
 //! | `OS_TAG` | The value the session header's platform field carries for this OS. |
 //! | `clock` | The clock ids of the families, the names a user writes for them, which family each id belongs to, and which id carries the TAI offset. |
 //! | `genuine_clock_gettime` | Reads a genuine clock into the caller's `timespec`, libc's convention. Async-signal-safe, and never routed through a symbol we interpose. |
+//! | `genuine_times` | Reads the genuine `tms` and the elapsed ticks `times` answers, libc's convention. Never routed through a symbol we interpose. |
+//! | `genuine_getrusage` | Reads the genuine `rusage` of a target, libc's convention. Never routed through a symbol we interpose. |
 //! | `take_write_lock` | Takes the write lock on a descriptor, blocking. libc's convention. |
 //! | `probe_write_lock` | Asks the kernel whether the write lock is held, taking nothing. |
 //! | `random_bytes` | Fills a buffer with randomness, for the session name. |
+//!
+//! An arm may hold more than the table: Linux also supplies `genuine_syscall`, because `syscall()`
+//! is one of the calls we take over there, and only that arm's interposers name it.
 
 use crate::time::{Family, Nanos};
 
@@ -107,6 +112,8 @@ pub fn genuine_nanos(clock: libc::clockid_t) -> Option<Nanos> {
 // Only Linux has a filled-in arm to read.
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
+    use std::io;
+
     use super::*;
 
     #[test]
@@ -115,6 +122,51 @@ mod tests {
         let monotonic = genuine_nanos(clock::MONOTONIC).unwrap();
         assert!(monotonic >= Nanos::ZERO);
         assert!(genuine_nanos(clock::BOOTTIME).unwrap() >= monotonic);
+    }
+
+    #[test]
+    fn a_call_by_number_answers_the_way_libc_would() {
+        // Safety: `getpid` takes no argument and touches nothing of ours.
+        let pid = unsafe { genuine_syscall(libc::SYS_getpid, [0; SYSCALL_ARGS]) };
+        assert_eq!(pid, i64::from(std::process::id()));
+
+        // A number the kernel has never heard of reports itself the way libc reports one.
+        // Safety: an unknown number is refused before the kernel reads an argument.
+        assert_eq!(unsafe { genuine_syscall(-1, [0; SYSCALL_ARGS]) }, -1);
+        assert_eq!(
+            io::Error::last_os_error().raw_os_error(),
+            Some(libc::ENOSYS)
+        );
+    }
+
+    #[test]
+    fn the_genuine_process_times_and_usage_read() {
+        // Safety: `tms` is plain data, so an all-zero value is a valid one.
+        let mut tms: libc::tms = unsafe { std::mem::zeroed() };
+        // Safety: `tms` is a live, correctly typed buffer.
+        let elapsed = unsafe { genuine_times(&raw mut tms) };
+        assert!(elapsed > 0, "times answered {elapsed}");
+        // A null buffer is allowed, and answers the elapsed ticks all the same.
+        // Safety: `times` takes a null buffer and fills nothing for it.
+        assert!(unsafe { genuine_times(std::ptr::null_mut()) } >= elapsed);
+
+        // Safety: `rusage` is plain data.
+        let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+        // Safety: `usage` is a live, correctly typed buffer.
+        let read = unsafe { genuine_getrusage(libc::RUSAGE_SELF, &raw mut usage) };
+        assert_eq!(read, 0);
+        // The times of a process this short may still round to zero, so the field this reads to
+        // prove the buffer was filled is the one that is never zero.
+        assert!(usage.ru_maxrss > 0, "getrusage filled nothing");
+        assert!(usage.ru_utime.tv_sec >= 0 && usage.ru_utime.tv_usec >= 0);
+        // A target the kernel does not know is refused, libc's way.
+        // Safety: as above, with a target the kernel refuses.
+        let refused = unsafe { genuine_getrusage(4_242, &raw mut usage) };
+        assert_eq!(refused, -1);
+        assert_eq!(
+            io::Error::last_os_error().raw_os_error(),
+            Some(libc::EINVAL)
+        );
     }
 
     #[test]

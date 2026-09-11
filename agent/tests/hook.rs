@@ -15,7 +15,7 @@ mod harness;
 use std::path::{Path, PathBuf};
 
 use common::session::layout::{self, Keeper};
-use harness::{HOUR, Run, log_of, only_session, session_files};
+use harness::{HOUR, Run, arena_words, log_of, only_session, session_files};
 
 /// The instant `arena_clock`'s `init` writes into the arena: 2020-01-01T00:00:00Z.
 const START_NS: i64 = 1_577_836_800_000_000_000;
@@ -41,22 +41,6 @@ fn hook_copy(name: &str, dir: &Path) -> PathBuf {
     let copy = dir.join(format!("{name}.so"));
     std::fs::copy(harness::hook_library(name), &copy).unwrap();
     copy
-}
-
-/// The arena of a session, as the words a hook left in it.
-fn arena_words(session: &common::session::Session, count: usize) -> Vec<i64> {
-    let header = session.header();
-    let offset = usize::try_from(header.arena_offset).unwrap();
-    let bytes = std::fs::read(session.path()).unwrap();
-    (0..count)
-        .map(|index| {
-            let at = offset + index * size_of::<i64>();
-            let word = bytes
-                .get(at..at + size_of::<i64>())
-                .expect("inside the arena");
-            i64::from_le_bytes(word.try_into().unwrap())
-        })
-        .collect()
 }
 
 fn assert_near(what: &str, value: i64, wanted: i64) {

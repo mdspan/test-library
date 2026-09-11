@@ -19,6 +19,10 @@ pub mod clock {
     pub const BOOTTIME: clockid_t = libc::CLOCK_MONOTONIC;
     /// The wall clock without leap seconds, which macOS does not keep separately.
     pub const TAI: clockid_t = libc::CLOCK_REALTIME;
+    /// CPU time consumed by the whole process.
+    pub const PROCESS_CPUTIME: clockid_t = libc::CLOCK_PROCESS_CPUTIME_ID;
+    /// CPU time consumed by the calling thread.
+    pub const THREAD_CPUTIME: clockid_t = libc::CLOCK_THREAD_CPUTIME_ID;
 
     /// Every clock a family holds, by the name a user writes for a timebase. Filled in with this
     /// platform's column of the family table when the arm lands.
@@ -46,6 +50,22 @@ pub unsafe fn genuine_clock_gettime(
     _clock: libc::clockid_t,
     _ts: *mut libc::timespec,
 ) -> libc::c_int {
+    unimplemented!("the macOS seam")
+}
+
+/// Reads the genuine process times, once this arm exists.
+///
+/// # Safety
+/// `buf` must be null or valid for writes of a `tms`.
+pub unsafe fn genuine_times(_buf: *mut libc::tms) -> libc::clock_t {
+    unimplemented!("the macOS seam")
+}
+
+/// Reads the genuine resource usage of `who`, once this arm exists.
+///
+/// # Safety
+/// `usage` must be valid for writes of a `rusage`.
+pub unsafe fn genuine_getrusage(_who: libc::c_int, _usage: *mut libc::rusage) -> libc::c_int {
     unimplemented!("the macOS seam")
 }
 
