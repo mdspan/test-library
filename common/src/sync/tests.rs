@@ -2,6 +2,7 @@
 //! elsewhere; these cases pin the steps to the words they move and the calls they make.
 
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::{Mutex, MutexGuard, PoisonError};
@@ -389,4 +390,16 @@ fn a_planted_fifo_in_a_lock_file_s_place_is_refused_rather_than_waited_on() {
     // wherever a clock read can happen. Both doors return instead.
     assert!(super::install(&path).is_err());
     assert!(WriteLock::acquire(&path).is_err());
+}
+
+#[test]
+fn the_lock_file_is_private_to_us() {
+    let _one = one_at_a_time();
+    let fixture = fixture().unwrap();
+    let mode = std::fs::metadata(fixture.lock_path())
+        .unwrap()
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(mode, 0o600);
 }

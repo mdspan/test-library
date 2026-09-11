@@ -334,6 +334,78 @@ fn a_planted_symlink_is_refused() {
 }
 
 #[test]
+fn a_planted_fifo_returns_instead_of_blocking_the_attach() {
+    let tmp = tempfile::tempdir().unwrap();
+    let setup = setup_in(tmp.path());
+    ensure_dir(&setup.dir).unwrap();
+    let path = setup.dir.join("planted.session");
+    let c_path = cstring(&path).unwrap();
+    // Safety: `c_path` is a live NUL-terminated path in a directory of ours.
+    assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
+
+    // A FIFO with nobody on the other end would block a reader or a writer forever; this call
+    // returns because it does neither, and the type check refuses what it opened.
+    let err = attach(&path).unwrap_err();
+    assert!(matches!(err, SessionError::NotOurs(_)), "{err:?}");
+    assert!(path.exists());
+}
+
+#[test]
+fn a_file_owned_by_another_user_is_refused_and_left_in_place() {
+    let tmp = tempfile::tempdir().unwrap();
+    let setup = setup_in(tmp.path());
+    let session = create(&setup).unwrap();
+    let path = session.path().to_path_buf();
+    drop(session);
+
+    let Some(foreign) = chown_to_someone_else(&path) else {
+        eprintln!("skipping: no privilege here to plant a foreign-owned file");
+        return;
+    };
+    assert_ne!(foreign, euid());
+
+    let err = attach(&path).unwrap_err();
+    assert!(matches!(err, SessionError::NotOurs(_)), "{err:?}");
+    assert!(path.exists());
+}
+
+/// Chowns `path` to a uid other than ours and leaves it world-writable, the way an adversary's own
+/// planted file already is: open enough that the owner check, not the mode, is what refuses it.
+/// Needs whatever privilege this process can reach. `None` when it can reach none: a uid mismatch
+/// needs a second uid to create, and proving we catch one takes a privilege the check itself does
+/// not.
+fn chown_to_someone_else(path: &Path) -> Option<u32> {
+    let target = u32::from(euid() == 0);
+    let sudo = |cmd: &str, arg: &str| {
+        std::process::Command::new("sudo")
+            .args(["-n", cmd, arg])
+            .arg(path)
+            .status()
+            .is_ok_and(|status| status.success())
+    };
+    (sudo("chown", &target.to_string()) && sudo("chmod", "666")).then_some(target)
+}
+
+#[test]
+fn a_file_naming_a_keeper_we_do_not_know_is_refused() {
+    let tmp = tempfile::tempdir().unwrap();
+    let setup = setup_in(tmp.path());
+    let session = create(&setup).unwrap();
+    let path = session.path().to_path_buf();
+    drop(session);
+
+    let mut bytes = fs::read(&path).unwrap();
+    bytes[20..24].copy_from_slice(&99u32.to_ne_bytes());
+    fs::write(&path, bytes).unwrap();
+
+    let err = attach(&path).unwrap_err();
+    assert!(
+        matches!(err, SessionError::BadSessionFile(BadHeader::UnknownKeeper)),
+        "{err:?}"
+    );
+}
+
+#[test]
 fn the_realtime_line_is_the_genuine_clock_shifted() {
     let tmp = tempfile::tempdir().unwrap();
     let mut setup = setup_in(tmp.path());
