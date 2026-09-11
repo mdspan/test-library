@@ -51,7 +51,7 @@ fn faked(func: Func, clock: libc::clockid_t) -> Option<Nanos> {
 /// where it does not. `None` only when the kernel refuses the clock, which every caller reports the
 /// way its own function reports a failure.
 #[inline]
-fn reading(func: Func, clock: libc::clockid_t) -> Option<Nanos> {
+pub(crate) fn reading(func: Func, clock: libc::clockid_t) -> Option<Nanos> {
     faked(func, clock).or_else(|| genuine_nanos(clock))
 }
 

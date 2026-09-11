@@ -355,9 +355,17 @@ fn every_function_of_the_group_reaches_the_hook_with_its_own_func_and_kind() {
         );
     }
 
-    // Nothing else did: every call is a reading coming towards the program, and no function outside
-    // the clock group has an interposer yet.
+    // Nothing else read a clock: every call of the group is a reading coming towards the program.
+    // The one other function this program reaches is the `nanosleep` it pauses in, which is a
+    // duration going the other way and belongs to the sleeps.
     for call in &seen {
+        if call.func == 100 {
+            assert_eq!(
+                call.kind, 3,
+                "{call:?} is not a fake duration becoming genuine"
+            );
+            continue;
+        }
         assert_eq!(
             call.kind, 1,
             "{call:?} is not an instant becoming a fake one"

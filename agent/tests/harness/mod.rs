@@ -66,6 +66,19 @@ pub(crate) fn program_linked_to_library(name: &str) -> PathBuf {
     )
 }
 
+/// The same again, with the extra libraries a program needs beyond libc. glibc folds `librt` and
+/// `libpthread` into libc and older systems do not, so a program using timed message queues,
+/// asynchronous reads, or threads names both.
+pub(crate) fn program_linked_with(name: &str, libraries: &[&str]) -> PathBuf {
+    let library = library();
+    let mut extra = vec![
+        library.to_string_lossy().into_owned(),
+        format!("-Wl,-rpath,{}", library.parent().unwrap().display()),
+    ];
+    extra.extend(libraries.iter().map(|flag| (*flag).to_owned()));
+    compile(name, &extra)
+}
+
 /// A copy of `source`'s binary under a different basename, so a test can name what
 /// `LIBTIMEWARP_SKIP_CMDS` or `LIBTIMEWARP_ONLY_CMDS` sees the running process as.
 pub(crate) fn copy_named(source: &Path, name: &str) -> PathBuf {

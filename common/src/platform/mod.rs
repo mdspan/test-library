@@ -17,8 +17,14 @@
 //! | `probe_write_lock` | Asks the kernel whether the write lock is held, taking nothing. |
 //! | `random_bytes` | Fills a buffer with randomness, for the session name. |
 //!
+//! [`genuine_symbol`] is the one way back to a genuine function that needs no arm of its own: the
+//! loader answers it the same way on all three platforms.
+//!
 //! An arm may hold more than the table: Linux also supplies `genuine_syscall`, because `syscall()`
 //! is one of the calls we take over there, and only that arm's interposers name it.
+
+use std::ffi::{c_char, c_void};
+use std::ptr::NonNull;
 
 use crate::time::{Family, Nanos};
 
@@ -108,6 +114,35 @@ pub const fn settable(clock: libc::clockid_t) -> bool {
     clock == clock::REALTIME
 }
 
+/// The loader's name for "the definition after the one asking": all ones on Linux, macOS, and
+/// FreeBSD alike. The libc crate spells it for the BSDs and not for Linux, so it is spelled here
+/// once for all three.
+const RTLD_NEXT: *mut c_void = std::ptr::without_provenance_mut(usize::MAX);
+
+/// The definition of `name` past ours: the one the loader would have bound the program to had we
+/// never been loaded.
+///
+/// The clock group reaches the kernel by number, because those calls have one. The waits do not:
+/// most of them are libc's own constructions over futexes, so the genuine function comes from the
+/// loader instead. The answer never moves, so a caller looks it up once and remembers it.
+///
+/// # Safety
+/// `name` must be NUL-terminated.
+#[must_use]
+pub unsafe fn genuine_symbol(name: &[u8]) -> Option<NonNull<c_void>> {
+    // Safety: the caller guarantees the name, and `RTLD_NEXT` is a sentinel the loader compares
+    // rather than a pointer it reads.
+    let found = unsafe { libc::dlsym(RTLD_NEXT, name.as_ptr().cast::<c_char>()) };
+    if found.is_null() {
+        // `dlerror` reports and clears, so leaving ours set would hand the program our message the
+        // next time it asked about a failure of its own.
+        // Safety: `dlerror` takes nothing and reports on the calling thread alone.
+        let _reported = unsafe { libc::dlerror() };
+        return None;
+    }
+    NonNull::new(found)
+}
+
 /// Reads a genuine clock. `None` only when the kernel refuses the id.
 #[must_use]
 pub fn genuine_nanos(clock: libc::clockid_t) -> Option<Nanos> {
@@ -180,6 +215,19 @@ mod tests {
             io::Error::last_os_error().raw_os_error(),
             Some(libc::EINVAL)
         );
+    }
+
+    #[test]
+    fn the_loader_finds_the_definition_past_ours() {
+        // Safety: both names are NUL-terminated.
+        let found = unsafe { genuine_symbol(b"nanosleep\0") };
+        assert!(found.is_some(), "libc defines nanosleep");
+        // Safety: as above.
+        let missing = unsafe { genuine_symbol(b"libtimewarp_no_such_symbol\0") };
+        assert_eq!(missing, None);
+        // The message the failure left is cleared, so the program's next `dlerror` is its own.
+        // Safety: `dlerror` takes nothing and reports on this thread alone.
+        assert!(unsafe { libc::dlerror() }.is_null());
     }
 
     #[test]

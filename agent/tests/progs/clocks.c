@@ -266,7 +266,7 @@ int main(int argc, char **argv) {
     burn(300000000);
     cpu_group("a");
 
-    /* Genuine time passing, since the library does not interpose sleeps yet. */
+    /* Time passing between the two rounds of the Cpu group. */
     {
         struct timespec pause = {0, 200000000};
         nanosleep(&pause, NULL);

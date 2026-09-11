@@ -1010,6 +1010,44 @@ pub fn cpu_scaled(header: &Header, clock: libc::clockid_t, value: Nanos) -> Opti
     }
 }
 
+/// The genuine duration a wait of `fake` nanoseconds on `clock` blocks for, or `None` when the
+/// wait belongs to the genuine clock.
+///
+/// A wait is a promise about faketime: wake when the clock has advanced this far. So the duration
+/// is divided by the rate of the family the wait follows, and a frozen family owes it the longest
+/// duration there is. An absolute deadline reaches here as the fake duration still remaining.
+///
+/// The same read path as [`clock_now`]: no lock, no allocation, nothing written to shared memory.
+#[inline]
+pub fn wait_duration(header: &Header, clock: libc::clockid_t, fake: Nanos) -> Option<Nanos> {
+    match Keeper::from_tag(header.keeper)? {
+        Keeper::Affine => {
+            let family = clock::family_of(clock)?;
+            sync::read(header, |params| {
+                Some(Nanos(family_rate(params, family).unscale(fake.0)))
+            })
+        }
+        // Genuine time underneath, so a wait blocks for exactly as long as it asked.
+        Keeper::Null => None,
+    }
+}
+
+/// How fast one family runs, off shared memory a writer may be changing. Every bit pattern is a
+/// rate, so a torn read is discarded by the seqlock around this rather than caught inside it.
+#[inline]
+fn family_rate(params: &layout::Params, family: Family) -> Rate {
+    Rate(
+        match family {
+            Family::Realtime => &params.realtime.rate,
+            Family::Monotonic => &params.monotonic.rate,
+            Family::Boottime => &params.boottime.rate,
+            // Cpu has no line, only a rate, which is the one thing a wait on it needs.
+            Family::Cpu => &params.cpu_rate,
+        }
+        .load(Ordering::Relaxed),
+    )
+}
+
 /// The affine keeper: the family's line projected over a genuine reading of its timebase.
 ///
 /// Every value here comes out of shared memory a writer may be changing, so every step saturates

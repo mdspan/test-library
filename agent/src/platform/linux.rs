@@ -4,10 +4,11 @@
 //! built to call them, and one is `syscall()`, which is Linux's way of asking for a call by number.
 //! The synthetic vDSO that catches Go lands here later.
 
-use common::platform::{SYSCALL_ARGS, genuine_syscall};
+use common::platform::{SYSCALL_ARGS, genuine_syscall, set_errno};
 
 use crate::interpose::{self, Timeb};
 use crate::setter;
+use crate::wait;
 
 /// # Safety
 /// Called by the program with libc's contract for this function.
@@ -203,6 +204,25 @@ pub(super) unsafe extern "C" fn syscall(
         // Safety: the program passes this number a `time_t`.
         return unsafe { interpose::time(as_ptr(arg0)) };
     }
+    if number == libc::SYS_nanosleep {
+        // Safety: the program passes this number two `timespec`s.
+        let result = unsafe { wait::nanosleep(as_ptr(arg0), as_ptr(arg1)) };
+        return libc::c_long::from(result);
+    }
+    if number == libc::SYS_clock_nanosleep {
+        // The kernel answers this number the negative of what refused it, which `genuine_syscall`
+        // has already turned into -1 and an `errno`; libc's own function is the one that answers
+        // the `errno` itself, so the two spellings part here.
+        // Safety: the program passes this number a clock id, flags, and two `timespec`s.
+        let refused = unsafe {
+            wait::clock_nanosleep(as_clock(arg0), as_int(arg1), as_ptr(arg2), as_ptr(arg3))
+        };
+        if refused == 0 {
+            return 0;
+        }
+        set_errno(refused);
+        return -1;
+    }
     // Safety: the number and the arguments are the program's own, passed on untouched.
     unsafe { genuine_syscall(number, [arg0, arg1, arg2, arg3, arg4, arg5]) }
 }
@@ -210,6 +230,17 @@ pub(super) unsafe extern "C" fn syscall(
 /// The pointer a system call argument carries.
 fn as_ptr<T>(arg: libc::c_long) -> *mut T {
     std::ptr::with_exposed_provenance_mut(usize::try_from(arg.cast_unsigned()).unwrap_or(0))
+}
+
+/// The `int` a system call argument carries: the low half of the register, which is what the
+/// kernel reads it as.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "the kernel takes this argument as an int, so a wider value loses the same half here \
+              as it does there"
+)]
+const fn as_int(arg: libc::c_long) -> libc::c_int {
+    arg as libc::c_int
 }
 
 /// The clock id a system call argument carries: the low half of the register, which is what the
@@ -225,3 +256,360 @@ const fn as_clock(arg: libc::c_long) -> libc::clockid_t {
 
 /// The six arguments above are the whole of what a system call takes, which the seam agrees with.
 const _: () = assert!(SYSCALL_ARGS == 6);
+
+// The sleeps and the timeouts. Each converts the duration or the deadline the program asked for
+// and blocks in the genuine function; `wait` has the rules.
+
+/// # Safety
+/// Called by the program with libc's contract for this function.
+#[unsafe(no_mangle)]
+pub(super) unsafe extern "C" fn nanosleep(
+    req: *const libc::timespec,
+    rem: *mut libc::timespec,
+) -> libc::c_int {
+    // Safety: the caller is the program, calling under libc's contract.
+    unsafe { wait::nanosleep(req, rem) }
+}
+
+/// # Safety
+/// Called by the program with libc's contract for this function.
+#[unsafe(no_mangle)]
+pub(super) unsafe extern "C" fn clock_nanosleep(
+    clock: libc::clockid_t,
+    flags: libc::c_int,
+    req: *const libc::timespec,
+    rem: *mut libc::timespec,
+) -> libc::c_int {
+    // Safety: the caller is the program, calling under libc's contract.
+    unsafe { wait::clock_nanosleep(clock, flags, req, rem) }
+}
+
+/// Whole seconds of sleep, which takes a count and so needs no contract.
+#[unsafe(no_mangle)]
+pub(super) extern "C" fn sleep(seconds: libc::c_uint) -> libc::c_uint {
+    wait::sleep(seconds)
+}
+
+/// Microseconds of sleep, which takes a count and so needs no contract.
+#[unsafe(no_mangle)]
+pub(super) extern "C" fn usleep(micros: libc::useconds_t) -> libc::c_int {
+    wait::usleep(micros)
+}
+
+/// # Safety
+/// Called by the program with libc's contract for this function.
+#[unsafe(no_mangle)]
+pub(super) unsafe extern "C" fn thrd_sleep(
+    duration: *const libc::timespec,
+    remaining: *mut libc::timespec,
+) -> libc::c_int {
+    // Safety: the caller is the program, calling under libc's contract.
+    unsafe { wait::thrd_sleep(duration, remaining) }
+}
+
+/// # Safety
+/// Called by the program with libc's contract for this function.
+#[unsafe(no_mangle)]
+pub(super) unsafe extern "C" fn poll(
+    fds: *mut libc::pollfd,
+    nfds: libc::nfds_t,
+    timeout: libc::c_int,
+) -> libc::c_int {
+    // Safety: the caller is the program, calling under libc's contract.
+    unsafe { wait::poll(fds, nfds, timeout) }
+}
+
+/// # Safety
+/// Called by the program with libc's contract for this function.
+#[unsafe(no_mangle)]
+pub(super) unsafe extern "C" fn ppoll(
+    fds: *mut libc::pollfd,
+    nfds: libc::nfds_t,
+    timeout: *const libc::timespec,
+    sigmask: *const libc::sigset_t,
+) -> libc::c_int {
+    // Safety: the caller is the program, calling under libc's contract.
+    unsafe { wait::ppoll(fds, nfds, timeout, sigmask) }
+}
+
+/// # Safety
+/// Called by the program with libc's contract for this function.
+#[unsafe(no_mangle)]
+pub(super) unsafe extern "C" fn select(
+    nfds: libc::c_int,
+    readfds: *mut libc::fd_set,
+    writefds: *mut libc::fd_set,
+    exceptfds: *mut libc::fd_set,
+    timeout: *mut libc::timeval,
+) -> libc::c_int {
+    // Safety: the caller is the program, calling under libc's contract.
+    unsafe { wait::select(nfds, readfds, writefds, exceptfds, timeout) }
+}
+
+/// # Safety
+/// Called by the program with libc's contract for this function.
+#[unsafe(no_mangle)]
+pub(super) unsafe extern "C" fn pselect(
+    nfds: libc::c_int,
+    readfds: *mut libc::fd_set,
+    writefds: *mut libc::fd_set,
+    exceptfds: *mut libc::fd_set,
+    timeout: *const libc::timespec,
+    sigmask: *const libc::sigset_t,
+) -> libc::c_int {
+    // Safety: the caller is the program, calling under libc's contract.
+    unsafe { wait::pselect(nfds, readfds, writefds, exceptfds, timeout, sigmask) }
+}
+
+/// # Safety
+/// Called by the program with libc's contract for this function.
+#[unsafe(no_mangle)]
+pub(super) unsafe extern "C" fn epoll_wait(
+    epfd: libc::c_int,
+    events: *mut libc::epoll_event,
+    maxevents: libc::c_int,
+    timeout: libc::c_int,
+) -> libc::c_int {
+    // Safety: the caller is the program, calling under libc's contract.
+    unsafe { wait::epoll_wait(epfd, events, maxevents, timeout) }
+}
+
+/// # Safety
+/// Called by the program with libc's contract for this function.
+#[unsafe(no_mangle)]
+pub(super) unsafe extern "C" fn epoll_pwait(
+    epfd: libc::c_int,
+    events: *mut libc::epoll_event,
+    maxevents: libc::c_int,
+    timeout: libc::c_int,
+    sigmask: *const libc::sigset_t,
+) -> libc::c_int {
+    // Safety: the caller is the program, calling under libc's contract.
+    unsafe { wait::epoll_pwait(epfd, events, maxevents, timeout, sigmask) }
+}
+
+/// # Safety
+/// Called by the program with libc's contract for this function.
+#[unsafe(no_mangle)]
+pub(super) unsafe extern "C" fn epoll_pwait2(
+    epfd: libc::c_int,
+    events: *mut libc::epoll_event,
+    maxevents: libc::c_int,
+    timeout: *const libc::timespec,
+    sigmask: *const libc::sigset_t,
+) -> libc::c_int {
+    // Safety: the caller is the program, calling under libc's contract.
+    unsafe { wait::epoll_pwait2(epfd, events, maxevents, timeout, sigmask) }
+}
+
+/// Reads no time: it learns which clock the variable's deadlines are read on.
+///
+/// # Safety
+/// Called by the program with libc's contract for this function.
+#[unsafe(no_mangle)]
+pub(super) unsafe extern "C" fn pthread_cond_init(
+    cond: *mut libc::pthread_cond_t,
+    attr: *const libc::pthread_condattr_t,
+) -> libc::c_int {
+    // Safety: the caller is the program, calling under libc's contract.
+    unsafe { wait::pthread_cond_init(cond, attr) }
+}
+
+/// Reads no time either: it forgets what `pthread_cond_init` learned.
+///
+/// # Safety
+/// Called by the program with libc's contract for this function.
+#[unsafe(no_mangle)]
+pub(super) unsafe extern "C" fn pthread_cond_destroy(
+    cond: *mut libc::pthread_cond_t,
+) -> libc::c_int {
+    // Safety: the caller is the program, calling under libc's contract.
+    unsafe { wait::pthread_cond_destroy(cond) }
+}
+
+/// # Safety
+/// Called by the program with libc's contract for this function.
+#[unsafe(no_mangle)]
+pub(super) unsafe extern "C" fn pthread_cond_timedwait(
+    cond: *mut libc::pthread_cond_t,
+    mutex: *mut libc::pthread_mutex_t,
+    abstime: *const libc::timespec,
+) -> libc::c_int {
+    // Safety: the caller is the program, calling under libc's contract.
+    unsafe { wait::pthread_cond_timedwait(cond, mutex, abstime) }
+}
+
+/// # Safety
+/// Called by the program with libc's contract for this function.
+#[unsafe(no_mangle)]
+pub(super) unsafe extern "C" fn pthread_cond_clockwait(
+    cond: *mut libc::pthread_cond_t,
+    mutex: *mut libc::pthread_mutex_t,
+    clock: libc::clockid_t,
+    abstime: *const libc::timespec,
+) -> libc::c_int {
+    // Safety: the caller is the program, calling under libc's contract.
+    unsafe { wait::pthread_cond_clockwait(cond, mutex, clock, abstime) }
+}
+
+/// # Safety
+/// Called by the program with libc's contract for this function.
+#[unsafe(no_mangle)]
+pub(super) unsafe extern "C" fn pthread_mutex_timedlock(
+    mutex: *mut libc::pthread_mutex_t,
+    abstime: *const libc::timespec,
+) -> libc::c_int {
+    // Safety: the caller is the program, calling under libc's contract.
+    unsafe { wait::pthread_mutex_timedlock(mutex, abstime) }
+}
+
+/// # Safety
+/// Called by the program with libc's contract for this function.
+#[unsafe(no_mangle)]
+pub(super) unsafe extern "C" fn pthread_rwlock_timedrdlock(
+    rwlock: *mut libc::pthread_rwlock_t,
+    abstime: *const libc::timespec,
+) -> libc::c_int {
+    // Safety: the caller is the program, calling under libc's contract.
+    unsafe { wait::pthread_rwlock_timedrdlock(rwlock, abstime) }
+}
+
+/// # Safety
+/// Called by the program with libc's contract for this function.
+#[unsafe(no_mangle)]
+pub(super) unsafe extern "C" fn pthread_rwlock_timedwrlock(
+    rwlock: *mut libc::pthread_rwlock_t,
+    abstime: *const libc::timespec,
+) -> libc::c_int {
+    // Safety: the caller is the program, calling under libc's contract.
+    unsafe { wait::pthread_rwlock_timedwrlock(rwlock, abstime) }
+}
+
+/// # Safety
+/// Called by the program with libc's contract for this function.
+#[unsafe(no_mangle)]
+pub(super) unsafe extern "C" fn pthread_timedjoin_np(
+    thread: libc::pthread_t,
+    retval: *mut *mut libc::c_void,
+    abstime: *const libc::timespec,
+) -> libc::c_int {
+    // Safety: the caller is the program, calling under libc's contract.
+    unsafe { wait::pthread_timedjoin_np(thread, retval, abstime) }
+}
+
+/// # Safety
+/// Called by the program with libc's contract for this function.
+#[unsafe(no_mangle)]
+pub(super) unsafe extern "C" fn sem_timedwait(
+    sem: *mut libc::sem_t,
+    abstime: *const libc::timespec,
+) -> libc::c_int {
+    // Safety: the caller is the program, calling under libc's contract.
+    unsafe { wait::sem_timedwait(sem, abstime) }
+}
+
+/// # Safety
+/// Called by the program with libc's contract for this function.
+#[unsafe(no_mangle)]
+pub(super) unsafe extern "C" fn sem_clockwait(
+    sem: *mut libc::sem_t,
+    clock: libc::clockid_t,
+    abstime: *const libc::timespec,
+) -> libc::c_int {
+    // Safety: the caller is the program, calling under libc's contract.
+    unsafe { wait::sem_clockwait(sem, clock, abstime) }
+}
+
+/// # Safety
+/// Called by the program with libc's contract for this function.
+#[unsafe(no_mangle)]
+pub(super) unsafe extern "C" fn sigtimedwait(
+    set: *const libc::sigset_t,
+    info: *mut libc::siginfo_t,
+    timeout: *const libc::timespec,
+) -> libc::c_int {
+    // Safety: the caller is the program, calling under libc's contract.
+    unsafe { wait::sigtimedwait(set, info, timeout) }
+}
+
+/// # Safety
+/// Called by the program with libc's contract for this function.
+#[unsafe(no_mangle)]
+pub(super) unsafe extern "C" fn aio_suspend(
+    list: *const *const libc::aiocb,
+    nent: libc::c_int,
+    timeout: *const libc::timespec,
+) -> libc::c_int {
+    // Safety: the caller is the program, calling under libc's contract.
+    unsafe { wait::aio_suspend(list, nent, timeout) }
+}
+
+/// # Safety
+/// Called by the program with libc's contract for this function.
+#[unsafe(no_mangle)]
+pub(super) unsafe extern "C" fn recvmmsg(
+    sockfd: libc::c_int,
+    msgvec: *mut libc::mmsghdr,
+    vlen: libc::c_uint,
+    flags: libc::c_int,
+    timeout: *mut libc::timespec,
+) -> libc::c_int {
+    // Safety: the caller is the program, calling under libc's contract.
+    unsafe { wait::recvmmsg(sockfd, msgvec, vlen, flags, timeout) }
+}
+
+/// C11's own timed condition wait. Its variable and mutex are types we only ever pass along, so
+/// they travel as the opaque pointers they are.
+///
+/// # Safety
+/// Called by the program with libc's contract for this function.
+#[unsafe(no_mangle)]
+pub(super) unsafe extern "C" fn cnd_timedwait(
+    cond: *mut libc::c_void,
+    mutex: *mut libc::c_void,
+    deadline: *const libc::timespec,
+) -> libc::c_int {
+    // Safety: the caller is the program, calling under libc's contract.
+    unsafe { wait::cnd_timedwait(cond, mutex, deadline) }
+}
+
+/// C11's own timed lock, whose mutex is opaque for the reason `cnd_timedwait`'s is.
+///
+/// # Safety
+/// Called by the program with libc's contract for this function.
+#[unsafe(no_mangle)]
+pub(super) unsafe extern "C" fn mtx_timedlock(
+    mutex: *mut libc::c_void,
+    deadline: *const libc::timespec,
+) -> libc::c_int {
+    // Safety: the caller is the program, calling under libc's contract.
+    unsafe { wait::mtx_timedlock(mutex, deadline) }
+}
+
+/// # Safety
+/// Called by the program with libc's contract for this function.
+#[unsafe(no_mangle)]
+pub(super) unsafe extern "C" fn mq_timedsend(
+    mqdes: libc::mqd_t,
+    msg: *const libc::c_char,
+    len: libc::size_t,
+    priority: libc::c_uint,
+    abstime: *const libc::timespec,
+) -> libc::c_int {
+    // Safety: the caller is the program, calling under libc's contract.
+    unsafe { wait::mq_timedsend(mqdes, msg, len, priority, abstime) }
+}
+
+/// # Safety
+/// Called by the program with libc's contract for this function.
+#[unsafe(no_mangle)]
+pub(super) unsafe extern "C" fn mq_timedreceive(
+    mqdes: libc::mqd_t,
+    msg: *mut libc::c_char,
+    len: libc::size_t,
+    priority: *mut libc::c_uint,
+    abstime: *const libc::timespec,
+) -> libc::ssize_t {
+    // Safety: the caller is the program, calling under libc's contract.
+    unsafe { wait::mq_timedreceive(mqdes, msg, len, priority, abstime) }
+}

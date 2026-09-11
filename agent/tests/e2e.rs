@@ -264,9 +264,10 @@ fn the_library_exports_the_interposed_names_and_nothing_else() {
         .collect();
     exported.sort();
 
-    // Every name the clock group and the setters take over, glibc's internal aliases among them,
-    // and the one symbol of our own that a hook or a controller calls. Nothing else: a name here
-    // that the interposition table does not list would be a name we answer for by accident.
+    // Every name the clock group, the sleeps, the timeouts and the setters take over, glibc's
+    // internal aliases among them, the two calls that learn a condition variable's clock, and the
+    // one symbol of our own that a hook or a controller calls. Nothing else: a name here that the
+    // interposition table does not list would be a name we answer for by accident.
     assert_eq!(
         exported,
         [
@@ -275,18 +276,47 @@ fn the_library_exports_the_interposed_names_and_nothing_else() {
             "__gettimeofday",
             "__time",
             "adjtime",
+            "aio_suspend",
             "clock",
             "clock_gettime",
+            "clock_nanosleep",
             "clock_settime",
+            "cnd_timedwait",
+            "epoll_pwait",
+            "epoll_pwait2",
+            "epoll_wait",
             "ftime",
             "getrusage",
             "gettimeofday",
             "libtimewarp_genuine_clock_gettime",
+            "mq_timedreceive",
+            "mq_timedsend",
+            "mtx_timedlock",
+            "nanosleep",
+            "poll",
+            "ppoll",
+            "pselect",
+            "pthread_cond_clockwait",
+            "pthread_cond_destroy",
+            "pthread_cond_init",
+            "pthread_cond_timedwait",
+            "pthread_mutex_timedlock",
+            "pthread_rwlock_timedrdlock",
+            "pthread_rwlock_timedwrlock",
+            "pthread_timedjoin_np",
+            "recvmmsg",
+            "select",
+            "sem_clockwait",
+            "sem_timedwait",
             "settimeofday",
+            "sigtimedwait",
+            "sleep",
             "syscall",
+            "thrd_sleep",
             "time",
             "times",
             "timespec_get",
+            "usleep",
         ]
         .map(str::to_owned)
     );

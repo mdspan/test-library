@@ -61,11 +61,27 @@ impl Rate {
         let clamped = i64::try_from(magnitude).unwrap_or(i64::MAX);
         if nanos < 0 { -clamped } else { clamped }
     }
+
+    /// The other direction: how long a duration of the family's own time takes on the timebase,
+    /// which is what a wait is asked for and what it must block for.
+    ///
+    /// Saturating like [`Rate::scale`]. A frozen family gives the longest duration there is: its
+    /// clock never advances, so a wait on it is owed every nanosecond we can name.
+    #[must_use]
+    pub fn unscale(self, nanos: i64) -> i64 {
+        if self.0 == 0 {
+            return if nanos < 0 { i64::MIN } else { i64::MAX };
+        }
+        let magnitude = (u128::from(nanos.unsigned_abs()) << FRACTION_BITS) / u128::from(self.0);
+        let clamped = i64::try_from(magnitude).unwrap_or(i64::MAX);
+        if nanos < 0 { -clamped } else { clamped }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::time::Nanos;
 
     #[test]
     fn unity_is_the_identity() {
@@ -106,5 +122,37 @@ mod tests {
     #[test]
     fn the_smallest_nonzero_rate_is_not_zero() {
         assert_ne!(Rate(1).scale(i64::MAX), 0);
+    }
+
+    #[test]
+    fn unscaling_undoes_scaling() {
+        for rate in [0.5, 1.0, 2.0, 10.0, 0.125] {
+            let rate = Rate::from_f64(rate).unwrap();
+            for ns in [0, 1_000, Nanos::SECOND, 3_600 * Nanos::SECOND] {
+                assert_eq!(rate.unscale(rate.scale(ns)), ns, "{rate:?} of {ns}");
+            }
+        }
+        assert_eq!(
+            Rate::from_f64(10.0).unwrap().unscale(Nanos::SECOND),
+            100_000_000
+        );
+        assert_eq!(
+            Rate::from_f64(0.5).unwrap().unscale(Nanos::SECOND),
+            2 * Nanos::SECOND
+        );
+    }
+
+    #[test]
+    fn a_frozen_family_owes_a_wait_every_nanosecond_there_is() {
+        assert_eq!(Rate::FROZEN.unscale(1), i64::MAX);
+        assert_eq!(Rate::FROZEN.unscale(0), i64::MAX);
+        assert_eq!(Rate::FROZEN.unscale(-1), i64::MIN);
+    }
+
+    #[test]
+    fn unscaling_saturates_instead_of_wrapping() {
+        assert_eq!(Rate(1).unscale(i64::MAX), i64::MAX);
+        assert_eq!(Rate::MAX.unscale(i64::MAX), 2_147_483_647);
+        assert_eq!(Rate::UNITY.unscale(i64::MIN + 1), i64::MIN + 1);
     }
 }

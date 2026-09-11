@@ -11,6 +11,16 @@ mod platform;
 mod setter;
 mod state;
 
+// The waits are Linux's own. `epoll`, the timed message queues, the C11 threads calls and the
+// `clockwait` pair have no shape the three platforms share, and the other two answer a wait with
+// `kevent` and `mach_wait_until` besides, so each brings its own with its arm.
+cfg_if::cfg_if! {
+    if #[cfg(target_os = "linux")] {
+        mod genuine;
+        mod wait;
+    }
+}
+
 use std::fmt::Display;
 use std::path::{Path, PathBuf};
 
@@ -41,6 +51,10 @@ pub unsafe extern "C" fn libtimewarp_genuine_clock_gettime(
 
 #[ctor::ctor]
 fn constructor() {
+    // The genuine side of every wait, found before the program can call one. A lookup takes the
+    // loader's own lock, and this is the one moment where nothing of the program's is holding it.
+    #[cfg(target_os = "linux")]
+    genuine::prime();
     // We are inside somebody else's program before its `main`. A panic here would abort a process
     // that has done nothing wrong, so the worst case is that the target runs on genuine time.
     drop(std::panic::catch_unwind(attach_or_create));
