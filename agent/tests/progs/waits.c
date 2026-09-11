@@ -1,5 +1,9 @@
-/* Every sleep and every timeout the library takes over on Linux, each asked to wait one fake
-   duration and each measured against the genuine clock it actually blocked in.
+/* Every sleep and every timeout the library takes over, each asked to wait one fake duration and
+   each measured against the genuine clock it actually blocked in.
+
+   The groups differ by platform: `epoll` and the two `clockwait` calls are Linux's, `kevent` is
+   FreeBSD's, and a call by number is Linux's way of asking for one. A wait a platform does not
+   have is not reported at all, and the suite's own list for that platform does not name it.
 
    Linked against the library rather than preloading it, so the genuine clock comes from the
    library's own symbol and the measurement is not the one under test.
@@ -22,11 +26,18 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/epoll.h>
 #include <sys/select.h>
 #include <sys/socket.h>
-#include <sys/syscall.h>
 #include <sys/time.h>
+#ifdef __linux__
+#include <sys/epoll.h>
+#include <sys/syscall.h>
+#endif
+#ifdef __FreeBSD__
+/* `pthread_timedjoin_np` is a non-portable extension here, and lives in a header of its own. */
+#include <pthread_np.h>
+#include <sys/event.h>
+#endif
 #include <threads.h>
 #include <time.h>
 #include <unistd.h>
@@ -124,6 +135,7 @@ static void sleeps(void) {
     done("clock_nanosleep_wall", base_ns,
          clock_nanosleep(CLOCK_REALTIME, TIMER_ABSTIME, &remaining, NULL));
 
+#ifdef __linux__
     request = spec_of(base_ns);
     begin();
     done("sys_nanosleep", base_ns, (long long)syscall(SYS_nanosleep, &request, NULL));
@@ -132,6 +144,7 @@ static void sleeps(void) {
     begin();
     done("sys_clock_nanosleep", base_ns,
          (long long)syscall(SYS_clock_nanosleep, CLOCK_MONOTONIC, 0, &request, NULL));
+#endif
 
     /* Whole seconds is all this one takes, so it asks for one however short the base is. */
     begin();
@@ -188,9 +201,7 @@ static void interrupted_sleep(void) {
 static void relative_timeouts(void) {
     struct timespec timeout;
     struct timeval tv;
-    struct epoll_event events[1];
     sigset_t waited;
-    int epoll_fd;
 
     begin();
     done("poll", base_ns, poll(NULL, 0, (int)(base_ns / 1000000)));
@@ -208,32 +219,53 @@ static void relative_timeouts(void) {
     begin();
     done("pselect", base_ns, pselect(0, NULL, NULL, NULL, &timeout, NULL));
 
-    epoll_fd = epoll_create1(0);
-    if (epoll_fd < 0) {
-        skipped("epoll_wait");
-        skipped("epoll_pwait");
-        skipped("epoll_pwait2");
-    } else {
-        begin();
-        done("epoll_wait", base_ns, epoll_wait(epoll_fd, events, 1, (int)(base_ns / 1000000)));
+#ifdef __linux__
+    {
+        struct epoll_event events[1];
+        int epoll_fd = epoll_create1(0);
+        if (epoll_fd < 0) {
+            skipped("epoll_wait");
+            skipped("epoll_pwait");
+            skipped("epoll_pwait2");
+        } else {
+            begin();
+            done("epoll_wait", base_ns, epoll_wait(epoll_fd, events, 1, (int)(base_ns / 1000000)));
 
-        begin();
-        done("epoll_pwait", base_ns,
-             epoll_pwait(epoll_fd, events, 1, (int)(base_ns / 1000000), NULL));
+            begin();
+            done("epoll_pwait", base_ns,
+                 epoll_pwait(epoll_fd, events, 1, (int)(base_ns / 1000000), NULL));
 
-        timeout = spec_of(base_ns);
-        begin();
-        errno = 0;
-        {
-            int rc = epoll_pwait2(epoll_fd, events, 1, &timeout, NULL);
-            if (rc < 0 && errno == ENOSYS) {
-                skipped("epoll_pwait2");
-            } else {
-                done("epoll_pwait2", base_ns, rc);
+            timeout = spec_of(base_ns);
+            begin();
+            errno = 0;
+            {
+                int rc = epoll_pwait2(epoll_fd, events, 1, &timeout, NULL);
+                if (rc < 0 && errno == ENOSYS) {
+                    skipped("epoll_pwait2");
+                } else {
+                    done("epoll_pwait2", base_ns, rc);
+                }
             }
+            close(epoll_fd);
         }
-        close(epoll_fd);
     }
+#endif
+#ifdef __FreeBSD__
+    /* The platform's own wait on a set of events, which nothing ever posts to here, so it runs its
+       timeout out. */
+    {
+        struct kevent event;
+        int kq = kqueue();
+        if (kq < 0) {
+            skipped("kevent");
+        } else {
+            timeout = spec_of(base_ns);
+            begin();
+            done("kevent", base_ns, kevent(kq, NULL, 0, &event, 1, &timeout));
+            close(kq);
+        }
+    }
+#endif
 
     /* A signal that is blocked and never sent, so the wait runs its timeout out. */
     sigemptyset(&waited);
@@ -274,8 +306,9 @@ static void aio_timeout(void) {
        about to leave anyway. */
 }
 
-/* ---- a timeout the kernel only checks between datagrams ---- */
+/* ---- a timeout over a socket nothing useful arrives on ---- */
 
+#ifdef __linux__
 static int pacer_socket = -1;
 static volatile int pacing = 1;
 
@@ -290,8 +323,10 @@ static void *pacer(void *arg) {
     }
     return NULL;
 }
+#endif
 
 static void recvmmsg_timeout(void) {
+#ifdef __linux__
     enum { SLOTS = 2048 };
     static struct mmsghdr messages[SLOTS];
     static struct iovec vectors[SLOTS];
@@ -328,6 +363,30 @@ static void recvmmsg_timeout(void) {
     pthread_join(helper, NULL);
     close(pair[0]);
     close(pair[1]);
+#else
+    /* Here the call waits its timeout out before the first message, so an idle socket is the whole
+       of the setup and one slot is enough. */
+    struct mmsghdr message;
+    struct iovec vector;
+    char buffer;
+    struct timespec timeout;
+    int pair[2];
+
+    if (socketpair(AF_UNIX, SOCK_DGRAM, 0, pair) != 0) {
+        skipped("recvmmsg");
+        return;
+    }
+    memset(&message, 0, sizeof message);
+    vector.iov_base = &buffer;
+    vector.iov_len = sizeof buffer;
+    message.msg_hdr.msg_iov = &vector;
+    message.msg_hdr.msg_iovlen = 1;
+    timeout = spec_of(base_ns);
+    begin();
+    done("recvmmsg", base_ns, recvmmsg(pair[0], &message, 1, 0, &timeout));
+    close(pair[0]);
+    close(pair[1]);
+#endif
 }
 
 /* ---- the timeouts that name an absolute deadline ---- */
@@ -403,13 +462,16 @@ static void timed_semaphores(void) {
 
     if (sem_init(&empty, 0, 0) != 0) {
         skipped("sem_timedwait");
+#ifdef __linux__
         skipped("sem_clockwait");
+#endif
         return;
     }
     deadline = deadline_on(CLOCK_REALTIME);
     begin();
     done("sem_timedwait", base_ns, sem_timedwait(&empty, &deadline));
 
+#ifdef __linux__
     deadline = deadline_on(CLOCK_MONOTONIC);
     begin();
     errno = 0;
@@ -421,6 +483,7 @@ static void timed_semaphores(void) {
             done("sem_clockwait", base_ns, rc);
         }
     }
+#endif
     sem_destroy(&empty);
 }
 
@@ -449,6 +512,7 @@ static void condition_variables(void) {
     done("pthread_cond_timedwait_monotonic", base_ns,
          pthread_cond_timedwait(&steady, &mutex, &deadline));
 
+#ifdef __linux__
     deadline = deadline_on(CLOCK_MONOTONIC);
     begin();
     errno = 0;
@@ -460,6 +524,7 @@ static void condition_variables(void) {
             done("pthread_cond_clockwait", base_ns, rc);
         }
     }
+#endif
     pthread_mutex_unlock(&mutex);
 
     /* Destroying the variable makes the library forget the clock it was built with. Its memory is

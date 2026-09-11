@@ -83,6 +83,16 @@ pub fn clock_named(name: &str) -> Option<libc::clockid_t> {
         .map(|&(_, id)| id)
 }
 
+/// The clock the Monotonic family tracks here.
+///
+/// Asked rather than spelled, because FreeBSD picks between two columns of the family table by the
+/// running kernel's version, and the name `CLOCK_MONOTONIC` crossed from one to the other at 15.0.
+/// Cpu is the one family with no timebase, and this is not it.
+#[must_use]
+pub fn monotonic_timebase() -> libc::clockid_t {
+    default_timebase(Family::Monotonic).unwrap_or(clock::REALTIME)
+}
+
 /// Whether `family` may track passage against `clock`.
 ///
 /// Any clock of the Monotonic or Boottime family serves every family. `CLOCK_REALTIME` serves the

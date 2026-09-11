@@ -9,8 +9,10 @@
 //! about again after it has been handed out afresh, and that goes through the creation above.
 //!
 //! Two tables, because a descriptor and a timer id are numbers of different kinds and either could
-//! collide with the other. [`crate::clocks`] holds the slots and the default.
+//! collide with the other. [`crate::clocks`] holds the slots and the default. The timerfd is
+//! Linux's alone, so its table is there only where the calls are.
 
+#[cfg(target_os = "linux")]
 use common::platform::clock;
 
 use crate::clocks::Table;
@@ -19,6 +21,7 @@ use crate::clocks::Table;
 static TIMERS: Table = Table::new();
 
 /// Every timerfd this process remembers, by its descriptor.
+#[cfg(target_os = "linux")]
 static TIMERFDS: Table = Table::new();
 
 /// The key a timer id is. glibc counts these up from zero, so the number itself is the key.
@@ -27,6 +30,7 @@ fn timer_key(timer: libc::timer_t) -> usize {
 }
 
 /// The key a descriptor is, or `None` for one no `timerfd_create` ever returned.
+#[cfg(target_os = "linux")]
 fn timerfd_key(fd: libc::c_int) -> Option<usize> {
     usize::try_from(fd).ok()
 }
@@ -43,6 +47,7 @@ pub(crate) fn timer_clock(timer: libc::timer_t) -> libc::clockid_t {
 }
 
 /// Remembers that the timerfd `fd` was created on `clock`.
+#[cfg(target_os = "linux")]
 pub(crate) fn remember_timerfd(fd: libc::c_int, clock: libc::clockid_t) {
     if let Some(key) = timerfd_key(fd) {
         TIMERFDS.record(key, clock);
@@ -50,12 +55,15 @@ pub(crate) fn remember_timerfd(fd: libc::c_int, clock: libc::clockid_t) {
 }
 
 /// The clock the timerfd `fd` was created on, under the same rule as [`timer_clock`].
+#[cfg(target_os = "linux")]
 pub(crate) fn timerfd_clock(fd: libc::c_int) -> libc::clockid_t {
     timerfd_key(fd).map_or(clock::REALTIME, |key| TIMERFDS.clock_of(key))
 }
 
 #[cfg(test)]
 mod tests {
+    use common::platform::clock;
+
     use super::*;
 
     /// The `which`th timer id, in the shape glibc hands them out: a small count from zero.
@@ -72,6 +80,7 @@ mod tests {
         assert_eq!(timer_clock(timer(7)), clock::REALTIME);
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_timerfd_keeps_the_clock_it_was_created_on_and_descriptor_zero_is_a_descriptor() {
         remember_timerfd(0, clock::BOOTTIME);
@@ -86,6 +95,7 @@ mod tests {
         assert_eq!(timerfd_clock(-1), clock::REALTIME);
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_timer_and_a_timerfd_of_the_same_number_are_different_objects() {
         remember_timerfd(9, clock::MONOTONIC);

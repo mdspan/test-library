@@ -180,6 +180,13 @@ mod tests {
         0x1_0000 + which * 48
     }
 
+    /// A third clock, apart from the default and the monotonic one, under whatever name this
+    /// platform gives it: the first clock of the Boottime family's column.
+    fn boottime() -> libc::clockid_t {
+        common::platform::default_timebase(common::time::Family::Boottime)
+            .expect("every family but Cpu tracks a clock")
+    }
+
     #[test]
     fn an_object_nobody_named_reads_the_default() {
         let table = Table::new();
@@ -209,8 +216,8 @@ mod tests {
     #[test]
     fn recording_the_default_forgets_the_clock() {
         let table = Table::new();
-        table.record(key(3), clock::BOOTTIME);
-        assert_eq!(table.clock_of(key(3)), clock::BOOTTIME);
+        table.record(key(3), boottime());
+        assert_eq!(table.clock_of(key(3)), boottime());
         table.record(key(3), clock::REALTIME);
         assert_eq!(table.clock_of(key(3)), clock::REALTIME);
         // And recording it afresh puts it back, which is what a descriptor reused is.
@@ -224,21 +231,21 @@ mod tests {
         // Two keys one probe apart, so the second sits past the first and finds it on the way.
         let (first, second) = (key(4), key(5));
         table.record(first, clock::MONOTONIC);
-        table.record(second, clock::BOOTTIME);
+        table.record(second, boottime());
         assert_eq!(table.clock_of(first), clock::MONOTONIC);
-        assert_eq!(table.clock_of(second), clock::BOOTTIME);
+        assert_eq!(table.clock_of(second), boottime());
 
         table.forget(first);
         assert_eq!(table.clock_of(first), clock::REALTIME);
         assert_eq!(
             table.clock_of(second),
-            clock::BOOTTIME,
+            boottime(),
             "the walk stopped at the forgotten slot"
         );
 
         table.record(first, clock::MONOTONIC);
         assert_eq!(table.clock_of(first), clock::MONOTONIC);
-        assert_eq!(table.clock_of(second), clock::BOOTTIME);
+        assert_eq!(table.clock_of(second), boottime());
     }
 
     #[test]

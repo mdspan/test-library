@@ -1,4 +1,4 @@
-//! Timers: the bodies behind the names the Linux arm exports.
+//! Timers: the bodies behind the names the Linux and FreeBSD arms export.
 //!
 //! A timer makes the same promise a wait makes, and it makes it once, when it is armed: fire when
 //! the clock has advanced this far. So an arm converts by the rules [`crate::wait`] converts by. A
@@ -10,7 +10,8 @@
 //! Which family a timer follows is the clock the kernel counts it against. `setitimer` follows
 //! Realtime for `ITIMER_REAL` and Cpu for the two that count consumption; `timer_settime` and
 //! `timerfd_settime` follow the clock the timer was created on, which [`owner`] remembers; `alarm`
-//! follows Realtime, being one `ITIMER_REAL` timer under another name.
+//! follows Realtime, being one `ITIMER_REAL` timer under another name. The timerfd is Linux's
+//! alone, so it carries a `cfg` of its own; everything else is shared.
 //!
 //! A query is the other direction, and the fourth conversion the hook sees: the kernel counts a
 //! timer down in genuine time, and `getitimer`, `timer_gettime` and `timerfd_gettime` owe the
@@ -372,6 +373,7 @@ pub(crate) unsafe fn timer_gettime(
 }
 
 /// Learns which clock the timerfd this creates will arm against, and reads no time.
+#[cfg(target_os = "linux")]
 #[inline]
 pub(crate) fn timerfd_create(clock: libc::clockid_t, flags: libc::c_int) -> libc::c_int {
     // Safety: the call takes two plain values and touches no memory of the caller's.
@@ -387,6 +389,7 @@ pub(crate) fn timerfd_create(clock: libc::clockid_t, flags: libc::c_int) -> libc
 /// # Safety
 /// `new_value` must be null or valid for reads of an `itimerspec`, and `old_value` null or valid
 /// for reads and writes of one.
+#[cfg(target_os = "linux")]
 #[inline]
 pub(crate) unsafe fn timerfd_settime(
     fd: libc::c_int,
@@ -412,6 +415,7 @@ pub(crate) unsafe fn timerfd_settime(
 
 /// # Safety
 /// `curr_value` must be null or valid for reads and writes of an `itimerspec`.
+#[cfg(target_os = "linux")]
 #[inline]
 pub(crate) unsafe fn timerfd_gettime(
     fd: libc::c_int,

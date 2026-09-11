@@ -101,7 +101,9 @@ int main(void) {
     burn(50000000);
     round_of("a");
 
-    /* The library does not interpose sleeps yet, so this is genuine time passing. */
+    /* Time passing between the two rounds. The library converts this sleep like any other, so what
+       passes is the pause divided by the Monotonic family's rate; every reading below is compared
+       against its own genuine one, so the amount does not matter. */
     nanosleep(&pause, NULL);
     burn(50000000);
     round_of("b");

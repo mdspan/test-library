@@ -3,22 +3,23 @@
 //! Every path here is a read path: no lock, no allocation, nothing written to shared memory, and
 //! nothing that could recurse into a symbol we took over.
 
-// Every body here is reached through a platform arm, and no arm but Linux names all of them yet.
+// Every body here is reached through a platform arm, and macOS names a part of them so far.
 #![cfg_attr(
-    not(target_os = "linux"),
+    not(any(target_os = "linux", target_os = "freebsd")),
     allow(
         dead_code,
-        reason = "reached only through a platform arm, and the arms below Linux name a part of \
-                  these so far"
+        reason = "reached only through a platform arm, and the macOS arm names a part of these so \
+                  far"
     )
 )]
 
 use common::hook::{Func, Kind};
 use common::platform::{
-    clock, default_timebase, genuine_clock_gettime, genuine_getrusage, genuine_nanos, genuine_times,
+    clock, genuine_clock_gettime, genuine_getrusage, genuine_nanos, genuine_times,
+    monotonic_timebase,
 };
 use common::session::{clock_now, cpu_scaled};
-use common::time::{Family, Nanos};
+use common::time::Nanos;
 
 use crate::state;
 
@@ -176,6 +177,13 @@ pub(crate) struct Timeb {
 
 /// # Safety
 /// `tp` must be null or valid for writes of a `timeb`.
+#[cfg_attr(
+    not(target_os = "linux"),
+    expect(
+        dead_code,
+        reason = "a call only glibc still exports, so no other arm has one of a program's to catch"
+    )
+)]
 #[inline]
 pub(crate) unsafe fn ftime(tp: *mut Timeb) -> libc::c_int {
     // Unlike `time`, this has nowhere but the buffer to answer in, so a null one is a failure.
@@ -240,7 +248,7 @@ pub(crate) unsafe fn times(buf: *mut libc::tms) -> libc::clock_t {
     if elapsed == NO_TICKS {
         return elapsed;
     }
-    faked(Func::Times, monotonic()).map_or(elapsed, |now| to_ticks(now, per_second))
+    faked(Func::Times, monotonic_timebase()).map_or(elapsed, |now| to_ticks(now, per_second))
 }
 
 /// The resource usage of `who`, with the user and system times scaled by the Cpu family and every
@@ -265,15 +273,6 @@ pub(crate) unsafe fn getrusage(who: libc::c_int, usage: *mut libc::rusage) -> li
         }
     }
     0
-}
-
-/// The clock the Monotonic family tracks here, which is what the elapsed time of `times` follows.
-///
-/// Asked rather than spelled, because FreeBSD picks between two columns of the family table by the
-/// running kernel's version. Cpu is the one family with no timebase, and this is not it.
-#[inline]
-fn monotonic() -> libc::clockid_t {
-    default_timebase(Family::Monotonic).unwrap_or(clock::REALTIME)
 }
 
 /// Which Cpu clock a `getrusage` target names: the whole process for itself and its children, the

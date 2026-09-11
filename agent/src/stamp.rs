@@ -1,4 +1,4 @@
-//! File timestamps: the bodies behind the names the Linux arm exports.
+//! File timestamps: the bodies behind the names the Linux and FreeBSD arms export.
 //!
 //! A timestamp has to agree with the clock, so a file written just now shows a modification time
 //! of about now whatever the wall clock has been set to. A read carries the genuine timestamp
@@ -14,8 +14,15 @@
 //! A read converts the buffer the genuine call filled. A set converts a copy of what the program
 //! asked for, never the program's own buffer, and leaves `UTIME_NOW` and `UTIME_OMIT` alone: they
 //! name no instant, so there is nothing in them to convert.
+//!
+//! `statx`, the `64` names and the `__xstat` family are Linux's alone, and the birth time inside a
+//! `stat` buffer is FreeBSD's, so each carries a `cfg` of its own. So does `utime`: FreeBSD's libc
+//! builds it out of one call to `utimes`, which we already take over, and the arm there leaves the
+//! set to that call rather than converting it twice.
 
-use std::ffi::{c_char, c_int, c_uint};
+#[cfg(target_os = "linux")]
+use std::ffi::c_uint;
+use std::ffi::{c_char, c_int};
 
 use common::hook::{Func, Kind};
 use common::platform::clock;
@@ -26,9 +33,9 @@ use crate::wait::unsupported;
 use crate::{genuine, state};
 
 /// The `struct stat` version `__xstat` is asked for, as this architecture's glibc headers name it.
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 const STAT_VER: c_int = 1;
-#[cfg(not(target_arch = "x86_64"))]
+#[cfg(all(target_os = "linux", not(target_arch = "x86_64")))]
 const STAT_VER: c_int = 3;
 
 /// What the session shows for a genuine file timestamp, or `None` when it stands as the filesystem
@@ -68,27 +75,36 @@ fn stored(func: Func, stamp: Nanos) -> Option<Nanos> {
     })
 }
 
+/// How many timestamps one `stat` buffer carries: the three POSIX names everywhere, and the
+/// birth time besides on a platform whose buffer has room for it.
+#[cfg(target_os = "freebsd")]
+const STAMPS: usize = 4;
+#[cfg(not(target_os = "freebsd"))]
+const STAMPS: usize = 3;
+
 /// A filled `stat` buffer, whichever of the shapes a libc has: the timestamps it carries, to
 /// rewrite where they lie.
 trait Stamped {
     /// Every timestamp in the buffer, as the `(seconds, nanoseconds)` pair each is spelled in.
-    fn stamps(&mut self) -> [(&mut libc::time_t, &mut i64); 3];
+    fn stamps(&mut self) -> [(&mut libc::time_t, &mut i64); STAMPS];
 }
 
 impl Stamped for libc::stat {
-    fn stamps(&mut self) -> [(&mut libc::time_t, &mut i64); 3] {
+    fn stamps(&mut self) -> [(&mut libc::time_t, &mut i64); STAMPS] {
         [
             (&mut self.st_atime, &mut self.st_atime_nsec),
             (&mut self.st_mtime, &mut self.st_mtime_nsec),
             (&mut self.st_ctime, &mut self.st_ctime_nsec),
+            #[cfg(target_os = "freebsd")]
+            (&mut self.st_birthtime, &mut self.st_birthtime_nsec),
         ]
     }
 }
 
 // musl spells `stat64` as another name for `stat`, so there the impl above is already this one.
-#[cfg(not(target_env = "musl"))]
+#[cfg(all(target_os = "linux", not(target_env = "musl")))]
 impl Stamped for libc::stat64 {
-    fn stamps(&mut self) -> [(&mut libc::time_t, &mut i64); 3] {
+    fn stamps(&mut self) -> [(&mut libc::time_t, &mut i64); STAMPS] {
         [
             (&mut self.st_atime, &mut self.st_atime_nsec),
             (&mut self.st_mtime, &mut self.st_mtime_nsec),
@@ -131,7 +147,8 @@ unsafe fn stat_result<T: Stamped>(func: Func, result: Option<c_int>, buf: *mut T
 ///
 /// glibc exported these under their own names for the first time at 2.33, and kept the `__xstat`
 /// forms for the programs built against an older one. So the pair covers both eras from one build,
-/// whichever of the two names a program itself calls.
+/// whichever of the two names a program itself calls. FreeBSD's libc has only ever had the plain
+/// name, so there the fallback is left out and a missing name is a missing name.
 macro_rules! genuine_stat {
     ($(
         $(#[$doc:meta])*
@@ -148,8 +165,12 @@ macro_rules! genuine_stat {
                 if let Some(result) = unsafe { genuine::$plain($($arg),*) } {
                     return Some(result);
                 }
+                #[cfg(target_os = "linux")]
                 // Safety: as above, with the version this architecture's headers name.
-                unsafe { genuine::$versioned(STAT_VER, $($arg),*) }
+                let older = unsafe { genuine::$versioned(STAT_VER, $($arg),*) };
+                #[cfg(not(target_os = "linux"))]
+                let older = None;
+                older
             }
         )*
     };
@@ -160,18 +181,21 @@ genuine_stat! {
     fn genuine_stat = stat else __xstat(path: *const c_char, buf: *mut libc::stat);
 
     /// The genuine `stat64`.
+    #[cfg(target_os = "linux")]
     fn genuine_stat64 = stat64 else __xstat64(path: *const c_char, buf: *mut libc::stat64);
 
     /// The genuine `fstat`.
     fn genuine_fstat = fstat else __fxstat(fd: c_int, buf: *mut libc::stat);
 
     /// The genuine `fstat64`.
+    #[cfg(target_os = "linux")]
     fn genuine_fstat64 = fstat64 else __fxstat64(fd: c_int, buf: *mut libc::stat64);
 
     /// The genuine `lstat`.
     fn genuine_lstat = lstat else __lxstat(path: *const c_char, buf: *mut libc::stat);
 
     /// The genuine `lstat64`.
+    #[cfg(target_os = "linux")]
     fn genuine_lstat64 = lstat64 else __lxstat64(path: *const c_char, buf: *mut libc::stat64);
 
     /// The genuine `fstatat`.
@@ -183,6 +207,7 @@ genuine_stat! {
     );
 
     /// The genuine `fstatat64`.
+    #[cfg(target_os = "linux")]
     fn genuine_fstatat64 = fstatat64 else __fxstatat64(
         dirfd: c_int,
         path: *const c_char,
@@ -203,6 +228,7 @@ pub(crate) unsafe fn stat(path: *const c_char, buf: *mut libc::stat) -> c_int {
 
 /// # Safety
 /// `path` must be a valid NUL-terminated path, and `buf` null or valid for writes of a `stat64`.
+#[cfg(target_os = "linux")]
 #[inline]
 pub(crate) unsafe fn stat64(path: *const c_char, buf: *mut libc::stat64) -> c_int {
     // Safety: both arguments are the caller's, passed on unchanged.
@@ -223,6 +249,7 @@ pub(crate) unsafe fn fstat(fd: c_int, buf: *mut libc::stat) -> c_int {
 
 /// # Safety
 /// `buf` must be null or valid for writes of a `stat64`.
+#[cfg(target_os = "linux")]
 #[inline]
 pub(crate) unsafe fn fstat64(fd: c_int, buf: *mut libc::stat64) -> c_int {
     // Safety: the buffer is the caller's, passed on unchanged.
@@ -243,6 +270,7 @@ pub(crate) unsafe fn lstat(path: *const c_char, buf: *mut libc::stat) -> c_int {
 
 /// # Safety
 /// `path` must be a valid NUL-terminated path, and `buf` null or valid for writes of a `stat64`.
+#[cfg(target_os = "linux")]
 #[inline]
 pub(crate) unsafe fn lstat64(path: *const c_char, buf: *mut libc::stat64) -> c_int {
     // Safety: both arguments are the caller's, passed on unchanged.
@@ -268,6 +296,7 @@ pub(crate) unsafe fn fstatat(
 
 /// # Safety
 /// `path` must be a valid NUL-terminated path, and `buf` null or valid for writes of a `stat64`.
+#[cfg(target_os = "linux")]
 #[inline]
 pub(crate) unsafe fn fstatat64(
     dirfd: c_int,
@@ -390,6 +419,7 @@ pub(crate) unsafe fn fxstatat64(
 }
 
 /// One timestamp of a `statx` buffer: whole seconds, and the nanoseconds past them.
+#[cfg(target_os = "linux")]
 #[derive(Debug)]
 #[repr(C)]
 struct StatxTimestamp {
@@ -407,6 +437,7 @@ struct StatxTimestamp {
 /// build against declare `statx` at all, and the kernel's shape is the same under every one. Only
 /// the mask and the four timestamps are named: everything else travels between the kernel and the
 /// program untouched, so it is bytes here rather than fields.
+#[cfg(target_os = "linux")]
 #[derive(Debug)]
 #[repr(C)]
 pub(crate) struct Statx {
@@ -427,20 +458,26 @@ pub(crate) struct Statx {
 }
 
 /// The mask bit that says the kernel filled the access time in.
+#[cfg(target_os = "linux")]
 const STATX_ATIME: u32 = 0x0020;
 /// The same for the modification time.
+#[cfg(target_os = "linux")]
 const STATX_MTIME: u32 = 0x0040;
 /// The same for the status change time.
+#[cfg(target_os = "linux")]
 const STATX_CTIME: u32 = 0x0080;
 /// The same for the birth time, the one a filesystem may not keep at all.
+#[cfg(target_os = "linux")]
 const STATX_BTIME: u32 = 0x0800;
 
+#[cfg(target_os = "linux")]
 const _: () = {
     assert!(size_of::<Statx>() == 256);
     assert!(align_of::<Statx>() == 8);
     assert!(std::mem::offset_of!(Statx, atime) == 64);
 };
 
+#[cfg(target_os = "linux")]
 impl Statx {
     /// Every timestamp the buffer carries, each with the mask bit that says the kernel filled it.
     const fn stamps(&mut self) -> [(u32, &mut StatxTimestamp); 4] {
@@ -459,6 +496,7 @@ impl Statx {
 ///
 /// # Safety
 /// `path` must be a valid NUL-terminated path, and `buf` null or valid for writes of a `statx`.
+#[cfg(target_os = "linux")]
 #[inline]
 pub(crate) unsafe fn statx(
     dirfd: c_int,
@@ -560,6 +598,7 @@ unsafe fn stored_timevals(func: Func, times: *const libc::timeval) -> Option<[li
 ///
 /// # Safety
 /// `times` must be null or valid for reads of a `utimbuf`.
+#[cfg(target_os = "linux")]
 #[inline]
 unsafe fn stored_utimbuf(times: *const libc::utimbuf) -> Option<libc::utimbuf> {
     if times.is_null() {
@@ -580,6 +619,7 @@ unsafe fn stored_utimbuf(times: *const libc::utimbuf) -> Option<libc::utimbuf> {
 
 /// # Safety
 /// `path` must be a valid NUL-terminated path, and `times` null or valid for reads of a `utimbuf`.
+#[cfg(target_os = "linux")]
 #[inline]
 pub(crate) unsafe fn utime(path: *const c_char, times: *const libc::utimbuf) -> c_int {
     // Safety: `times` is the caller's, read under the contract it came with.

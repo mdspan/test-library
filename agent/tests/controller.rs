@@ -4,7 +4,7 @@
 //!
 //! `LD_PRELOAD` needs a platform arm that exports the interposed names, and creating a session
 //! needs one that can read a genuine clock, so these cases only apply where both exist.
-#![cfg(target_os = "linux")]
+#![cfg(any(target_os = "linux", target_os = "freebsd"))]
 #![expect(
     clippy::unwrap_used,
     clippy::expect_used,

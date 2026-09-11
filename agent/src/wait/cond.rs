@@ -41,6 +41,13 @@ mod tests {
 
     use super::*;
 
+    /// A clock other than the default, under whatever name this platform gives it: the first clock
+    /// of the Boottime family's column.
+    fn boottime() -> libc::clockid_t {
+        common::platform::default_timebase(common::time::Family::Boottime)
+            .expect("every family but Cpu tracks a clock")
+    }
+
     /// A variable at an address no real one of this process occupies, so the cases below can plant
     /// keys in the process's own table without colliding with the program's.
     fn cond(which: usize) -> *const libc::pthread_cond_t {
@@ -65,8 +72,8 @@ mod tests {
 
     #[test]
     fn re_initialising_with_the_default_forgets_the_clock() {
-        remember(cond(3), clock::BOOTTIME);
-        assert_eq!(clock_of(cond(3)), clock::BOOTTIME);
+        remember(cond(3), boottime());
+        assert_eq!(clock_of(cond(3)), boottime());
         remember(cond(3), clock::REALTIME);
         assert_eq!(clock_of(cond(3)), clock::REALTIME);
     }

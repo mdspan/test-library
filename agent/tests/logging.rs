@@ -1,5 +1,5 @@
 //! The log a user names a destination for, seen from outside the process that wrote it.
-#![cfg(target_os = "linux")]
+#![cfg(any(target_os = "linux", target_os = "freebsd"))]
 #![expect(
     clippy::unwrap_used,
     clippy::expect_used,

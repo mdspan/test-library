@@ -329,18 +329,60 @@ const INTERPOSED: &[&str] = &[
     "utimes",
 ];
 
-/// The same for FreeBSD, where the clock group is what the arm names so far. `ftime` is not among
-/// them: the platform's libc dropped the function, so there is no call of a program's to catch.
+/// The same for FreeBSD. Five names Linux has are absent because this platform has no such call,
+/// and five more because its libc reaches them through a call we already take over: `utime`,
+/// `recvmmsg`, `thrd_sleep`, `cnd_timedwait` and `mtx_timedlock` are thin wrappers over `utimes`,
+/// `ppoll`, `nanosleep`, `pthread_cond_timedwait` and `pthread_mutex_timedlock`, so defining them
+/// too would convert the call twice. `kevent` is here and on no other list.
 #[cfg(target_os = "freebsd")]
 const INTERPOSED: &[&str] = &[
+    "adjtime",
+    "aio_suspend",
+    "alarm",
     "clock",
     "clock_gettime",
+    "clock_nanosleep",
+    "clock_settime",
+    "fstat",
+    "fstatat",
+    "futimens",
+    "futimes",
+    "getitimer",
     "getrusage",
     "gettimeofday",
+    "kevent",
     "libtimewarp_genuine_clock_gettime",
+    "lstat",
+    "lutimes",
+    "mq_timedreceive",
+    "mq_timedsend",
+    "nanosleep",
+    "poll",
+    "ppoll",
+    "pselect",
+    "pthread_cond_destroy",
+    "pthread_cond_init",
+    "pthread_cond_timedwait",
+    "pthread_mutex_timedlock",
+    "pthread_rwlock_timedrdlock",
+    "pthread_rwlock_timedwrlock",
+    "pthread_timedjoin_np",
+    "select",
+    "sem_timedwait",
+    "setitimer",
+    "settimeofday",
+    "sigtimedwait",
+    "sleep",
+    "stat",
     "time",
+    "timer_create",
+    "timer_gettime",
+    "timer_settime",
     "times",
     "timespec_get",
+    "usleep",
+    "utimensat",
+    "utimes",
 ];
 
 /// The names glibc routed `stat` and its neighbours through until 2.33, which only a build

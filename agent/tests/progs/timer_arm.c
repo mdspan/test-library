@@ -2,18 +2,25 @@
    took, so a suite case can change the session while the timer is already armed, or hold it under
    a frozen clock and see that nothing releases it.
 
+   A timerfd where the platform has one, and a POSIX timer where it does not; either way the timer
+   is created on the monotonic clock and armed with a relative duration.
+
    Linked against the library rather than preloading it, so the genuine clock comes from the
    library's own symbol. argv[1] is the fake duration in milliseconds. `disarmed=` goes out first,
    carrying what a timer disarmed on this session reports it has left, and `armed=1` after the
    conversion, so a case knows exactly when to make its change. */
 #define _GNU_SOURCE
+#include <errno.h>
+#include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/timerfd.h>
 #include <time.h>
 #include <unistd.h>
+#ifdef __linux__
+#include <sys/timerfd.h>
+#endif
 
 extern int libtimewarp_genuine_clock_gettime(clockid_t clock, struct timespec *ts);
 
@@ -38,19 +45,66 @@ static struct timespec spec_of(long long ns) {
     return ts;
 }
 
+#ifdef __linux__
+/* One timerfd on the monotonic clock, which the three calls below arm, query and wait on. */
+static int timer;
+
+static int make_timer(void) {
+    timer = timerfd_create(CLOCK_MONOTONIC, 0);
+    return timer >= 0 ? 0 : -1;
+}
+
+static void arm(const struct itimerspec *value) { timerfd_settime(timer, 0, value, NULL); }
+
+static void query(struct itimerspec *value) { timerfd_gettime(timer, value); }
+
+/* Blocks until it fires, which is a read of the count of expiries. */
+static int await(void) {
+    uint64_t ticks = 0;
+    return read(timer, &ticks, sizeof ticks) == (ssize_t)sizeof ticks ? 0 : -1;
+}
+#else
+/* The same, as a POSIX timer firing a signal this process blocks and waits for. */
+static timer_t timer;
+
+static int make_timer(void) {
+    struct sigevent event;
+    sigset_t blocked;
+
+    sigemptyset(&blocked);
+    sigaddset(&blocked, SIGUSR1);
+    sigprocmask(SIG_BLOCK, &blocked, NULL);
+
+    memset(&event, 0, sizeof event);
+    event.sigev_notify = SIGEV_SIGNAL;
+    event.sigev_signo = SIGUSR1;
+    return timer_create(CLOCK_MONOTONIC, &event, &timer);
+}
+
+static void arm(const struct itimerspec *value) { timer_settime(timer, 0, value, NULL); }
+
+static void query(struct itimerspec *value) { timer_gettime(timer, value); }
+
+static int await(void) {
+    sigset_t set;
+    sigemptyset(&set);
+    sigaddset(&set, SIGUSR1);
+    while (sigwaitinfo(&set, NULL) < 0 && errno == EINTR) {
+    }
+    return 0;
+}
+#endif
+
 int main(int argc, char **argv) {
     struct itimerspec new_value, current;
     long long fake, started;
-    uint64_t ticks = 0;
-    int fd;
 
     if (argc < 2) {
         return 2;
     }
     fake = atoll(argv[1]) * 1000000LL;
 
-    fd = timerfd_create(CLOCK_MONOTONIC, 0);
-    if (fd < 0) {
+    if (make_timer() != 0) {
         return 3;
     }
 
@@ -58,22 +112,22 @@ int main(int argc, char **argv) {
        so a freeze cannot turn a disarm into the longest duration there is. */
     memset(&new_value, 0, sizeof new_value);
     new_value.it_value = spec_of(fake);
-    timerfd_settime(fd, 0, &new_value, NULL);
+    arm(&new_value);
     memset(&new_value, 0, sizeof new_value);
-    timerfd_settime(fd, 0, &new_value, NULL);
+    arm(&new_value);
     memset(&current, 0, sizeof current);
-    timerfd_gettime(fd, &current);
+    query(&current);
     printf("disarmed=%lld\n", nanos(&current.it_value));
 
     memset(&new_value, 0, sizeof new_value);
     new_value.it_value = spec_of(fake);
     printf("fake=%lld\n", fake);
-    timerfd_settime(fd, 0, &new_value, NULL);
+    arm(&new_value);
     printf("armed=1\n");
     fflush(stdout);
 
     started = genuine_mono();
-    if (read(fd, &ticks, sizeof ticks) != (ssize_t)sizeof ticks) {
+    if (await() != 0) {
         return 4;
     }
     printf("genuine=%lld\n", genuine_mono() - started);

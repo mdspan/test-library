@@ -1,10 +1,13 @@
-//! Sleeps and timeouts: every wait the library takes over on Linux, measured against the genuine
-//! time it actually blocked, the family each one follows, what a wait cut short still owes, and
-//! what a change landing mid-wait reaches, which is nothing.
+//! Sleeps and timeouts: every wait the library takes over, measured against the genuine time it
+//! actually blocked, the family each one follows, what a wait cut short still owes, and what a
+//! change landing mid-wait reaches, which is nothing.
+//!
+//! The lists below are this platform's own, and a wait the platform does not have is named on
+//! neither of them rather than skipped quietly.
 //!
 //! The target is linked against the library rather than preloading it, which is how it reaches the
 //! genuine-clock symbol and measures itself without the clock under test.
-#![cfg(target_os = "linux")]
+#![cfg(any(target_os = "linux", target_os = "freebsd"))]
 #![expect(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -32,8 +35,12 @@ use harness::{Report, Run, Seen, calls_seen, only_session};
 
 const MILLI: i64 = 1_000_000;
 
-/// Every wait measured against the Monotonic family: the relative timeouts the kernel counts on
+/// Every wait measured against an elapsed-time family: the relative timeouts the kernel counts on
 /// the monotonic clock, and the calls that were handed a monotonic clock of their own.
+///
+/// One family covers both, because `CLOCK_MONOTONIC` belongs to Monotonic through FreeBSD 14.x and
+/// to Boottime from 15.0, so the cases below move the two together.
+#[cfg(target_os = "linux")]
 const MONOTONIC_WAITS: &[&str] = &[
     "nanosleep",
     "clock_nanosleep_relative",
@@ -58,6 +65,27 @@ const MONOTONIC_WAITS: &[&str] = &[
     "sem_clockwait",
 ];
 
+/// The same for FreeBSD, which has no `epoll`, no `clockwait` pair and no call by number, and
+/// answers a set of events with `kevent` instead.
+#[cfg(target_os = "freebsd")]
+const MONOTONIC_WAITS: &[&str] = &[
+    "nanosleep",
+    "clock_nanosleep_relative",
+    "clock_nanosleep_absolute",
+    "sleep",
+    "usleep",
+    "thrd_sleep",
+    "poll",
+    "ppoll",
+    "select",
+    "pselect",
+    "kevent",
+    "sigtimedwait",
+    "aio_suspend",
+    "recvmmsg",
+    "pthread_cond_timedwait_monotonic",
+];
+
 /// Every wait measured against the Realtime family: an absolute deadline on the wall clock,
 /// whether the call names that clock itself or takes it as the only one it has.
 const REALTIME_WAITS: &[&str] = &[
@@ -75,11 +103,18 @@ const REALTIME_WAITS: &[&str] = &[
     "mq_timedsend",
 ];
 
+/// The libraries the target needs beyond libc: the timed message queues and the asynchronous reads
+/// live in `librt` on a system that has not folded them into libc, and FreeBSD keeps the C11
+/// threads calls in a library of their own.
+#[cfg(target_os = "linux")]
+const EXTRA_LIBRARIES: &[&str] = &["-pthread", "-lrt"];
+#[cfg(target_os = "freebsd")]
+const EXTRA_LIBRARIES: &[&str] = &["-pthread", "-lrt", "-lstdthreads"];
+
 /// The program that asks every wait for one fake duration and reports the genuine time each
-/// blocked. Linked with the libraries the timed message queues and asynchronous reads need on a
-/// system that has not folded them into libc.
+/// blocked.
 fn waits_program() -> PathBuf {
-    harness::program_linked_with("waits", &["-pthread", "-lrt"])
+    harness::program_linked_with("waits", EXTRA_LIBRARIES)
 }
 
 /// One run of it, asking every wait for `base_millis` of faketime.
@@ -119,6 +154,13 @@ fn assert_blocked(report: &Report, key: &str, expected: i64) -> bool {
     true
 }
 
+/// How many of the waits above a run may find missing: three either way.
+///
+/// On Linux `epoll_pwait2`, `sem_clockwait` and `pthread_cond_clockwait`, each on a kernel or a
+/// libc older than the suite runs on. On FreeBSD the two timed message queues, which need the
+/// `mqueuefs` module loaded, and the asynchronous read, which a kernel may have turned off.
+const MAY_BE_MISSING: usize = 3;
+
 /// The genuine duration a fake one comes to at a rate of `numerator / denominator`.
 fn owed(report: &Report, key: &str, numerator: i64, denominator: i64) -> i64 {
     report.nanos(&format!("{key}.fake")) * denominator / numerator
@@ -138,9 +180,7 @@ fn assert_every_wait(report: &Report, monotonic: (i64, i64), realtime: (i64, i64
             }
         }
     }
-    // Only `epoll_pwait2`, `sem_clockwait` and `pthread_cond_clockwait` may be missing, and only
-    // on a kernel or a libc older than the suite runs on.
-    let least = MONOTONIC_WAITS.len() + REALTIME_WAITS.len() - 3;
+    let least = MONOTONIC_WAITS.len() + REALTIME_WAITS.len() - MAY_BE_MISSING;
     assert!(measured >= least, "only {measured} waits ran of {least}");
 }
 
@@ -168,7 +208,18 @@ fn without_a_session_every_wait_blocks_for_exactly_what_it_asked() {
 #[test]
 fn a_monotonic_rate_reaches_the_monotonic_waits_alone() {
     let dir = tempfile::tempdir().unwrap();
-    let report = waits(dir.path(), 200, &[("LIBTIMEWARP_MONOTONIC_RATE", "20")]);
+    // The rate goes on both elapsed families, because `CLOCK_MONOTONIC` belongs to one of them
+    // through FreeBSD 14.x and to the other from 15.0, and the waits the kernel measures against
+    // its own elapsed clock follow whichever one it left. The wall clock is untouched either way,
+    // which is what this case is about.
+    let report = waits(
+        dir.path(),
+        200,
+        &[
+            ("LIBTIMEWARP_MONOTONIC_RATE", "20"),
+            ("LIBTIMEWARP_BOOTTIME_RATE", "20"),
+        ],
+    );
     assert_every_wait(&report, (20, 1), (1, 1));
 }
 
@@ -313,36 +364,48 @@ fn a_frozen_clock_holds_a_sleeper_and_thawing_does_not_release_it() {
     drop(child.wait());
 }
 
-/// Every function of the sleeps and timeouts rows, the number the ABI gives it, and the clock of
-/// the family it follows.
-fn wait_funcs() -> Vec<(&'static str, i64, i64)> {
-    let monotonic = i64::from(libc::CLOCK_MONOTONIC);
+/// Every function of the sleeps and timeouts rows both platforms have, the number the ABI gives it,
+/// and the clock of the family it follows.
+///
+/// A wait the kernel measures against its own elapsed clock carries the clock the Monotonic family
+/// tracks here; a wait handed a clock of its own carries the one the program named. The two are
+/// `CLOCK_MONOTONIC` alike on Linux, and part on FreeBSD from 15.0.
+fn shared_wait_funcs() -> Vec<(&'static str, i64, i64)> {
+    let elapsed = i64::from(common::platform::monotonic_timebase());
+    let named = i64::from(libc::CLOCK_MONOTONIC);
     let realtime = i64::from(libc::CLOCK_REALTIME);
     vec![
-        ("nanosleep", 100, monotonic),
-        ("sleep", 101, monotonic),
-        ("usleep", 102, monotonic),
-        ("thrd_sleep", 103, monotonic),
-        ("clock_nanosleep on the monotonic clock", 104, monotonic),
+        ("nanosleep", 100, elapsed),
+        ("sleep", 101, elapsed),
+        ("usleep", 102, elapsed),
+        ("clock_nanosleep on the monotonic clock", 104, named),
         ("clock_nanosleep on the wall clock", 104, realtime),
-        ("poll", 200, monotonic),
-        ("ppoll", 201, monotonic),
-        ("select", 202, monotonic),
-        ("pselect", 203, monotonic),
-        ("epoll_wait", 204, monotonic),
-        ("epoll_pwait", 205, monotonic),
+        ("poll", 200, elapsed),
+        ("ppoll", 201, elapsed),
+        ("select", 202, elapsed),
+        ("pselect", 203, elapsed),
         ("pthread_cond_timedwait", 208, realtime),
-        (
-            "pthread_cond_timedwait on a monotonic variable",
-            208,
-            monotonic,
-        ),
+        ("pthread_cond_timedwait on a monotonic variable", 208, named),
         ("pthread_mutex_timedlock", 210, realtime),
         ("pthread_rwlock_timedrdlock", 211, realtime),
         ("pthread_rwlock_timedwrlock", 212, realtime),
         ("pthread_timedjoin_np", 213, realtime),
         ("sem_timedwait", 214, realtime),
-        ("sigtimedwait", 216, monotonic),
+        ("sigtimedwait", 216, elapsed),
+    ]
+}
+
+/// The ones only Linux has, plus the four this platform reaches under their own names: glibc keeps
+/// `thrd_sleep`, `cnd_timedwait`, `mtx_timedlock` and `recvmmsg` inside libc, over names no loader
+/// can reach, so each arrives at the hook as itself.
+#[cfg(target_os = "linux")]
+fn own_wait_funcs() -> Vec<(&'static str, i64, i64)> {
+    let monotonic = i64::from(libc::CLOCK_MONOTONIC);
+    let realtime = i64::from(libc::CLOCK_REALTIME);
+    vec![
+        ("thrd_sleep", 103, monotonic),
+        ("epoll_wait", 204, monotonic),
+        ("epoll_pwait", 205, monotonic),
         ("aio_suspend", 217, monotonic),
         ("recvmmsg", 218, monotonic),
         ("cnd_timedwait", 219, realtime),
@@ -352,14 +415,50 @@ fn wait_funcs() -> Vec<(&'static str, i64, i64)> {
     ]
 }
 
-/// The three a libc or a kernel older than this one may not have. Each is named by the key `waits`
-/// reports it under, so a run that skipped one is not held to it.
+/// The one only FreeBSD has. Its `thrd_sleep`, `cnd_timedwait`, `mtx_timedlock` and `recvmmsg` are
+/// wrappers over waits already on the shared list, so each arrives at the hook under the name it
+/// delegates to and none of them is here.
+#[cfg(target_os = "freebsd")]
+fn own_wait_funcs() -> Vec<(&'static str, i64, i64)> {
+    vec![(
+        "kevent",
+        207,
+        i64::from(common::platform::monotonic_timebase()),
+    )]
+}
+
+/// Every function of the two rows this platform has.
+fn wait_funcs() -> Vec<(&'static str, i64, i64)> {
+    let mut funcs = shared_wait_funcs();
+    funcs.extend(own_wait_funcs());
+    funcs
+}
+
+/// The ones a run may find missing. Each is named by the key `waits` reports it under, so a run
+/// that skipped one is not held to it.
+#[cfg(target_os = "linux")]
 fn optional_wait_funcs() -> Vec<(&'static str, i64, i64)> {
     let monotonic = i64::from(libc::CLOCK_MONOTONIC);
     vec![
         ("epoll_pwait2", 206, monotonic),
         ("pthread_cond_clockwait", 209, monotonic),
         ("sem_clockwait", 215, monotonic),
+    ]
+}
+
+/// The same here: the asynchronous read a kernel may have turned off, and the timed message queues,
+/// which need the `mqueuefs` module loaded.
+#[cfg(target_os = "freebsd")]
+fn optional_wait_funcs() -> Vec<(&'static str, i64, i64)> {
+    let realtime = i64::from(libc::CLOCK_REALTIME);
+    vec![
+        (
+            "aio_suspend",
+            217,
+            i64::from(common::platform::monotonic_timebase()),
+        ),
+        ("mq_timedsend", 221, realtime),
+        ("mq_timedreceive", 222, realtime),
     ]
 }
 

@@ -6,8 +6,10 @@
    The file is written first, so what every reader reports is the modification time of a file
    written just now. `now.before` and `now.after` bracket those reads on the faked wall clock, so a
    case can ask whether the timestamps agree with the clock without knowing what the clock was set
-   to. Each reader reports `<key>.atime`, `<key>.mtime` and `<key>.ctime` in nanoseconds, and
-   `statx` reports its birth time too.
+   to. Each reader reports `<key>.atime`, `<key>.mtime` and `<key>.ctime` in nanoseconds. The birth
+   time comes from `statx` where that is the only buffer with room for it, and from every `stat`
+   buffer where the platform keeps one there; `birth.in_stat` says which. The `64` spellings are
+   reported only where the libc has them.
 
    Each setter then asks for `argv[2]` on both the access and the modification time and the file is
    read back with `stat`, so `<key>.mtime` is the round trip through both conversions and
@@ -29,6 +31,14 @@
 #include <utime.h>
 
 #define NS_PER_S 1000000000LL
+
+/* Whether a `stat` buffer here has room for the birth time, which FreeBSD's has and Linux's does
+   not: there it takes `statx` to read one. */
+#ifdef __FreeBSD__
+#define BIRTH_IN_STAT 1
+#else
+#define BIRTH_IN_STAT 0
+#endif
 
 /* The file every reader and every setter works on. */
 static char path[4096];
@@ -52,18 +62,22 @@ static void report_stat(const char *key, const struct stat *st) {
     printf("%s.atime=%lld\n", key, nanos(st->st_atim.tv_sec, st->st_atim.tv_nsec));
     printf("%s.mtime=%lld\n", key, nanos(st->st_mtim.tv_sec, st->st_mtim.tv_nsec));
     printf("%s.ctime=%lld\n", key, nanos(st->st_ctim.tv_sec, st->st_ctim.tv_nsec));
+#ifdef __FreeBSD__
+    printf("%s.btime=%lld\n", key, nanos(st->st_birthtim.tv_sec, st->st_birthtim.tv_nsec));
+#endif
 }
 
+#ifdef __linux__
 static void report_stat64(const char *key, const struct stat64 *st) {
     printf("%s.atime=%lld\n", key, nanos(st->st_atim.tv_sec, st->st_atim.tv_nsec));
     printf("%s.mtime=%lld\n", key, nanos(st->st_mtim.tv_sec, st->st_mtim.tv_nsec));
     printf("%s.ctime=%lld\n", key, nanos(st->st_ctim.tv_sec, st->st_ctim.tv_nsec));
 }
+#endif
 
 /* Every reader of the group, each on the same file written a moment ago. */
 static void read_them_all(void) {
     struct stat st;
-    struct stat64 st64;
 
     if (stat(path, &st) == 0) {
         report_stat("stat", &st);
@@ -77,18 +91,25 @@ static void read_them_all(void) {
     if (fstatat(AT_FDCWD, path, &st, 0) == 0) {
         report_stat("fstatat", &st);
     }
-    if (stat64(path, &st64) == 0) {
-        report_stat64("stat64", &st64);
+#ifdef __linux__
+    {
+        struct stat64 st64;
+        if (stat64(path, &st64) == 0) {
+            report_stat64("stat64", &st64);
+        }
+        if (fstat64(fd, &st64) == 0) {
+            report_stat64("fstat64", &st64);
+        }
+        if (lstat64(path, &st64) == 0) {
+            report_stat64("lstat64", &st64);
+        }
+        if (fstatat64(AT_FDCWD, path, &st64, 0) == 0) {
+            report_stat64("fstatat64", &st64);
+        }
     }
-    if (fstat64(fd, &st64) == 0) {
-        report_stat64("fstat64", &st64);
-    }
-    if (lstat64(path, &st64) == 0) {
-        report_stat64("lstat64", &st64);
-    }
-    if (fstatat64(AT_FDCWD, path, &st64, 0) == 0) {
-        report_stat64("fstatat64", &st64);
-    }
+#endif
+    /* Where the birth time sits in the `stat` buffer, every reader above has already reported it. */
+    printf("birth.in_stat=%d\n", BIRTH_IN_STAT);
 }
 
 /* Linux's own reader, the one that carries a birth time. */

@@ -3,7 +3,7 @@
 //!
 //! `LD_PRELOAD` needs a platform arm that exports the interposed names, and creating a session
 //! needs one that can read a genuine clock, so these cases only apply where both exist.
-#![cfg(target_os = "linux")]
+#![cfg(any(target_os = "linux", target_os = "freebsd"))]
 #![expect(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -20,6 +20,7 @@
 mod harness;
 
 use std::path::Path;
+#[cfg(target_os = "linux")]
 use std::process::{Command, Stdio};
 
 use common::hook::{Func, Kind};
@@ -48,24 +49,30 @@ const ARENA: u64 = 4096;
 const SETTER_ENTRY: usize = 4;
 const DECLINED_ENTRY: usize = 3;
 
-/// A command that execs the target with `CAP_SYS_TIME` in its effective set, or `None` when this
-/// machine will not hand the capability out.
+/// A command that execs the target with the privilege the kernel asks for before it lets a process
+/// set the clock, or `None` when this machine will not hand it out.
 ///
-/// The capability, not root, is what the kernel asks for before it lets a process set the clock,
-/// and an ordinary user holds every capability inside a user namespace of their own. A machine with
-/// unprivileged user namespaces turned off, running as a user who holds nothing, leaves the
-/// privileged half of these cases without a way in.
+/// On Linux that is `CAP_SYS_TIME` rather than root, and an ordinary user holds every capability
+/// inside a user namespace of their own; a machine with unprivileged user namespaces turned off,
+/// running as a user who holds nothing, leaves the privileged half of these cases without a way in.
+/// FreeBSD gates the call on effective uid 0, which no wrapper can grant, so there a run that is
+/// not already root checks the refusal instead.
 fn with_the_capability() -> Option<Vec<String>> {
     if may_set_the_clock() {
         return Some(Vec::new());
     }
-    let works = Command::new("unshare")
-        .args(["-U", "-r", "true"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success());
-    works.then(|| ["unshare", "-U", "-r"].map(str::to_owned).to_vec())
+    #[cfg(target_os = "linux")]
+    {
+        let works = Command::new("unshare")
+            .args(["-U", "-r", "true"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success());
+        works.then(|| ["unshare", "-U", "-r"].map(str::to_owned).to_vec())
+    }
+    #[cfg(not(target_os = "linux"))]
+    None
 }
 
 /// The same, with a line saying what a machine that will not hand the capability out leaves
@@ -151,8 +158,9 @@ fn assert_the_machine_is_untouched(report: &Report) {
 /// Every call the kernel refuses before privilege is ever in question, with the errno it refuses it
 /// with. None of these depend on what this process holds.
 fn assert_the_malformed_calls_are_refused(report: &Report) {
-    // A clock the kernel keeps but will not set, and one it has never heard of.
-    for tag in ["monotonic", "boottime", "tai", "coarse", "bogus"] {
+    // A clock the kernel keeps but will not set, and one it has never heard of. A platform with no
+    // TAI clock has no such id to name, which the target says rather than passing quietly.
+    for tag in settable_refusals(report) {
         assert_refused(report, tag, libc::EINVAL);
     }
     // A field outside what the call may carry: a fraction wider than a second, a date before the
@@ -163,6 +171,15 @@ fn assert_the_malformed_calls_are_refused(report: &Report) {
     // A pointer the call cannot read, after the clock it names has been found good.
     assert_refused(report, "null_realtime", libc::EFAULT);
     assert_refused(report, "null_monotonic", libc::EINVAL);
+}
+
+/// Every clock the target named that the kernel will not set, by the tag it reports it under.
+fn settable_refusals(report: &Report) -> Vec<&'static str> {
+    let mut tags = vec!["monotonic", "boottime", "coarse", "bogus"];
+    if report.nanos("tai.available") == 1 {
+        tags.push("tai");
+    }
+    tags
 }
 
 #[test]
@@ -377,15 +394,14 @@ fn a_handled_setter_means_success_and_the_keeper_never_moves() {
 
     // Handled, so the program sees success whatever privilege it holds and whichever clock it
     // named. The number the hook wrote into `*out` is ignored, because a setter wants neither.
-    for tag in [
-        "clock_settime",
-        "settimeofday",
-        "adjtime",
-        "monotonic",
-        "boottime",
-        "tai",
-        "coarse",
-    ] {
+    for tag in ["clock_settime", "settimeofday", "adjtime"]
+        .into_iter()
+        .chain(
+            settable_refusals(&report)
+                .into_iter()
+                .filter(|tag| *tag != "bogus"),
+        )
+    {
         assert_succeeded(&report, tag);
     }
     // A clock the kernel will not read never reaches the hook, and neither does a call with no

@@ -1,4 +1,4 @@
-//! Sleeps and timeouts: the bodies behind the names the Linux arm exports.
+//! Sleeps and timeouts: the bodies behind the names the Linux and FreeBSD arms export.
 //!
 //! A wait is a promise about faketime: wake when the clock has advanced this far. So every wait
 //! converts once, at the call. A relative duration is divided by the rate of the family the wait
@@ -8,10 +8,16 @@
 //! wait already under way.
 //!
 //! Which family a wait follows is the clock the kernel or libc would have measured it against:
-//! `nanosleep`, `poll`, `select` and `epoll` are measured against the monotonic clock,
+//! `nanosleep`, `poll`, `select`, `epoll` and `kevent` are measured against the monotonic clock,
 //! `clock_nanosleep` and the `clockwait` calls against the clock they were handed, a condition
 //! variable against the clock it was built with, and everything with an absolute `CLOCK_REALTIME`
-//! deadline against the wall clock.
+//! deadline against the wall clock. The monotonic clock is asked for rather than spelled, because
+//! FreeBSD moved the name from one family to the other at 15.0.
+//!
+//! `epoll` and the two `clockwait` calls are Linux's alone, and `kevent` is FreeBSD's, so each
+//! carries a `cfg` of its own. So do `thrd_sleep`, `cnd_timedwait`, `mtx_timedlock` and
+//! `recvmmsg`: FreeBSD's libc builds each of them out of one call to a wait we already take over,
+//! and the arm there leaves the wait to that call rather than converting it twice.
 //!
 //! Every path here converts and then blocks in the genuine function. Nothing is written to shared
 //! memory, nothing is allocated, and nothing recurses into a symbol we took over.
@@ -24,7 +30,7 @@ pub(crate) mod cond;
 use std::ptr;
 
 use common::hook::{Func, Kind};
-use common::platform::{self, clock};
+use common::platform::{self, clock, monotonic_timebase};
 use common::session::wait_duration;
 use common::time::Nanos;
 
@@ -284,7 +290,7 @@ pub(crate) unsafe fn nanosleep(
     rem: *mut libc::timespec,
 ) -> libc::c_int {
     // Safety: `req` is the caller's, read only where it is non-null.
-    let wait = unsafe { relative_wait(Func::Nanosleep, clock::MONOTONIC, req) };
+    let wait = unsafe { relative_wait(Func::Nanosleep, monotonic_timebase(), req) };
     let Some(wait) = wait else {
         // Safety: both pointers are the caller's, passed on unchanged.
         return unsafe { genuine::nanosleep(req, rem) }.unwrap_or_else(unsupported);
@@ -359,7 +365,7 @@ pub(crate) unsafe fn clock_nanosleep(
 #[inline]
 pub(crate) fn sleep(seconds: libc::c_uint) -> libc::c_uint {
     let fake = Nanos(i64::from(seconds).saturating_mul(Nanos::SECOND));
-    let Some(wait) = converted(Func::Sleep, clock::MONOTONIC, fake) else {
+    let Some(wait) = converted(Func::Sleep, monotonic_timebase(), fake) else {
         // Safety: the count is the caller's, passed on unchanged.
         return unsafe { genuine::sleep(seconds) }.unwrap_or(seconds);
     };
@@ -383,7 +389,7 @@ pub(crate) fn sleep(seconds: libc::c_uint) -> libc::c_uint {
 #[inline]
 pub(crate) fn usleep(micros: libc::useconds_t) -> libc::c_int {
     let fake = Nanos(i64::from(micros).saturating_mul(NANOS_PER_MICRO));
-    let Some(wait) = converted(Func::Usleep, clock::MONOTONIC, fake) else {
+    let Some(wait) = converted(Func::Usleep, monotonic_timebase(), fake) else {
         // Safety: the count is the caller's, passed on unchanged.
         return unsafe { genuine::usleep(micros) }.unwrap_or_else(unsupported);
     };
@@ -396,13 +402,14 @@ pub(crate) fn usleep(micros: libc::useconds_t) -> libc::c_int {
 /// # Safety
 /// `duration` must be null or valid for reads of a `timespec`, and `remaining` null or valid for
 /// writes of one.
+#[cfg(target_os = "linux")]
 #[inline]
 pub(crate) unsafe fn thrd_sleep(
     duration: *const libc::timespec,
     remaining: *mut libc::timespec,
 ) -> libc::c_int {
     // Safety: `duration` is the caller's, read only where it is non-null.
-    let wait = unsafe { relative_wait(Func::ThrdSleep, clock::MONOTONIC, duration) };
+    let wait = unsafe { relative_wait(Func::ThrdSleep, monotonic_timebase(), duration) };
     let Some(wait) = wait else {
         // Safety: both pointers are the caller's, passed on unchanged.
         return unsafe { genuine::thrd_sleep(duration, remaining) }.unwrap_or(-2);
@@ -428,7 +435,7 @@ pub(crate) unsafe fn poll(
     nfds: libc::nfds_t,
     timeout: libc::c_int,
 ) -> libc::c_int {
-    let timeout = relative_millis(Func::Poll, clock::MONOTONIC, timeout).unwrap_or(timeout);
+    let timeout = relative_millis(Func::Poll, monotonic_timebase(), timeout).unwrap_or(timeout);
     // Safety: the descriptors are the caller's, passed on unchanged.
     unsafe { genuine::poll(fds, nfds, timeout) }.unwrap_or_else(unsupported)
 }
@@ -444,7 +451,7 @@ pub(crate) unsafe fn ppoll(
     sigmask: *const libc::sigset_t,
 ) -> libc::c_int {
     // Safety: `timeout` is the caller's, read only where it is non-null.
-    let converted = unsafe { relative_timeout(Func::Ppoll, clock::MONOTONIC, timeout) };
+    let converted = unsafe { relative_timeout(Func::Ppoll, monotonic_timebase(), timeout) };
     let timeout = converted.as_ref().map_or(timeout, ptr::from_ref);
     // Safety: every other argument is the caller's, passed on unchanged.
     unsafe { genuine::ppoll(fds, nfds, timeout, sigmask) }.unwrap_or_else(unsupported)
@@ -468,7 +475,7 @@ pub(crate) unsafe fn select(
         let tv = unsafe { &*timeout };
         (tv.tv_sec >= 0 && (0..MICROS_PER_SECOND).contains(&tv.tv_usec))
             .then(|| Nanos::from_timeval(tv))
-            .and_then(|fake| converted(Func::Select, clock::MONOTONIC, fake))
+            .and_then(|fake| converted(Func::Select, monotonic_timebase(), fake))
     };
     let Some(wait) = asked else {
         // Safety: every argument is the caller's, passed on unchanged.
@@ -480,7 +487,8 @@ pub(crate) unsafe fn select(
     let result = unsafe { genuine::select(nfds, readfds, writefds, exceptfds, &raw mut request) }
         .unwrap_or_else(unsupported);
     // Linux leaves the time not waited in the caller's own struct, and ours holds it in genuine
-    // time, so the program gets the fake duration that stands for.
+    // time, so the program gets the fake duration that stands for. FreeBSD leaves the struct as it
+    // found it, so what goes back there is the duration the program itself wrote.
     // Safety: `timeout` is non-null, so the caller's guarantee makes it valid for this write.
     unsafe { *timeout = wait.remaining(Nanos::from_timeval(&request)).to_timeval() };
     result
@@ -499,7 +507,7 @@ pub(crate) unsafe fn pselect(
     sigmask: *const libc::sigset_t,
 ) -> libc::c_int {
     // Safety: `timeout` is the caller's, read only where it is non-null.
-    let converted = unsafe { relative_timeout(Func::Pselect, clock::MONOTONIC, timeout) };
+    let converted = unsafe { relative_timeout(Func::Pselect, monotonic_timebase(), timeout) };
     let timeout = converted.as_ref().map_or(timeout, ptr::from_ref);
     // Safety: every other argument is the caller's, passed on unchanged.
     unsafe { genuine::pselect(nfds, readfds, writefds, exceptfds, timeout, sigmask) }
@@ -508,6 +516,7 @@ pub(crate) unsafe fn pselect(
 
 /// # Safety
 /// `events` must be valid for writes of `maxevents` `epoll_event`s.
+#[cfg(target_os = "linux")]
 #[inline]
 pub(crate) unsafe fn epoll_wait(
     epfd: libc::c_int,
@@ -515,7 +524,8 @@ pub(crate) unsafe fn epoll_wait(
     maxevents: libc::c_int,
     timeout: libc::c_int,
 ) -> libc::c_int {
-    let timeout = relative_millis(Func::EpollWait, clock::MONOTONIC, timeout).unwrap_or(timeout);
+    let timeout =
+        relative_millis(Func::EpollWait, monotonic_timebase(), timeout).unwrap_or(timeout);
     // Safety: every other argument is the caller's, passed on unchanged.
     unsafe { genuine::epoll_wait(epfd, events, maxevents, timeout) }.unwrap_or_else(unsupported)
 }
@@ -523,6 +533,7 @@ pub(crate) unsafe fn epoll_wait(
 /// # Safety
 /// `events` must be valid for writes of `maxevents` `epoll_event`s, and `sigmask` null or valid
 /// for reads of a `sigset_t`.
+#[cfg(target_os = "linux")]
 #[inline]
 pub(crate) unsafe fn epoll_pwait(
     epfd: libc::c_int,
@@ -531,7 +542,8 @@ pub(crate) unsafe fn epoll_pwait(
     timeout: libc::c_int,
     sigmask: *const libc::sigset_t,
 ) -> libc::c_int {
-    let timeout = relative_millis(Func::EpollPwait, clock::MONOTONIC, timeout).unwrap_or(timeout);
+    let timeout =
+        relative_millis(Func::EpollPwait, monotonic_timebase(), timeout).unwrap_or(timeout);
     // Safety: every other argument is the caller's, passed on unchanged.
     unsafe { genuine::epoll_pwait(epfd, events, maxevents, timeout, sigmask) }
         .unwrap_or_else(unsupported)
@@ -540,6 +552,7 @@ pub(crate) unsafe fn epoll_pwait(
 /// # Safety
 /// `events` must be valid for writes of `maxevents` `epoll_event`s, `timeout` null or valid for
 /// reads of a `timespec`, and `sigmask` null or valid for reads of a `sigset_t`.
+#[cfg(target_os = "linux")]
 #[inline]
 pub(crate) unsafe fn epoll_pwait2(
     epfd: libc::c_int,
@@ -549,10 +562,34 @@ pub(crate) unsafe fn epoll_pwait2(
     sigmask: *const libc::sigset_t,
 ) -> libc::c_int {
     // Safety: `timeout` is the caller's, read only where it is non-null.
-    let converted = unsafe { relative_timeout(Func::EpollPwait2, clock::MONOTONIC, timeout) };
+    let converted = unsafe { relative_timeout(Func::EpollPwait2, monotonic_timebase(), timeout) };
     let timeout = converted.as_ref().map_or(timeout, ptr::from_ref);
     // Safety: every other argument is the caller's, passed on unchanged.
     unsafe { genuine::epoll_pwait2(epfd, events, maxevents, timeout, sigmask) }
+        .unwrap_or_else(unsupported)
+}
+
+/// FreeBSD's own wait on a set of events, whose timeout is a relative `timespec` the kernel
+/// measures against the monotonic clock.
+///
+/// # Safety
+/// `changelist` must be valid for reads of `nchanges` `kevent`s, `eventlist` valid for writes of
+/// `nevents` of them, and `timeout` null or valid for reads of a `timespec`.
+#[cfg(target_os = "freebsd")]
+#[inline]
+pub(crate) unsafe fn kevent(
+    kq: libc::c_int,
+    changelist: *const libc::kevent,
+    nchanges: libc::c_int,
+    eventlist: *mut libc::kevent,
+    nevents: libc::c_int,
+    timeout: *const libc::timespec,
+) -> libc::c_int {
+    // Safety: `timeout` is the caller's, read only where it is non-null.
+    let converted = unsafe { relative_timeout(Func::Kevent, monotonic_timebase(), timeout) };
+    let timeout = converted.as_ref().map_or(timeout, ptr::from_ref);
+    // Safety: every other argument is the caller's, passed on unchanged.
+    unsafe { genuine::kevent(kq, changelist, nchanges, eventlist, nevents, timeout) }
         .unwrap_or_else(unsupported)
 }
 
@@ -593,9 +630,14 @@ unsafe fn attribute_clock(attr: *const libc::pthread_condattr_t) -> libc::clocki
     if read == 0 { named } else { clock::REALTIME }
 }
 
+/// Which clock a condition variable built with this attribute reads its deadlines on, as the
+/// FreeBSD binding of libc already declares it.
+#[cfg(target_os = "freebsd")]
+use libc::pthread_condattr_getclock;
+
+#[cfg(target_os = "linux")]
 unsafe extern "C" {
-    /// Which clock a condition variable built with this attribute reads its deadlines on. libc
-    /// declares it; the crate we bind libc through does not, on this platform.
+    /// The same on Linux: libc declares the name, and the crate we bind libc through does not.
     fn pthread_condattr_getclock(
         attr: *const libc::pthread_condattr_t,
         clock: *mut libc::clockid_t,
@@ -632,6 +674,7 @@ pub(crate) unsafe fn pthread_cond_timedwait(
 
 /// # Safety
 /// As [`pthread_cond_timedwait`].
+#[cfg(target_os = "linux")]
 #[inline]
 pub(crate) unsafe fn pthread_cond_clockwait(
     cond: *mut libc::pthread_cond_t,
@@ -725,6 +768,7 @@ pub(crate) unsafe fn sem_timedwait(
 
 /// # Safety
 /// As [`sem_timedwait`].
+#[cfg(target_os = "linux")]
 #[inline]
 pub(crate) unsafe fn sem_clockwait(
     sem: *mut libc::sem_t,
@@ -748,7 +792,7 @@ pub(crate) unsafe fn sigtimedwait(
     timeout: *const libc::timespec,
 ) -> libc::c_int {
     // Safety: `timeout` is the caller's, read only where it is non-null.
-    let converted = unsafe { relative_timeout(Func::Sigtimedwait, clock::MONOTONIC, timeout) };
+    let converted = unsafe { relative_timeout(Func::Sigtimedwait, monotonic_timebase(), timeout) };
     let timeout = converted.as_ref().map_or(timeout, ptr::from_ref);
     // Safety: the set and the slot for the signal are the caller's, passed on unchanged.
     unsafe { genuine::sigtimedwait(set, info, timeout) }.unwrap_or_else(unsupported)
@@ -764,7 +808,7 @@ pub(crate) unsafe fn aio_suspend(
     timeout: *const libc::timespec,
 ) -> libc::c_int {
     // Safety: `timeout` is the caller's, read only where it is non-null.
-    let converted = unsafe { relative_timeout(Func::AioSuspend, clock::MONOTONIC, timeout) };
+    let converted = unsafe { relative_timeout(Func::AioSuspend, monotonic_timebase(), timeout) };
     let timeout = converted.as_ref().map_or(timeout, ptr::from_ref);
     // Safety: the list is the caller's, passed on unchanged.
     unsafe { genuine::aio_suspend(list, nent, timeout) }.unwrap_or_else(unsupported)
@@ -773,6 +817,7 @@ pub(crate) unsafe fn aio_suspend(
 /// # Safety
 /// `msgvec` must be valid for `vlen` `mmsghdr`s, and `timeout` null or valid for reads and writes
 /// of a `timespec`.
+#[cfg(target_os = "linux")]
 #[inline]
 pub(crate) unsafe fn recvmmsg(
     sockfd: libc::c_int,
@@ -782,7 +827,7 @@ pub(crate) unsafe fn recvmmsg(
     timeout: *mut libc::timespec,
 ) -> libc::c_int {
     // Safety: `timeout` is the caller's, read only where it is non-null.
-    let wait = unsafe { relative_wait(Func::Recvmmsg, clock::MONOTONIC, timeout) };
+    let wait = unsafe { relative_wait(Func::Recvmmsg, monotonic_timebase(), timeout) };
     let Some(wait) = wait else {
         // Safety: every argument is the caller's, passed on unchanged.
         return unsafe { genuine::recvmmsg(sockfd, msgvec, vlen, flags, timeout) }
@@ -804,6 +849,7 @@ pub(crate) unsafe fn recvmmsg(
 /// # Safety
 /// The variable and the mutex must be the caller's live ones, and `deadline` null or valid for
 /// reads of a `timespec`.
+#[cfg(target_os = "linux")]
 #[inline]
 pub(crate) unsafe fn cnd_timedwait(
     cond: *mut std::ffi::c_void,
@@ -822,6 +868,7 @@ pub(crate) unsafe fn cnd_timedwait(
 /// # Safety
 /// The mutex must be the caller's live one, and `deadline` null or valid for reads of a
 /// `timespec`.
+#[cfg(target_os = "linux")]
 #[inline]
 pub(crate) unsafe fn mtx_timedlock(
     mutex: *mut std::ffi::c_void,

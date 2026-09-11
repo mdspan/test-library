@@ -1,5 +1,8 @@
-/* Every timer the library takes over on Linux, each armed for one fake duration and each measured
-   against the genuine time it actually took to fire, plus what a query reports while it is armed.
+/* Every timer the library takes over, each armed for one fake duration and each measured against
+   the genuine time it actually took to fire, plus what a query reports while it is armed.
+
+   The timerfd is Linux's alone, so a platform without one reports none of its keys and the suite's
+   own list for that platform does not name them.
 
    Linked against the library rather than preloading it, so the genuine clock comes from the
    library's own symbol and the measurement is not the one under test.
@@ -21,8 +24,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/time.h>
-#include <sys/timerfd.h>
 #include <time.h>
+#ifdef __linux__
+#include <sys/timerfd.h>
+#endif
 #include <unistd.h>
 
 extern int libtimewarp_genuine_clock_gettime(clockid_t clock, struct timespec *ts);
@@ -269,8 +274,9 @@ static void posix_timers(void) {
     timer_delete(wall);
 }
 
-/* ---- the timerfds ---- */
+/* ---- the timerfds, which only Linux has ---- */
 
+#ifdef __linux__
 /* Blocks until the timerfd fires, which is a read of the count of expiries. */
 static long long expired(int fd) {
     uint64_t ticks = 0;
@@ -335,13 +341,15 @@ static void timerfds(void) {
     done("timerfd_realtime", base_ns, expired(wall));
     close(wall);
 }
+#endif
 
 /* A sleep and a timer armed for the same fake duration at the same moment, which the design says
-   must still fire together. */
+   must still fire together. A timerfd where there is one, and a POSIX timer where there is not. */
 static void sleep_and_timer(void) {
-    struct itimerspec new_value;
-    struct timespec request;
+    struct timespec request = spec_of(base_ns);
     long long start, woke, fired;
+#ifdef __linux__
+    struct itimerspec new_value;
     int fd = timerfd_create(CLOCK_MONOTONIC, 0);
 
     if (fd < 0) {
@@ -350,7 +358,6 @@ static void sleep_and_timer(void) {
     }
     memset(&new_value, 0, sizeof new_value);
     new_value.it_value = spec_of(base_ns);
-    request = spec_of(base_ns);
 
     start = genuine_mono();
     timerfd_settime(fd, 0, &new_value, NULL);
@@ -363,6 +370,29 @@ static void sleep_and_timer(void) {
     }
     fired = genuine_mono() - start;
     close(fd);
+#else
+    struct sigevent event;
+    struct itimerspec new_value;
+    timer_t together;
+
+    memset(&event, 0, sizeof event);
+    event.sigev_notify = SIGEV_SIGNAL;
+    event.sigev_signo = SIGUSR2;
+    if (timer_create(CLOCK_MONOTONIC, &event, &together) != 0) {
+        skipped("together");
+        return;
+    }
+    memset(&new_value, 0, sizeof new_value);
+    new_value.it_value = spec_of(base_ns);
+
+    start = genuine_mono();
+    timer_settime(together, 0, &new_value, NULL);
+    nanosleep(&request, NULL);
+    woke = genuine_mono() - start;
+    wait_for(SIGUSR2);
+    fired = genuine_mono() - start;
+    timer_delete(together);
+#endif
 
     printf("together.available=1\n");
     printf("together.fake=%lld\n", base_ns);
@@ -384,6 +414,7 @@ int main(int argc, char **argv) {
     sigemptyset(&blocked);
     sigaddset(&blocked, SIGALRM);
     sigaddset(&blocked, SIGUSR1);
+    sigaddset(&blocked, SIGUSR2);
     sigaddset(&blocked, SIGVTALRM);
     sigaddset(&blocked, SIGPROF);
     sigprocmask(SIG_BLOCK, &blocked, NULL);
@@ -391,7 +422,9 @@ int main(int argc, char **argv) {
     interval_timers();
     alarms();
     posix_timers();
+#ifdef __linux__
     timerfds();
+#endif
     sleep_and_timer();
     cpu_timers(argc > 2 && strcmp(argv[2], "cpu") == 0);
 

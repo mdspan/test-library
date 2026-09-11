@@ -11,22 +11,23 @@ mod platform;
 mod setter;
 mod state;
 
-// The waits and the timers are Linux's own. `epoll`, the timed message queues, the C11 threads
-// calls and the `clockwait` pair have no shape the three platforms share, and the other two answer
-// a wait with `kevent` and `mach_wait_until` besides, so each brings its own with its arm. The
-// file timestamps reach the genuine functions through that same Linux list, and `statx` and the
-// `64` names are Linux's, so they sit here with them. The synthetic vDSO is Linux's own mechanism;
-// FreeBSD catches the same targets with a page of numbers instead.
+// The waits, the timers and the file timestamps are shared between the two arms that have them:
+// Linux and FreeBSD spell most of a wait the same way, and the handful each has to itself sits
+// behind a `cfg` inside. macOS answers a wait with `mach_wait_until` and reads a clock through
+// Mach besides, so its arm brings its own. The synthetic vDSO is Linux's own mechanism; FreeBSD
+// catches the same targets with a page of numbers instead.
 cfg_if::cfg_if! {
-    if #[cfg(target_os = "linux")] {
+    if #[cfg(any(target_os = "linux", target_os = "freebsd"))] {
         mod clocks;
         mod genuine;
         mod stamp;
         mod timer;
-        mod vdso;
         mod wait;
     }
 }
+
+#[cfg(target_os = "linux")]
+mod vdso;
 
 use std::fmt::Display;
 use std::path::{Path, PathBuf};
@@ -60,7 +61,7 @@ pub unsafe extern "C" fn libtimewarp_genuine_clock_gettime(
 fn constructor() {
     // The genuine side of every wait, found before the program can call one. A lookup takes the
     // loader's own lock, and this is the one moment where nothing of the program's is holding it.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     genuine::prime();
     // The auxiliary vector, before the environment it sits behind can be moved: `publish` below
     // writes one of ours, and a libc that grows the environment moves it off the stack the vector

@@ -1,10 +1,13 @@
-//! Timers: every timer the library takes over on Linux, measured against the genuine time it took
-//! to fire, the family each one follows, what a query reports while a timer is armed, and what a
-//! change landing after the arm reaches, which is nothing.
+//! Timers: every timer the library takes over, measured against the genuine time it took to fire,
+//! the family each one follows, what a query reports while a timer is armed, and what a change
+//! landing after the arm reaches, which is nothing.
+//!
+//! The lists below are this platform's own, and a timer the platform does not have is named on
+//! none of them rather than skipped quietly.
 //!
 //! The target is linked against the library rather than preloading it, which is how it reaches the
 //! genuine-clock symbol and measures itself without the clock under test.
-#![cfg(target_os = "linux")]
+#![cfg(any(target_os = "linux", target_os = "freebsd"))]
 #![expect(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -32,8 +35,12 @@ use harness::{Report, Run, Seen, calls_seen, only_session};
 
 const MILLI: i64 = 1_000_000;
 
-/// Every timer measured against the Monotonic family: the ones created on a monotonic clock, and
+/// Every timer measured against an elapsed-time family: the ones created on a monotonic clock, and
 /// the absolute expiries read on one.
+///
+/// One family covers both, because `CLOCK_MONOTONIC` belongs to Monotonic through FreeBSD 14.x and
+/// to Boottime from 15.0, so the cases below move the two together.
+#[cfg(target_os = "linux")]
 const MONOTONIC_TIMERS: &[&str] = &[
     "timer_settime",
     "timer_absolute",
@@ -43,8 +50,13 @@ const MONOTONIC_TIMERS: &[&str] = &[
     "timerfd_interval",
 ];
 
+/// The same for FreeBSD, which has no timerfd.
+#[cfg(target_os = "freebsd")]
+const MONOTONIC_TIMERS: &[&str] = &["timer_settime", "timer_absolute"];
+
 /// Every timer measured against the Realtime family: `ITIMER_REAL`, `alarm`, and the ones created
 /// on the wall clock.
+#[cfg(target_os = "linux")]
 const REALTIME_TIMERS: &[&str] = &[
     "setitimer_real",
     "alarm",
@@ -52,11 +64,20 @@ const REALTIME_TIMERS: &[&str] = &[
     "timerfd_realtime",
 ];
 
+/// The same for FreeBSD, without the timerfd.
+#[cfg(target_os = "freebsd")]
+const REALTIME_TIMERS: &[&str] = &["setitimer_real", "alarm", "timer_realtime"];
+
 /// Every timer measured against the Cpu family, which counts consumption rather than elapsed time.
 const CPU_TIMERS: &[&str] = &["itimer_virtual"];
 
-/// Every query answered in the units of the Monotonic family.
+/// Every query answered in the units of an elapsed-time family.
+#[cfg(target_os = "linux")]
 const MONOTONIC_QUERIES: &[&str] = &["timer_gettime", "timerfd_gettime"];
+
+/// The same for FreeBSD, without the timerfd.
+#[cfg(target_os = "freebsd")]
+const MONOTONIC_QUERIES: &[&str] = &["timer_gettime"];
 
 /// Every query answered in the units of the Realtime family, the old value an arm reports included.
 const REALTIME_QUERIES: &[&str] = &["setitimer_old", "getitimer_real", "alarm_remaining"];
@@ -66,6 +87,17 @@ const REALTIME_QUERIES: &[&str] = &["setitimer_old", "getitimer_real", "alarm_re
 /// them in.
 fn timers_program() -> PathBuf {
     harness::program_linked_with("timers", &["-lrt"])
+}
+
+/// The two elapsed families set together, which is what the cases below move rather than Monotonic
+/// alone: `CLOCK_MONOTONIC` belongs to one of them through FreeBSD 14.x and to the other from 15.0,
+/// and a timer created on it follows whichever one it is in. The wall clock is untouched either
+/// way, which is what those cases are about.
+fn elapsed_rate(rate: &str) -> Vec<(&str, &str)> {
+    vec![
+        ("LIBTIMEWARP_MONOTONIC_RATE", rate),
+        ("LIBTIMEWARP_BOOTTIME_RATE", rate),
+    ]
 }
 
 /// One run of it, arming every timer for `base_millis` of faketime.
@@ -217,7 +249,7 @@ fn without_a_session_every_timer_fires_after_exactly_what_it_was_armed_for() {
 #[test]
 fn a_monotonic_rate_reaches_the_timers_created_on_a_monotonic_clock_alone() {
     let dir = tempfile::tempdir().unwrap();
-    let report = timers(dir.path(), 200, &[("LIBTIMEWARP_MONOTONIC_RATE", "20")]);
+    let report = timers(dir.path(), 200, &elapsed_rate("20"));
     assert_every_timer(&report, (20, 1), (1, 1), None);
 }
 
@@ -264,7 +296,9 @@ fn arming(
     fake_millis: i64,
     env: &[(&str, &str)],
 ) -> (Child, BufReader<std::process::ChildStdout>, i64) {
-    let mut command = Command::new(harness::program_linked_to_library("timer_arm"));
+    // Linked with the library a system that has not folded the POSIX timers into libc keeps them
+    // in, which is what the target arms where there is no timerfd.
+    let mut command = Command::new(harness::program_linked_with("timer_arm", &["-lrt"]));
     command
         .arg(fake_millis.to_string())
         .env_clear()
@@ -326,7 +360,9 @@ fn a_rate_change_landing_after_the_arm_does_not_reach_the_timer() {
     let controller = attach_to_session(dir.path());
 
     let mut transaction = controller.begin().unwrap();
-    transaction.set_rate(Family::Monotonic, 100.0).unwrap();
+    for family in [Family::Monotonic, Family::Boottime] {
+        transaction.set_rate(family, 100.0).unwrap();
+    }
     transaction.commit().unwrap();
 
     let genuine = fired_after(&mut child, &mut printing);
@@ -340,8 +376,7 @@ fn a_rate_change_landing_after_the_arm_does_not_reach_the_timer() {
 #[test]
 fn a_frozen_clock_holds_a_timer_and_thawing_does_not_release_it() {
     let dir = tempfile::tempdir().unwrap();
-    let (mut child, _printing, disarmed) =
-        arming(dir.path(), 50, &[("LIBTIMEWARP_MONOTONIC_RATE", "0")]);
+    let (mut child, _printing, disarmed) = arming(dir.path(), 50, &elapsed_rate("0"));
 
     // A disarm is a disarm under a freeze too: the timer with nothing left reports nothing left
     // rather than the longest duration there is.
@@ -356,7 +391,9 @@ fn a_frozen_clock_holds_a_timer_and_thawing_does_not_release_it() {
     // And thawing does not reach it either: nothing re-plans a timer already armed. This is the
     // documented behaviour, so the case pins it rather than working around it.
     let mut transaction = controller.begin().unwrap();
-    transaction.set_rate(Family::Monotonic, 1.0).unwrap();
+    for family in [Family::Monotonic, Family::Boottime] {
+        transaction.set_rate(family, 1.0).unwrap();
+    }
     transaction.commit().unwrap();
     std::thread::sleep(std::time::Duration::from_millis(400));
     assert_eq!(
@@ -370,34 +407,42 @@ fn a_frozen_clock_holds_a_timer_and_thawing_does_not_release_it() {
     drop(child.wait());
 }
 
-/// Every arm of the timers group, the number the ABI gives it, and the clock of the family it
-/// follows.
+/// Every arm of the timers group, the number the ABI gives it, and the clock the timer was created
+/// on, which is the one the program named.
 fn arm_calls() -> Vec<(&'static str, i64, i64)> {
     let monotonic = i64::from(libc::CLOCK_MONOTONIC);
     let realtime = i64::from(libc::CLOCK_REALTIME);
     let cpu = i64::from(libc::CLOCK_PROCESS_CPUTIME_ID);
-    vec![
+    let mut calls = vec![
         ("setitimer on ITIMER_REAL", 300, realtime),
         ("setitimer on a CPU timer", 300, cpu),
         ("alarm", 302, realtime),
         ("timer_settime on a monotonic timer", 303, monotonic),
         ("timer_settime on a wall-clock timer", 303, realtime),
-        ("timerfd_settime on a monotonic timerfd", 305, monotonic),
-        ("timerfd_settime on a wall-clock timerfd", 305, realtime),
-    ]
+    ];
+    if cfg!(target_os = "linux") {
+        calls.extend([
+            ("timerfd_settime on a monotonic timerfd", 305, monotonic),
+            ("timerfd_settime on a wall-clock timerfd", 305, realtime),
+        ]);
+    }
+    calls
 }
 
 /// Every query of the group, the same way.
 fn query_calls() -> Vec<(&'static str, i64, i64)> {
     let monotonic = i64::from(libc::CLOCK_MONOTONIC);
     let realtime = i64::from(libc::CLOCK_REALTIME);
-    vec![
+    let mut calls = vec![
         ("the old value setitimer reports", 300, realtime),
         ("getitimer", 301, realtime),
         ("the old value alarm reports", 302, realtime),
         ("timer_gettime", 304, monotonic),
-        ("timerfd_gettime", 306, monotonic),
-    ]
+    ];
+    if cfg!(target_os = "linux") {
+        calls.push(("timerfd_gettime", 306, monotonic));
+    }
+    calls
 }
 
 #[test]

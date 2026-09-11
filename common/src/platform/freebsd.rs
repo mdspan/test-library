@@ -696,6 +696,17 @@ mod tests {
     }
 
     #[test]
+    fn only_the_superuser_may_set_the_clock() {
+        // Safety: `geteuid` reads process state and cannot fail.
+        let euid = unsafe { libc::geteuid() };
+        assert_eq!(
+            may_set_the_clock(),
+            euid == 0,
+            "the clock is the superuser's to set here, and nobody else's"
+        );
+    }
+
+    #[test]
     fn a_refused_call_reports_itself_the_way_libc_does() {
         // Safety: an unknown clock id is refused before the kernel reads the buffer.
         let refused = unsafe { genuine_clock_gettime(0x7fff_ffff, std::ptr::null_mut()) };

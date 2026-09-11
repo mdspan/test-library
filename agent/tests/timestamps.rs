@@ -4,7 +4,10 @@
 //! The target preloads the library, the way a program under it ordinarily does, and reports the
 //! faked wall clock either side of its readings so a case can ask whether the timestamps agree
 //! with the clock without knowing what the clock was set to.
-#![cfg(target_os = "linux")]
+//!
+//! The lists below are this platform's own: the `64` spellings and `statx` are Linux's, and the
+//! birth time is inside the `stat` buffer wherever there is room for it.
+#![cfg(any(target_os = "linux", target_os = "freebsd"))]
 #![expect(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -34,6 +37,7 @@ const TARGET: i64 = TARGET_SECONDS * SECOND;
 
 /// Every reader of the group, by the key the target reports it under. `statx` is reported
 /// separately, because it is the one with a birth time and the one a system may not have.
+#[cfg(target_os = "linux")]
 const READERS: &[&str] = &[
     "stat",
     "fstat",
@@ -45,10 +49,15 @@ const READERS: &[&str] = &[
     "fstatat64",
 ];
 
+/// The same for FreeBSD, whose libc has no `64` spellings: its `off_t` has always been 64 bits.
+#[cfg(target_os = "freebsd")]
+const READERS: &[&str] = &["stat", "fstat", "lstat", "fstatat"];
+
 /// The three timestamps every `stat` buffer carries.
 const STAMPS: &[&str] = &["atime", "mtime", "ctime"];
 
-/// Every setter of the group, by the key the target reports it under.
+/// Every setter of the group, by the key the target reports it under. `utime` is among them on both
+/// platforms: FreeBSD reaches the conversion through the `utimes` its own libc calls.
 const SETTERS: &[&str] = &[
     "utime",
     "utimes",
@@ -100,6 +109,9 @@ fn every_reading(report: &Report) -> Vec<String> {
         .iter()
         .flat_map(|reader| STAMPS.iter().map(move |stamp| format!("{reader}.{stamp}")))
         .collect();
+    if birth_in_stat(report) {
+        keys.extend(READERS.iter().map(|reader| format!("{reader}.btime")));
+    }
     if report.nanos("statx.available") == 1 {
         keys.extend(STAMPS.iter().map(|stamp| format!("statx.{stamp}")));
         if report.nanos("statx.has_btime") == 1 {
@@ -107,6 +119,12 @@ fn every_reading(report: &Report) -> Vec<String> {
         }
     }
     keys
+}
+
+/// Whether every `stat` buffer of this run carried a birth time, which the target reports because
+/// it is the one field whose place differs between the platforms.
+fn birth_in_stat(report: &Report) -> bool {
+    report.nanos("birth.in_stat") == 1
 }
 
 #[test]
@@ -143,6 +161,7 @@ fn the_timestamps_move_with_the_wall_clock_and_not_with_the_genuine_one() {
     }
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn statx_carries_a_birth_time_faked_with_the_rest() {
     let dir = tempfile::tempdir().unwrap();
@@ -160,6 +179,26 @@ fn statx_carries_a_birth_time_faked_with_the_rest() {
         report.before - 2 * HOUR,
         2 * SECOND,
     );
+}
+
+/// The same where the birth time sits in the `stat` buffer itself, so every reader carries one and
+/// there is no `statx` to ask.
+#[cfg(target_os = "freebsd")]
+#[test]
+fn a_stat_buffer_carries_a_birth_time_faked_with_the_rest() {
+    let dir = tempfile::tempdir().unwrap();
+    let report = stamps(dir.path(), &[("LIBTIMEWARP_SHIFT", "-2h")]);
+
+    assert!(birth_in_stat(&report), "this stat buffer has a birth time");
+    for reader in READERS {
+        let key = format!("{reader}.btime");
+        assert_near(
+            &key,
+            report.nanos(&key),
+            report.before - 2 * HOUR,
+            2 * SECOND,
+        );
+    }
 }
 
 #[test]
@@ -294,7 +333,6 @@ fn both_instant_kinds_reach_the_hook_with_their_own_func() {
         dir.path(),
         &[("LIBTIMEWARP_HOOK", &format!("{}@8192", hook.display()))],
     );
-    assert_eq!(report.nanos("statx.available"), 1);
 
     let session = only_session(dir.path());
     let seen = calls_seen(&session);
@@ -303,19 +341,24 @@ fn both_instant_kinds_reach_the_hook_with_their_own_func() {
     // Every reader is a genuine instant becoming a fake one, and every setter is the reverse. The
     // `64` names report the function they are the large-file spelling of.
     let realtime = i64::from(libc::CLOCK_REALTIME);
-    for (what, func, kind) in [
+    let mut expected = vec![
         ("stat", 400, 1),
         ("fstat", 401, 1),
         ("lstat", 402, 1),
         ("fstatat", 403, 1),
-        ("statx", 404, 1),
-        ("utime", 405, 2),
         ("utimes", 406, 2),
         ("futimes", 407, 2),
         ("lutimes", 408, 2),
         ("utimensat", 409, 2),
         ("futimens", 410, 2),
-    ] {
+    ];
+    if cfg!(target_os = "linux") {
+        // Linux alone carries a birth time in a buffer of its own, and its libc reaches `utime`
+        // over an internal name; FreeBSD's builds it out of the `utimes` above.
+        assert_eq!(report.nanos("statx.available"), 1);
+        expected.extend([("statx", 404, 1), ("utime", 405, 2)]);
+    }
+    for (what, func, kind) in expected {
         assert!(
             seen.contains(&Seen {
                 func,

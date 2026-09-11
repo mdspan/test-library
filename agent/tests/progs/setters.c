@@ -1,7 +1,10 @@
 /* Every way a program can set the wall clock, and what each one answered.
 
    argv[1] is the instant to ask for, in nanoseconds. The calls with null pointers mean this must
-   run under the library: without us libc dereferences them where the kernel would answer EFAULT. */
+   run under the library: without us libc dereferences them where the kernel would answer EFAULT.
+
+   `tai.available` says whether this platform has a TAI clock to name at all; FreeBSD grew one at
+   15.0 and has none below that. */
 #define _GNU_SOURCE
 #include <errno.h>
 #include <stdio.h>
@@ -57,6 +60,11 @@ static void adjust(const char *tag, time_t seconds, long micros) {
    Inside what libc's own adjtime takes, which is about half an hour. */
 #define ADJUST_S 600
 
+/* A delta no platform's own adjtime takes: a second more than the widest whose nanoseconds still
+   fit a signed 64-bit count, which is the bound where the call is a system call taking the timeval
+   as it comes, and far past the bound where libc folds the delta into a narrower field. */
+#define BAD_DELTA_S (9223372036854775807LL / NS_PER_S + 1)
+
 /* How far ahead of the instant asked for the last setter puts the clock, in seconds. */
 #define LAST_S 7200
 
@@ -70,7 +78,12 @@ int main(int argc, char **argv) {
     /* Clocks the kernel will not set, however privileged the caller is. */
     set_clock("monotonic", CLOCK_MONOTONIC, seconds, 0);
     set_clock("boottime", CLOCK_BOOTTIME, seconds, 0);
+#ifdef CLOCK_TAI
+    printf("tai.available=1\n");
     set_clock("tai", CLOCK_TAI, seconds, 0);
+#else
+    printf("tai.available=0\n");
+#endif
     set_clock("coarse", CLOCK_REALTIME_COARSE, seconds, 0);
     set_clock("bogus", (clockid_t)4242, seconds, 0);
 
@@ -78,7 +91,7 @@ int main(int argc, char **argv) {
     set_clock("bad_nanos", CLOCK_REALTIME, seconds, NS_PER_S);
     set_clock("before_epoch", CLOCK_REALTIME, -1, 0);
     set_day("bad_micros", seconds, 1000000);
-    adjust("bad_delta", 100000, 0);
+    adjust("bad_delta", (time_t)BAD_DELTA_S, 0);
 
     /* Pointers the call cannot read. A clock that cannot be set is found first. The null goes
        through a variable so the compiler leaves a call it has been told takes no null alone. */

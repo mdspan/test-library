@@ -19,7 +19,8 @@ static long long nanos(const struct timespec *ts) {
 int main(int argc, char **argv) {
     long long deadline = argc > 1 ? atoll(argv[1]) : 0;
     long long budget = argc > 2 ? atoll(argv[2]) : 0;
-    /* Genuine time, since sleeps are not interposed, so a faked rate cannot change the cadence. */
+    /* A pause between readings, converted like any other sleep, so a fast clock only makes the
+       stream denser. */
     struct timespec pause = {0, 200000};
     long long i;
 

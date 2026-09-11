@@ -3,7 +3,7 @@
 //!
 //! Creating a session reads a genuine clock and the system's randomness, so these cases need a
 //! filled-in platform arm.
-#![cfg(target_os = "linux")]
+#![cfg(any(target_os = "linux", target_os = "freebsd"))]
 #![expect(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -17,9 +17,9 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::Command;
 
-use common::platform::clock;
+use common::platform::default_timebase;
 use common::session::layout::Keeper;
-use common::time::Nanos;
+use common::time::{Family, Nanos};
 
 use fixture::{Fixture, library, one_at_a_time, repository, target_dir};
 
@@ -177,14 +177,15 @@ fn the_reads(facts: &Facts) {
     for family in 0..4 {
         assert!((facts.rate(&format!("info.rate.{family}")) - 1.0).abs() < 1e-9);
     }
-    for (family, id) in [
-        (0, clock::REALTIME),
-        (1, clock::MONOTONIC),
-        (2, clock::BOOTTIME),
-    ] {
+    // Each family's first clock, asked for rather than spelled: FreeBSD picks between two columns
+    // of the family table by the running kernel's version.
+    for (index, family) in [Family::Realtime, Family::Monotonic, Family::Boottime]
+        .into_iter()
+        .enumerate()
+    {
         assert_eq!(
-            facts.number(&format!("info.timebase.{family}")),
-            i64::from(id)
+            facts.number(&format!("info.timebase.{index}")),
+            i64::from(default_timebase(family).expect("every family but Cpu tracks a clock"))
         );
     }
     // Cpu tracks no timebase at all, and its slot is zero.
