@@ -18,23 +18,48 @@ use std::sync::atomic::{AtomicPtr, Ordering};
 
 use common::hook::Hook;
 use common::session::layout::Header;
+use common::session::timekeep::Timekeep;
 
 static SESSION: AtomicPtr<Header> = AtomicPtr::new(ptr::null_mut());
 static HOOK: AtomicPtr<Hook> = AtomicPtr::new(ptr::null_mut());
+static TIMEKEEP: AtomicPtr<Timekeep> = AtomicPtr::new(ptr::null_mut());
 static LOCK_FILE: OnceLock<PathBuf> = OnceLock::new();
 
-/// Publishes the mapped session, the hook in front of its keeper, and the lock file of the session.
-/// Called once, from the constructor, before any interposed call can run in this process.
+/// Publishes the mapped session, the timekeep page inside it, the hook in front of its keeper, and
+/// the lock file of the session. Called once, from the constructor, before any interposed call can
+/// run in this process.
 ///
 /// The session word lands last, so a thread that sees the session sees the whole of it: a call
-/// either finds no session and runs genuine, or finds the session with its hook and its lock file
-/// already in place.
-pub(crate) fn install(header: &'static Header, hook: Option<&'static Hook>, lock_file: PathBuf) {
+/// either finds no session and runs genuine, or finds the session with its page, its hook and its
+/// lock file already in place.
+pub(crate) fn install(
+    header: &'static Header,
+    timekeep: Option<&'static Timekeep>,
+    hook: Option<&'static Hook>,
+    lock_file: PathBuf,
+) {
     drop(LOCK_FILE.set(lock_file));
     if let Some(hook) = hook {
         HOOK.store(ptr::from_ref(hook).cast_mut(), Ordering::Release);
     }
+    if let Some(page) = timekeep {
+        TIMEKEEP.store(ptr::from_ref(page).cast_mut(), Ordering::Release);
+    }
     SESSION.store(ptr::from_ref(header).cast_mut(), Ordering::Release);
+}
+
+/// The session's timekeep page, or `None` when the session keeps none live.
+///
+/// A writer republishes it as part of its publish, so a change reaches a reader of the page in
+/// microseconds rather than at the updater's next tick.
+pub(crate) fn timekeep() -> Option<&'static Timekeep> {
+    let page = TIMEKEEP.load(Ordering::Acquire);
+    if page.is_null() {
+        return None;
+    }
+    // Safety: `install` stores a reference that lives for the life of the process, and the mapping
+    // it names is shared, so a forked child inherits a pointer that is still valid.
+    Some(unsafe { &*page })
 }
 
 /// The session, or `None` when this process runs on genuine time.

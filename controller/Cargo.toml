@@ -9,8 +9,14 @@ repository.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = ["vdso"]
+
+# Passes the flag down, so a controller built without it never probes a lease or starts an updater.
+vdso = ["common/vdso"]
+
 [dependencies]
-common = { path = "../common" }
+common = { path = "../common", default-features = false }
 libc = { workspace = true }
 
 [dev-dependencies]

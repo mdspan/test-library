@@ -612,7 +612,7 @@ mod tests {
 
     /// The image this process would hand a target, read back the way a target reads one.
     fn built() -> (usize, Genuine) {
-        let genuine = super::super::auxv::genuine_vdso().expect("a process the kernel started");
+        let genuine = super::super::auxv::genuine().expect("a process the kernel started");
         let base = build(genuine).expect("the image is built");
         // Safety: the address is the image just built, which is an ELF object like any other.
         let parsed = unsafe { Genuine::parse(base) }.expect("the image parses as a vDSO");
@@ -651,7 +651,7 @@ mod tests {
 
     #[test]
     fn everything_else_the_kernel_vdso_has_points_back_into_it() {
-        let genuine = super::super::auxv::genuine_vdso().expect("a process the kernel started");
+        let genuine = super::super::auxv::genuine().expect("a process the kernel started");
         // Safety: the address is the one the auxiliary vector carries.
         let kernel = unsafe { Genuine::parse(genuine) }.expect("the kernel's own vDSO parses");
         let (_, image) = built();

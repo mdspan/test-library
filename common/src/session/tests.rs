@@ -115,7 +115,7 @@ fn the_lease_file_belongs_to_a_session_with_the_timekeep_page_on() {
     assert!(naming::lock_path(with_page.path()).exists());
     assert_eq!(
         naming::lease_path(with_page.path()).exists(),
-        platform::HAS_TIMEKEEP_PAGE
+        platform::HAS_TIMEKEEP_PAGE && cfg!(feature = "vdso")
     );
 
     setup.emulate_vdso = false;

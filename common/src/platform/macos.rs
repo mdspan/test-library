@@ -176,6 +176,15 @@ pub unsafe fn take_write_lock(_fd: libc::c_int) -> libc::c_int {
     unimplemented!("the macOS seam")
 }
 
+/// Takes the updater's lease on `fd`, once this arm exists. No session here keeps one, because Go
+/// reads the clock through libSystem rather than from a page of parameters.
+///
+/// # Safety
+/// `fd` must be an open descriptor on the lease file, opened for writing.
+pub unsafe fn take_lease(_fd: libc::c_int) -> libc::c_int {
+    unimplemented!("the macOS seam")
+}
+
 /// Asks the kernel whether the write lock on `fd` is held, once this arm exists.
 ///
 /// # Safety

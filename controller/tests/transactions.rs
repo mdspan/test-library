@@ -403,7 +403,8 @@ fn a_transaction_opens_over_a_session_the_caller_already_holds_mapped() {
 
     // The same W1 a controller takes, over a header somebody else mapped, which is how a target
     // that sets the clock becomes a writer without opening a second view of its own session.
-    let mut transaction = Transaction::begin(fixture.header(), &lock_path).unwrap();
+    let mut transaction =
+        Transaction::begin(fixture.header(), fixture.session.timekeep(), &lock_path).unwrap();
     assert_eq!(fixture.counter(), before, "begin publishes nothing");
     transaction.shift(Family::Realtime, Nanos(HOUR)).unwrap();
     transaction.commit().unwrap();
@@ -412,7 +413,11 @@ fn a_transaction_opens_over_a_session_the_caller_already_holds_mapped() {
     // And a null session refuses at that entry point too, before it locks anything.
     let null = fixture_on(Keeper::Null);
     assert!(matches!(
-        Transaction::begin(null.header(), &naming::lock_path(null.session.path())),
+        Transaction::begin(
+            null.header(),
+            null.session.timekeep(),
+            &naming::lock_path(null.session.path())
+        ),
         Err(Error::UnsupportedForKeeper)
     ));
 }

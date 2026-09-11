@@ -7,6 +7,7 @@ use std::sync::atomic::{Ordering, fence};
 
 use crate::platform::{self, clock};
 use crate::session::layout::{Header, ParamsValue, WriterState};
+use crate::session::timekeep::{self, Timekeep};
 use crate::sync::lock::WriteLock;
 use crate::sync::read;
 use crate::time::Nanos;
@@ -82,12 +83,29 @@ impl WriteLock {
     ///
     /// # Errors
     /// Whatever `compute` refused with.
+    pub fn publish<E>(
+        &self,
+        header: &Header,
+        page: Option<&Timekeep>,
+        compute: impl FnOnce(&Anchor, ParamsValue) -> Result<ParamsValue, E>,
+    ) -> Result<(), E> {
+        let published = self.section(header, compute);
+        // The page is a second, swap-published copy of the same clock, and a reader of it would
+        // otherwise wait for the updater's next tick. Republished here, once the section has
+        // closed: the read flow inside it would spin on a counter only this thread can move.
+        if let (Some(page), Some(basis)) = (page, timekeep::counter::basis()) {
+            timekeep::republish(header, page, basis);
+        }
+        published
+    }
+
+    /// **W2** through **W11**, the section itself, with the signal mask held across exactly it.
     #[expect(
         clippy::unused_self,
         reason = "the receiver is the proof that the caller holds the write lock, which is what \
                   keeps this the only section in flight"
     )]
-    pub fn publish<E>(
+    fn section<E>(
         &self,
         header: &Header,
         compute: impl FnOnce(&Anchor, ParamsValue) -> Result<ParamsValue, E>,

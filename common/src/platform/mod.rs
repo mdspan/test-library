@@ -17,7 +17,8 @@
 //! | `set_errno` | Sets this thread's `errno`, which is how a refused call reports itself. |
 //! | `thread_id` | The id the kernel gives the calling thread, taking no thread-local storage to answer. |
 //! | `take_write_lock` | Takes the write lock on a descriptor, blocking. libc's convention. |
-//! | `probe_write_lock` | Asks the kernel whether the write lock is held, taking nothing. |
+//! | `take_lease` | Takes the updater's lease on a descriptor, without blocking. libc's convention. |
+//! | `probe_write_lock` | Asks the kernel whether the write lock is held, taking nothing. The same probe answers for the lease. |
 //! | `random_bytes` | Fills a buffer with randomness, for the session name. |
 //!
 //! [`genuine_symbol`] is the one way back to a genuine function that needs no arm of its own: the
@@ -26,7 +27,8 @@
 //! An arm may hold more than the table: Linux also supplies `genuine_syscall`, because `syscall()`
 //! is one of the calls we take over there, and only that arm's interposers name it, and
 //! `kernel_clock_gettime` with `kernel_gettimeofday`, which answer in the convention a vDSO entry
-//! owes its caller in place of libc's.
+//! owes its caller in place of libc's. FreeBSD supplies `AT_TIMEKEEP`, `any_process_maps` and
+//! `genuine_nanosleep`, which the timekeep page and its updater need and no other platform has.
 
 use std::ffi::{c_char, c_void};
 use std::ptr::NonNull;

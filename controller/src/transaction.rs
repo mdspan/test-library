@@ -5,6 +5,7 @@ use std::io;
 use std::path::Path;
 
 use common::session::layout::{FamilyValue, Header, Keeper, ParamsValue};
+use common::session::timekeep::Timekeep;
 use common::sync::{self, Anchor, WriteLock};
 use common::time::{Family, Nanos, Rate};
 
@@ -158,6 +159,7 @@ fn refuse_backwards(slot: Slot, showing: Nanos, requested: Nanos) -> Result<(), 
 #[derive(Debug)]
 pub struct Transaction<'a> {
     header: &'a Header,
+    page: Option<&'a Timekeep>,
     lock: WriteLock,
     staged: Vec<Operation>,
 }
@@ -177,17 +179,22 @@ impl<'a> Transaction<'a> {
     /// # Errors
     /// [`Error::UnsupportedForKeeper`] on a null session, which has no parameters to change, and
     /// [`Error::Io`] when the lock file cannot be opened, is not ours, or cannot be locked.
-    pub fn begin(header: &'a Header, lock_path: &Path) -> Result<Self, Error> {
+    pub fn begin(
+        header: &'a Header,
+        page: Option<&'a Timekeep>,
+        lock_path: &Path,
+    ) -> Result<Self, Error> {
         if Keeper::from_tag(header.keeper) != Some(Keeper::Affine) {
             return Err(Error::UnsupportedForKeeper);
         }
-        Ok(Self::new(header, sync::begin(header, lock_path)?))
+        Ok(Self::new(header, page, sync::begin(header, lock_path)?))
     }
 
     /// A transaction over `header`, holding the write lock `lock`, with nothing staged yet.
-    const fn new(header: &'a Header, lock: WriteLock) -> Self {
+    const fn new(header: &'a Header, page: Option<&'a Timekeep>, lock: WriteLock) -> Self {
         Self {
             header,
+            page,
             lock,
             staged: Vec::new(),
         }
@@ -250,10 +257,11 @@ impl<'a> Transaction<'a> {
     pub fn commit(self) -> Result<(), Error> {
         let Self {
             header,
+            page,
             lock,
             staged,
         } = self;
-        let published = lock.publish(header, |anchor, live| {
+        let published = lock.publish(header, page, |anchor, live| {
             let mut next = live;
             for operation in staged {
                 operation.apply(&mut next, anchor)?;

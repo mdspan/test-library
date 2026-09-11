@@ -12,6 +12,14 @@ use crate::time::{Family, Nanos, Rate};
 /// everything else in the environment.
 pub const ENV_SHARED_FILE: &str = "LIBTIMEWARP__SHARED_FILE";
 
+/// Set by whoever spawns an updater, so the constructor of the process it execs knows it is one
+/// and returns at once rather than attaching as a target would.
+pub const ENV_UPDATER: &str = "LIBTIMEWARP__UPDATER";
+
+/// The loader's variable for a library to put ahead of libc. Ours is the value a target runs
+/// under, and the one place a controller inside a faked tree can read our own path from.
+pub const ENV_PRELOAD: &str = "LD_PRELOAD";
+
 /// Overrides the directory session files are created in.
 pub const ENV_SESSION_DIR: &str = "LIBTIMEWARP_SESSION_DIR";
 
@@ -195,6 +203,9 @@ pub enum Reason {
     BelowZero,
     /// A timekeeper this library does not have.
     UnknownKeeper,
+    /// Something that cannot run while the timekeep page is on, which is the hook: the page
+    /// carries numbers and a hook answers with a function.
+    NeedsPageOff,
     /// A hook library the library could not put in front of the keeper.
     Hook(crate::hook::HookError),
 }
@@ -212,6 +223,10 @@ impl std::fmt::Display for Reason {
             Self::OutOfRange => f.write_str("outside the range an instant can hold"),
             Self::BelowZero => f.write_str("would put a nondecreasing family below zero"),
             Self::UnknownKeeper => f.write_str("not a timekeeper this library has"),
+            Self::NeedsPageOff => write!(
+                f,
+                "cannot be used while the timekeep page is on; set {ENV_EMULATE_VDSO}=0"
+            ),
             Self::Hook(why) => write!(f, "{why}"),
         }
     }

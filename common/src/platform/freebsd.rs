@@ -252,6 +252,8 @@ mod sys {
     pub(super) const CLOCK_GETTIME: i64 = 232;
     /// `clock_settime(2)`.
     pub(super) const CLOCK_SETTIME: i64 = 233;
+    /// `nanosleep(2)`.
+    pub(super) const NANOSLEEP: i64 = 240;
 }
 
 /// A pointer as a system call argument. `*mut` coerces, so one spelling serves both directions.
@@ -555,6 +557,145 @@ pub unsafe fn take_write_lock(fd: libc::c_int) -> libc::c_int {
 pub unsafe fn probe_write_lock(fd: libc::c_int, request: *mut libc::flock) -> libc::c_int {
     // Safety: the caller guarantees both arguments.
     unsafe { libc::fcntl(fd, libc::F_GETLK, request) }
+}
+
+/// The auxiliary vector entry naming where the kernel mapped the timekeep page. The libc crate
+/// spells none of this platform's tags, so it is spelled here.
+pub const AT_TIMEKEEP: libc::c_int = 22;
+
+/// Takes the updater's lease on `fd`, without blocking: an exclusive `flock` over the whole file,
+/// which is why the lease gets a file of its own. libc's convention.
+///
+/// Refused means another updater holds it, which is how two respawners racing settle: the one that
+/// fails to take it exits and leaves the winner running.
+///
+/// # Safety
+/// `fd` must be an open descriptor on the lease file.
+#[must_use]
+pub unsafe fn take_lease(fd: libc::c_int) -> libc::c_int {
+    // Safety: the caller guarantees `fd`.
+    unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) }
+}
+
+/// How far a `kinfo_proc` record is into its process's identifier.
+///
+/// The record opens with its own size and a layout word, then eight pointer-width fields the
+/// kernel keeps as placeholders so that this offset does not move, and then the pid. The layout
+/// word is what a kernel would change if it ever did move.
+const KINFO_PROC_PID: usize = 2 * size_of::<u32>() + 8 * size_of::<*const libc::c_void>();
+
+/// How far a `kinfo_proc` record is into its layout word.
+const KINFO_PROC_LAYOUT: usize = 4;
+
+/// The layout of `kinfo_proc` this reader knows: the one every release has published.
+const KINFO_PROC_LAYOUT_KNOWN: i32 = 0;
+
+/// Whether any process of this effective uid other than this one has `path` mapped.
+///
+/// This is what says a session is still attached, and descriptors play no part in it: a daemon that
+/// closes everything after starting keeps its mapping, and a forked child is counted because it
+/// inherited one. `None` when the kernel would not say, which a caller reads as "still attached"
+/// rather than as an answer.
+///
+/// The two buffers are the caller's, filled and refilled, so a walk allocates nothing. A buffer too
+/// small for what the kernel has to say makes the whole answer `None`, for the same reason.
+///
+/// A mapping is matched by the path the kernel reports for it, found anywhere in the record rather
+/// than at an offset: the records are packed down to the length of that path, so the field's place
+/// moves, and a session's name is a pid and a UUID, which nothing else in a process's address space
+/// spells by accident. `path` carries its own terminator, so the caller prepares it once and this
+/// allocates nothing.
+#[must_use]
+pub fn any_process_maps(path: &[u8], processes: &mut [u8], mappings: &mut [u8]) -> Option<bool> {
+    // Safety: `geteuid` reads process state and cannot fail.
+    let euid = unsafe { libc::geteuid() };
+    // Safety: `getpid` reads process state and cannot fail.
+    let own = unsafe { libc::getpid() };
+    let listed = sysctl_into(
+        &mut [
+            libc::CTL_KERN,
+            libc::KERN_PROC,
+            libc::KERN_PROC_UID,
+            libc::c_int::try_from(euid).unwrap_or(0),
+        ],
+        processes,
+    )?;
+    let listed = processes.get(..listed)?;
+
+    let mut at = 0;
+    while let Some(record) = listed.get(at..) {
+        let size = record_size(record)?;
+        if record.get(KINFO_PROC_LAYOUT..KINFO_PROC_LAYOUT + 4)?
+            != KINFO_PROC_LAYOUT_KNOWN.to_ne_bytes()
+        {
+            return None;
+        }
+        let pid = i32::from_ne_bytes(
+            record
+                .get(KINFO_PROC_PID..KINFO_PROC_PID + 4)?
+                .try_into()
+                .ok()?,
+        );
+        at = at.checked_add(size)?;
+        if pid == own || pid <= 0 {
+            continue;
+        }
+        if maps(pid, path, mappings) == Some(true) {
+            return Some(true);
+        }
+    }
+    Some(false)
+}
+
+/// How long the record at the head of `bytes` is, or `None` when what is there is not a record.
+fn record_size(bytes: &[u8]) -> Option<usize> {
+    let size = usize::try_from(i32::from_ne_bytes(bytes.get(..4)?.try_into().ok()?)).ok()?;
+    (size > 0 && size <= bytes.len()).then_some(size)
+}
+
+/// Whether `pid` has `path` mapped. `None` when the kernel would not say, which a dead process and
+/// a buffer too small both answer.
+fn maps(pid: libc::pid_t, path: &[u8], mappings: &mut [u8]) -> Option<bool> {
+    let filled = sysctl_into(
+        &mut [libc::CTL_KERN, libc::KERN_PROC, libc::KERN_PROC_VMMAP, pid],
+        mappings,
+    )?;
+    let filled = mappings.get(..filled)?;
+    Some(filled.windows(path.len()).any(|window| window == path))
+}
+
+/// Reads a four-element sysctl into `buffer`, answering how much of it was filled.
+///
+/// `None` when the kernel refused, including the refusal that says the buffer is too small.
+fn sysctl_into(mib: &mut [libc::c_int; 4], buffer: &mut [u8]) -> Option<usize> {
+    let mut len = buffer.len();
+    // Safety: `mib` names a four-element sysctl and `buffer` with `len` is a live region of that
+    // many bytes, which is exactly what this call writes into.
+    let asked = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            4,
+            buffer.as_mut_ptr().cast::<libc::c_void>(),
+            &raw mut len,
+            std::ptr::null(),
+            0,
+        )
+    };
+    (asked == 0 && len <= buffer.len()).then_some(len)
+}
+
+/// Sleeps for `duration` of genuine time, unscaled by anything this library fakes.
+///
+/// The system call rather than libc's, because a process running the updater may have this very
+/// library preloaded, and libc's `nanosleep` would then come back to our own interposer.
+///
+/// # Safety
+/// `duration` must be valid for reads of a `timespec`.
+pub unsafe fn genuine_nanosleep(duration: *const libc::timespec) {
+    // Safety: the caller guarantees the pointer, which the kernel reads and no more. An interrupted
+    // sleep is left interrupted: the caller is the updater's loop, whose next tick comes round
+    // anyway.
+    let _slept = unsafe { genuine_syscall(sys::NANOSLEEP, [as_arg(duration), 0, 0, 0, 0, 0]) };
 }
 
 /// Fills `buf` with randomness from the kernel.

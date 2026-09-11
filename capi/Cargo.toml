@@ -16,9 +16,15 @@ crate-type = ["cdylib"]
 [lints]
 workspace = true
 
+[features]
+default = ["vdso"]
+
+# Passes the flag down to the controller this library is a surface over.
+vdso = ["controller/vdso"]
+
 [dependencies]
-common = { path = "../common" }
-controller = { path = "../controller" }
+common = { path = "../common", default-features = false }
+controller = { path = "../controller", default-features = false }
 
 [dev-dependencies]
 common = { path = "../common" }

@@ -114,7 +114,7 @@ jobs:
   # The same suite the Linux job runs, in a VM, because GitHub has no FreeBSD runner. The log is
   # written into the shared workspace so the host can read it after the VM is gone. The cases for
   # functions this platform does not have are left out by the lists inside the suite, each named
-  # against the platform it belongs to; the Go cases come with the timekeep page.
+  # against the platform it belongs to.
   #
   # Two releases, because the family table has two FreeBSD columns and the running kernel picks
   # between them: 14.x is the one where nothing counts suspended time, and 15.0 is the one where
@@ -140,8 +140,11 @@ jobs:
             # The base system carries no root certificates, so cargo cannot reach crates.io
             # until this package drops a bundle at /etc/ssl/cert.pem.
             # python3 is for the Python tool's own cases; procstat, which those cases use to
-            # read another process's environment here, is in the base system.
-            pkg install -y ca_root_nss rustup-init python3
+            # read another process's environment here, is in the base system. go builds the
+            # program that reads the clock from the timekeep page the way a runtime does,
+            # which is the target the whole mechanism exists for; without it those cases skip
+            # themselves and say so.
+            pkg install -y ca_root_nss rustup-init python3 go
             rustup-init -y --no-modify-path --default-toolchain none
             # The POSIX message queues live behind a module. Without it `mq_open` fails and the
             # two timed message queue waits report themselves unexercised instead of running.
@@ -151,6 +154,9 @@ jobs:
             rustup toolchain install
             cargo build --locked --workspace --all-targets --all-features
             cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+            # The arm that leaves out the timekeep page and its updater altogether, which no
+            # other command here compiles.
+            cargo clippy --locked -p agent --no-default-features --all-targets -- -D warnings
             # /bin/sh has no PIPESTATUS, so the log is a file the exit status survives.
             cargo test --locked --workspace --all-features --no-fail-fast >test.log 2>&1
             status=$?

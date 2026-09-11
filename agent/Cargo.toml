@@ -15,17 +15,18 @@ workspace = true
 
 [dependencies]
 cfg-if = { workspace = true }
-common = { path = "../common" }
-controller = { path = "../controller" }
+common = { path = "../common", default-features = false }
+controller = { path = "../controller", default-features = false }
 ctor = { workspace = true }
 libc = { workspace = true }
 
 [features]
 default = ["vdso"]
 
-# The synthetic vDSO on Linux and the substituted timekeep page on FreeBSD. Neither is built yet;
-# the flag exists so the seam that will carry them is already switchable.
-vdso = []
+# The synthetic vDSO on Linux and the substituted timekeep page on FreeBSD, with the updater that
+# keeps the page fresh. Off leaves symbol interposition, which reaches every program that calls
+# libc.
+vdso = ["common/vdso", "controller/vdso"]
 
 [dev-dependencies]
 common = { path = "../common" }

@@ -401,10 +401,11 @@ impl Run {
         if let Some(dir) = &self.session_dir {
             command.env("LIBTIMEWARP_SESSION_DIR", dir);
         }
-        // FreeBSD's timekeep page, and the updater that keeps it fresh, land later; until they do
-        // a target there runs the configuration the platform has, which is the page off. A case
-        // that says otherwise still wins, because its own settings go on below.
-        if cfg!(target_os = "freebsd") {
+        // On FreeBSD the timekeep page and a hook cannot both be on: the page carries numbers and
+        // a hook answers with a function, so a session with both is a bad value. A case that loads
+        // a hook there therefore runs with the page off, and a case that says otherwise still
+        // wins, because its own settings go on below.
+        if cfg!(target_os = "freebsd") && self.env.contains_key("LIBTIMEWARP_HOOK") {
             command.env("LIBTIMEWARP_EMULATE_VDSO", "0");
         }
         for (name, value) in &self.env {

@@ -239,7 +239,7 @@ fn transact(header: &Header, motion: Motion) -> Result<(), Refused> {
     // Installing a session names its lock file in the same breath, so a session word without one
     // is a state nothing can leave behind.
     let lock_file = state::lock_file().ok_or(Refused::Denied)?;
-    let mut transaction = Transaction::begin(header, lock_file)?;
+    let mut transaction = Transaction::begin(header, state::timekeep(), lock_file)?;
     match motion {
         Motion::To(at) => transaction.set_time(Family::Realtime, at),
         Motion::By(by) => transaction.shift(Family::Realtime, by),

@@ -322,7 +322,7 @@ fn readers_hold_up_while_a_writer_changes_the_rate_under_them() {
 /// One rate change, W1 through W12.
 fn publish_rate(header: &Header, lock_path: &Path, rate: Rate) -> std::io::Result<()> {
     let lock = begin(header, lock_path)?;
-    let published = lock.publish::<()>(header, |anchor, live| {
+    let published = lock.publish::<()>(header, None, |anchor, live| {
         Ok(at_rate(|c| anchor.of(c), live, rate))
     });
     drop(lock); // W12
@@ -343,7 +343,7 @@ fn a_writer_killed_before_its_shadow_was_whole_leaves_the_live_words_standing() 
     let doorbell = Doorbell::new();
     let writer = fork_child(|| {
         let lock = begin(header, &lock_path).unwrap();
-        lock.publish::<()>(header, |_, _| {
+        lock.publish::<()>(header, None, |_, _| {
             doorbell.ring();
             wait_to_be_killed()
         })

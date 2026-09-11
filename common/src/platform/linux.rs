@@ -485,6 +485,22 @@ pub unsafe fn take_write_lock(fd: libc::c_int) -> libc::c_int {
     unsafe { libc::fcntl(fd, libc::F_OFD_SETLKW, &raw const request) }
 }
 
+/// Takes the updater's lease on `fd`, without blocking. libc's convention.
+///
+/// No session here keeps one, because Go reads the clock through the vDSO rather than from a page
+/// of parameters, so nothing on this platform has an updater to lease. The arm exists so that the
+/// seam is answered everywhere, and it takes the same description-owned lock the write lock does,
+/// which is the one [`probe_write_lock`] can see.
+///
+/// # Safety
+/// `fd` must be an open descriptor on the lease file, opened for writing.
+#[must_use]
+pub unsafe fn take_lease(fd: libc::c_int) -> libc::c_int {
+    let request = crate::sync::lock_request();
+    // Safety: the caller guarantees `fd`, and `request` is a live `flock`.
+    unsafe { libc::fcntl(fd, libc::F_OFD_SETLK, &raw const request) }
+}
+
 /// Asks the kernel whether the write lock on `fd` is held, taking nothing. Fills `request`, which
 /// the caller has zeroed and filled with the question.
 ///

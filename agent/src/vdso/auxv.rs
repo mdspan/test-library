@@ -1,10 +1,12 @@
 //! The auxiliary vector: the list of facts the kernel leaves above the environment for a program
 //! that wants to know how it was started.
 //!
-//! One of those facts is `AT_SYSINFO_EHDR`, where the vDSO is mapped. A target that skips libc
-//! finds the clock by walking this list, so pointing the entry at an object of ours is what puts
-//! us in front of such a target. The list is the process's own, on the initial stack, and it is
-//! written in place: there is nowhere else a program looks.
+//! One of those facts is where the kernel put the thing a target reads the clock from:
+//! `AT_SYSINFO_EHDR` for the Linux vDSO, and `AT_TIMEKEEP` for the FreeBSD timekeep page. A target
+//! that skips libc finds the clock by walking this list, so pointing the entry at something of ours
+//! is what puts us in front of such a target, whichever of the two mechanisms the platform has. The
+//! list is the process's own, on the initial stack, and it is written in place: there is nowhere
+//! else a program looks.
 //!
 //! The vector sits just past the environment's terminator, which is the only way to its address.
 //! So it is found in the constructor, before anything of ours or of the program's can move
@@ -21,9 +23,12 @@ unsafe extern "C" {
     static mut environ: *mut *mut c_char;
 }
 
-/// The entry naming where the vDSO is mapped. The libc crate spells this one for Android alone, so
-/// it is spelled here.
-const AT_SYSINFO_EHDR: libc::c_ulong = 33;
+/// The entry this platform names the clock's source in: the vDSO on Linux, which the libc crate
+/// spells for Android alone, and the timekeep page on FreeBSD.
+#[cfg(target_os = "linux")]
+const TAG: libc::c_ulong = 33;
+#[cfg(target_os = "freebsd")]
+const TAG: libc::c_ulong = common::platform::AT_TIMEKEEP as libc::c_ulong;
 
 /// The entry that ends the vector.
 const AT_NULL: libc::c_ulong = 0;
@@ -53,10 +58,10 @@ struct Entry {
     value: AtomicUsize,
 }
 
-/// The `AT_SYSINFO_EHDR` entry of this process, or null when it was not found.
+/// The [`TAG`] entry of this process, or null when it was not found.
 static SLOT: AtomicPtr<Entry> = AtomicPtr::new(ptr::null_mut());
 
-/// Where the kernel mapped the genuine vDSO, or zero when this process has none.
+/// What the kernel left in that entry, or zero when this process has nothing there.
 static GENUINE: AtomicUsize = AtomicUsize::new(0);
 
 /// Finds the entry, before the program or we can move the environment it sits behind.
@@ -71,9 +76,9 @@ pub(super) fn prime() {
     SLOT.store(ptr::from_ref(entry).cast_mut(), Ordering::Relaxed);
 }
 
-/// Where the kernel mapped the genuine vDSO, or `None` when this process has none to pose as or
+/// What the kernel left in the entry, or `None` when this process has nothing there to pose as or
 /// the vector could not be reached.
-pub(super) fn genuine_vdso() -> Option<usize> {
+pub(super) fn genuine() -> Option<usize> {
     if SLOT.load(Ordering::Relaxed).is_null() {
         return None;
     }
@@ -97,8 +102,8 @@ pub(super) fn point_at(base: usize) -> bool {
     true
 }
 
-/// The `AT_SYSINFO_EHDR` entry of this process's vector, or `None` when the vector cannot be
-/// reached or carries no such entry.
+/// The [`TAG`] entry of this process's vector, or `None` when the vector cannot be reached or
+/// carries no such entry.
 fn find() -> Option<&'static Entry> {
     // A raw pointer, because libc may replace what it points at, and read from the constructor
     // because that is before the program has run a line that could.
@@ -142,17 +147,36 @@ fn walk(strings: *mut *mut c_char, wanted: usize) -> Option<&'static Entry> {
         if entry.tag == AT_NULL || entry.tag > MAX_TAG {
             return None;
         }
-        if entry.tag == AT_SYSINFO_EHDR && entry.value.load(Ordering::Relaxed) == wanted {
+        if entry.tag == TAG && entry.value.load(Ordering::Relaxed) == wanted {
             return Some(entry);
         }
     }
     None
 }
 
-/// What libc says `AT_SYSINFO_EHDR` carries, or zero when this process has no vDSO.
+/// What libc says the entry carries, or zero when this process has nothing there.
+///
+/// This is what says the walk landed on the vector rather than on a copy of the environment
+/// somebody moved to the heap, so it has to come from libc's own reader rather than from the same
+/// walk: `getauxval` here, and `elf_aux_info` where that is the reader libc gives.
+#[cfg(target_os = "linux")]
 fn genuine_value() -> libc::c_ulong {
     // Safety: `getauxval` takes a tag and answers a number, touching nothing of ours.
-    unsafe { libc::getauxval(AT_SYSINFO_EHDR) }
+    unsafe { libc::getauxval(TAG) }
+}
+
+/// The same, through the reader this platform's libc gives.
+#[cfg(target_os = "freebsd")]
+fn genuine_value() -> libc::c_ulong {
+    let mut at: *mut libc::c_void = ptr::null_mut();
+    let len = libc::c_int::try_from(size_of::<*mut libc::c_void>()).unwrap_or(0);
+    // Safety: the buffer is a live pointer-sized word, which is what this entry answers in.
+    let asked =
+        unsafe { libc::elf_aux_info(common::platform::AT_TIMEKEEP, (&raw mut at).cast(), len) };
+    if asked != 0 {
+        return 0;
+    }
+    libc::c_ulong::try_from(at.addr()).unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -163,8 +187,9 @@ mod tests {
     /// environment: a libc that grows the environment moves it off the stack the vector sits on,
     /// and the walk past it stops being a walk to the vector.
     #[test]
+    #[cfg(target_os = "linux")]
     fn the_entry_was_found_and_what_the_kernel_left_in_it_was_kept() {
-        let genuine = genuine_vdso().expect("a program the kernel started carries the entry");
+        let genuine = genuine().expect("a program the kernel started carries the entry");
         // Safety: the address is what the kernel left in the vector, where it maps an ELF object.
         let magic = unsafe { ptr::with_exposed_provenance::<[u8; 4]>(genuine).read() };
         assert_eq!(magic, [0x7f, b'E', b'L', b'F'], "the entry named no object");
