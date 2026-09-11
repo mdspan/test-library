@@ -7,7 +7,9 @@
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::panic,
-    reason = "test support: a failed assumption should fail the test loudly"
+    dead_code,
+    reason = "test support: a failed assumption should fail the test loudly, and not every helper \
+              is used by every case"
 )]
 
 mod harness;

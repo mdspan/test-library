@@ -13,7 +13,7 @@ mod state;
 use std::fmt::Display;
 use std::path::{Path, PathBuf};
 
-use common::config::{BadValue, ENV_SHARED_FILE, EnvLookup, ProcessEnv};
+use common::config::{self, BadValue, ENV_SHARED_FILE, EnvLookup, ProcessEnv};
 use common::log::{self, Level};
 use common::platform::genuine_clock_gettime;
 use common::session::layout::{Fault, FaultCode};
@@ -50,6 +50,14 @@ fn attach_or_create() {
     // where this process writes, not how the session behaves, so a process joining somebody else's
     // session reads them too.
     log::init(&ProcessEnv);
+
+    // The decision is per process, made before the session is touched at all, attaching or
+    // creating alike, so an excluded command never attaches, never creates, and never faults.
+    match config::excluded(&ProcessEnv, own_command().as_deref()) {
+        Ok(true) => return,
+        Ok(false) => {}
+        Err(bad) => return report_failure(&bad),
+    }
 
     if let Some(inherited) = ProcessEnv.nonempty(ENV_SHARED_FILE) {
         // The inherited path always wins, whatever else the environment says: a session built from
@@ -122,4 +130,15 @@ fn fail_closed(reason: &dyn Display) -> ! {
     log::Sink::stderr().write(Level::Error, format_args!("{reason}"));
     // Safety: `_exit` ends the process, so nothing here can be reached afterwards.
     unsafe { libc::_exit(EX_CONFIG) }
+}
+
+/// This process's own command: the basename of the file it was executed from, or `None` when it
+/// cannot be learned.
+///
+/// `std::env::current_exe` already resolves this the same way on Linux, FreeBSD, and macOS alike,
+/// through `/proc/self/exe`, a `sysctl`, and `_NSGetExecutablePath` respectively, so there is
+/// nothing for the platform seam to add.
+fn own_command() -> Option<String> {
+    let exe = std::env::current_exe().ok()?;
+    Some(exe.file_name()?.to_string_lossy().into_owned())
 }

@@ -66,6 +66,16 @@ pub(crate) fn program_linked_to_library(name: &str) -> PathBuf {
     )
 }
 
+/// A copy of `source`'s binary under a different basename, so a test can name what
+/// `LIBTIMEWARP_SKIP_CMDS` or `LIBTIMEWARP_ONLY_CMDS` sees the running process as.
+pub(crate) fn copy_named(source: &Path, name: &str) -> PathBuf {
+    let out_dir = target_dir().join("timewarp-tests");
+    std::fs::create_dir_all(&out_dir).unwrap();
+    let dest = out_dir.join(name);
+    std::fs::copy(source, &dest).unwrap();
+    dest
+}
+
 fn compile(name: &str, extra: &[String]) -> PathBuf {
     let source = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/progs")

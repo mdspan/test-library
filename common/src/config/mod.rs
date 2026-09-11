@@ -120,6 +120,14 @@ pub const ENV_FAIL_CLOSED: &str = "LIBTIMEWARP_FAIL_CLOSED";
 /// How often the FreeBSD timekeep page is republished, as a duration.
 pub const ENV_TIMEKEEP_INTERVAL: &str = "LIBTIMEWARP_TIMEKEEP_INTERVAL";
 
+/// Basenames to leave on genuine time, comma-separated. Read by every process at every exec,
+/// attachers included: the decision is per process, not per session.
+pub const ENV_SKIP_CMDS: &str = "LIBTIMEWARP_SKIP_CMDS";
+
+/// Basenames to fake alone, comma-separated; every other command is left genuine. Read the same
+/// way as [`ENV_SKIP_CMDS`], and setting both is a bad value.
+pub const ENV_ONLY_CMDS: &str = "LIBTIMEWARP_ONLY_CMDS";
+
 /// Looks a variable up. Taken as an argument so the rules that read the environment can be tested
 /// without mutating the process's own.
 pub trait EnvLookup {
@@ -261,6 +269,39 @@ pub fn timestamp_var(env: &impl EnvLookup, name: &'static str) -> Result<Option<
 pub fn flag_var(env: &impl EnvLookup, name: &str, default: bool) -> bool {
     env.nonempty(name)
         .map_or(default, |value| parse_flag(&value.to_string_lossy()))
+}
+
+/// Whether [`ENV_SKIP_CMDS`] or [`ENV_ONLY_CMDS`] excludes a process from faking, given the
+/// basename of its own command.
+///
+/// `command` is `None` when a process could not learn its own name; such a process matches
+/// neither list, so it stays off [`ENV_ONLY_CMDS`] and clear of [`ENV_SKIP_CMDS`] alike.
+///
+/// # Errors
+/// [`BadValue`] when both are set: "fake only these" and "fake everything but these" cannot both
+/// be honoured.
+pub fn excluded(env: &impl EnvLookup, command: Option<&str>) -> Result<bool, BadValue> {
+    let skip = env.nonempty(ENV_SKIP_CMDS);
+    let only = env.nonempty(ENV_ONLY_CMDS);
+    match (skip, only) {
+        (Some(_), Some(_)) => Err(BadValue::new(
+            ENV_SKIP_CMDS,
+            Reason::SaidTwice(ENV_ONLY_CMDS),
+        )),
+        (Some(list), None) => Ok(in_list(&list.to_string_lossy(), command)),
+        (None, Some(list)) => Ok(!in_list(&list.to_string_lossy(), command)),
+        (None, None) => Ok(false),
+    }
+}
+
+/// Whether `command` is one of the comma-separated basenames in `list`.
+fn in_list(list: &str, command: Option<&str>) -> bool {
+    let Some(command) = command else {
+        return false;
+    };
+    list.split(',')
+        .map(str::trim)
+        .any(|entry| !entry.is_empty() && entry == command)
 }
 
 fn parse_var<T>(
@@ -454,5 +495,61 @@ mod tests {
         assert!(!parse_flag("0"));
         assert!(parse_flag("1"));
         assert!(parse_flag("yes"));
+    }
+
+    #[test]
+    fn with_neither_list_set_nothing_is_excluded() {
+        let env = |_: &str| None;
+        assert_eq!(excluded(&env, Some("curl")), Ok(false));
+        assert_eq!(excluded(&env, None), Ok(false));
+    }
+
+    #[test]
+    fn a_command_on_the_skip_list_is_excluded() {
+        let env = |name: &str| (name == ENV_SKIP_CMDS).then(|| "curl,git".into());
+        assert_eq!(excluded(&env, Some("curl")), Ok(true));
+        assert_eq!(excluded(&env, Some("git")), Ok(true));
+        assert_eq!(excluded(&env, Some("sh")), Ok(false));
+    }
+
+    #[test]
+    fn a_command_off_the_only_list_is_excluded() {
+        let env = |name: &str| (name == ENV_ONLY_CMDS).then(|| "curl,git".into());
+        assert_eq!(excluded(&env, Some("curl")), Ok(false));
+        assert_eq!(excluded(&env, Some("sh")), Ok(true));
+    }
+
+    #[test]
+    fn entries_are_trimmed_basenames() {
+        let env = |name: &str| (name == ENV_SKIP_CMDS).then(|| " curl , git ,".into());
+        assert_eq!(excluded(&env, Some("curl")), Ok(true));
+        assert_eq!(excluded(&env, Some("git")), Ok(true));
+        assert_eq!(
+            excluded(&env, Some("")),
+            Ok(false),
+            "an empty entry matches nothing"
+        );
+    }
+
+    #[test]
+    fn a_process_that_cannot_learn_its_own_name_matches_neither_list() {
+        let skip = |name: &str| (name == ENV_SKIP_CMDS).then(|| "curl".into());
+        let only = |name: &str| (name == ENV_ONLY_CMDS).then(|| "curl".into());
+        assert_eq!(excluded(&skip, None), Ok(false));
+        assert_eq!(excluded(&only, None), Ok(true));
+    }
+
+    #[test]
+    fn setting_both_lists_is_a_bad_value() {
+        let env = |name: &str| match name {
+            n if n == ENV_SKIP_CMDS => Some("curl".into()),
+            n if n == ENV_ONLY_CMDS => Some("git".into()),
+            _ => None,
+        };
+        let bad = excluded(&env, Some("curl")).unwrap_err();
+        assert_eq!(
+            bad,
+            BadValue::new(ENV_SKIP_CMDS, Reason::SaidTwice(ENV_ONLY_CMDS))
+        );
     }
 }
