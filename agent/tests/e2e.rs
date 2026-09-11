@@ -264,9 +264,9 @@ fn the_library_exports_the_interposed_names_and_nothing_else() {
         .collect();
     exported.sort();
 
-    // Every name the clock group takes over, glibc's internal aliases among them, and the one
-    // symbol of our own that a hook or a controller calls. Nothing else: a name here that the
-    // interposition table does not list would be a name we answer for by accident.
+    // Every name the clock group and the setters take over, glibc's internal aliases among them,
+    // and the one symbol of our own that a hook or a controller calls. Nothing else: a name here
+    // that the interposition table does not list would be a name we answer for by accident.
     assert_eq!(
         exported,
         [
@@ -274,12 +274,15 @@ fn the_library_exports_the_interposed_names_and_nothing_else() {
             "__ftime",
             "__gettimeofday",
             "__time",
+            "adjtime",
             "clock",
             "clock_gettime",
+            "clock_settime",
             "ftime",
             "getrusage",
             "gettimeofday",
             "libtimewarp_genuine_clock_gettime",
+            "settimeofday",
             "syscall",
             "time",
             "times",

@@ -8,6 +8,7 @@
 
 mod interpose;
 mod platform;
+mod setter;
 mod state;
 
 use std::fmt::Display;
@@ -89,8 +90,15 @@ fn publish(session: session::Session) {
     // Safety: a constructor runs before `main`, so nothing in the program is reading `environ` yet
     // to race this write.
     unsafe { std::env::set_var(ENV_SHARED_FILE, session.path()) };
+    install(session);
+}
+
+/// Hands the session to the process for good: the mapped header, the hook in front of its keeper,
+/// and the lock file a setter takes the write lock on.
+fn install(session: session::Session) {
+    let lock_file = naming::lock_path(session.path());
     let (header, hook) = session.leak();
-    state::install(header, hook);
+    state::install(header, hook, lock_file);
 }
 
 /// Joins the session this process inherited, loading the hook it names.
@@ -100,10 +108,7 @@ fn publish(session: session::Session) {
 /// session outlives us, and a controller should still be able to read why we gave up on it.
 fn join(mut session: session::Session) {
     match session.load_hook() {
-        Ok(()) => {
-            let (header, hook) = session.leak();
-            state::install(header, hook);
-        }
+        Ok(()) => install(session),
         // Genuine, never half-faked: a hook that failed while the session's settings applied would
         // fake the wrong thing silently. The session stays as it is for whoever else attaches.
         Err(bad) => report_failure_in(session.header(), &bad),

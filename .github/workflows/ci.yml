@@ -33,6 +33,13 @@ jobs:
       - name: Install the toolchain rust-toolchain.toml pins
         run: rustup toolchain install
 
+      # The cases that set the clock want CAP_SYS_TIME, which an ordinary user holds inside a user
+      # namespace of their own. Ubuntu 24.04 restricts unprivileged namespaces by default; without
+      # this those cases check the refusal and leave the move unexercised. Older images have no
+      # such knob, which the fallback covers.
+      - name: Let an unprivileged user take a namespace of their own
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+
       - name: Formatting
         run: cargo fmt --all --check
 

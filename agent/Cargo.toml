@@ -16,6 +16,7 @@ workspace = true
 [dependencies]
 cfg-if = { workspace = true }
 common = { path = "../common" }
+controller = { path = "../controller" }
 ctor = { workspace = true }
 libc = { workspace = true }
 
@@ -28,6 +29,5 @@ vdso = []
 
 [dev-dependencies]
 common = { path = "../common" }
-controller = { path = "../controller" }
 libc = { workspace = true }
 tempfile = "3.24.0"

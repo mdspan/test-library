@@ -21,10 +21,10 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use common::platform::{clock, genuine_nanos};
 use common::session::layout::{Header, Keeper, Params, ParamsValue};
-use common::session::{self, Session, Setup, clock_now};
+use common::session::{self, Session, Setup, clock_now, naming};
 use common::sync::read;
 use common::time::{Family, Nanos, Rate};
-use controller::{Controller, Error};
+use controller::{Controller, Error, Transaction};
 
 const SECOND: i64 = Nanos::SECOND;
 const HOUR: i64 = 3_600 * SECOND;
@@ -457,6 +457,29 @@ fn a_null_session_takes_no_changes() {
     ));
     // Nothing was written, and nothing was locked either: the session is as the creator left it.
     assert_eq!(fixture.counter() % 2, 0);
+}
+
+#[test]
+fn a_transaction_opens_over_a_session_the_caller_already_holds_mapped() {
+    let _one = one_at_a_time();
+    let fixture = fixture();
+    let lock_path = naming::lock_path(fixture.session.path());
+    let before = fixture.counter();
+
+    // The same W1 a controller takes, over a header somebody else mapped, which is how a target
+    // that sets the clock becomes a writer without opening a second view of its own session.
+    let mut transaction = Transaction::begin(fixture.header(), &lock_path).unwrap();
+    assert_eq!(fixture.counter(), before, "begin publishes nothing");
+    transaction.shift(Family::Realtime, Nanos(HOUR)).unwrap();
+    transaction.commit().unwrap();
+    assert_eq!(fixture.counter(), before + 2, "one publish, not two");
+
+    // And a null session refuses at that entry point too, before it locks anything.
+    let null = fixture_on(Keeper::Null);
+    assert!(matches!(
+        Transaction::begin(null.header(), &naming::lock_path(null.session.path())),
+        Err(Error::UnsupportedForKeeper)
+    ));
 }
 
 #[test]

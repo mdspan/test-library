@@ -7,6 +7,7 @@
 use common::platform::{SYSCALL_ARGS, genuine_syscall};
 
 use crate::interpose::{self, Timeb};
+use crate::setter;
 
 /// # Safety
 /// Called by the program with libc's contract for this function.
@@ -126,6 +127,39 @@ pub(super) unsafe extern "C" fn getrusage(
 ) -> libc::c_int {
     // Safety: the caller is the program, calling under libc's contract.
     unsafe { interpose::getrusage(who, usage) }
+}
+
+/// # Safety
+/// Called by the program with libc's contract for this function.
+#[unsafe(no_mangle)]
+pub(super) unsafe extern "C" fn settimeofday(
+    tv: *const libc::timeval,
+    tz: *const libc::c_void,
+) -> libc::c_int {
+    // Safety: the caller is the program, calling under libc's contract.
+    unsafe { setter::settimeofday(tv, tz) }
+}
+
+/// # Safety
+/// Called by the program with libc's contract for this function.
+#[unsafe(no_mangle)]
+pub(super) unsafe extern "C" fn clock_settime(
+    clock: libc::clockid_t,
+    tp: *const libc::timespec,
+) -> libc::c_int {
+    // Safety: the caller is the program, calling under libc's contract.
+    unsafe { setter::clock_settime(clock, tp) }
+}
+
+/// # Safety
+/// Called by the program with libc's contract for this function.
+#[unsafe(no_mangle)]
+pub(super) unsafe extern "C" fn adjtime(
+    delta: *const libc::timeval,
+    olddelta: *mut libc::timeval,
+) -> libc::c_int {
+    // Safety: the caller is the program, calling under libc's contract.
+    unsafe { setter::adjtime(delta, olddelta) }
 }
 
 /// The number of `time(2)`, where the architecture has one. The generic system call table, which

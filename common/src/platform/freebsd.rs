@@ -69,6 +69,64 @@ pub unsafe fn genuine_getrusage(_who: libc::c_int, _usage: *mut libc::rusage) ->
     unimplemented!("the FreeBSD seam")
 }
 
+/// Sets the genuine wall clock, once this arm exists.
+///
+/// # Safety
+/// `tv` must be null or valid for reads of a `timeval`, and `tz` null or valid for reads of a
+/// `timezone`.
+pub unsafe fn genuine_settimeofday(
+    _tv: *const libc::timeval,
+    _tz: *const libc::c_void,
+) -> libc::c_int {
+    unimplemented!("the FreeBSD seam")
+}
+
+/// Sets a genuine clock, once this arm exists.
+///
+/// # Safety
+/// `tp` must be null or valid for reads of a `timespec`.
+pub unsafe fn genuine_clock_settime(
+    _clock: libc::clockid_t,
+    _tp: *const libc::timespec,
+) -> libc::c_int {
+    unimplemented!("the FreeBSD seam")
+}
+
+/// Makes the genuine one-shot offset adjustment, once this arm exists.
+///
+/// # Safety
+/// `delta` must be null or valid for reads of a `timeval`, and `olddelta` null or valid for writes
+/// of one.
+pub unsafe fn genuine_adjtime(
+    _delta: *const libc::timeval,
+    _olddelta: *mut libc::timeval,
+) -> libc::c_int {
+    unimplemented!("the FreeBSD seam")
+}
+
+/// The widest delta the platform's own `adjtime` takes before it refuses, in seconds.
+///
+/// `adjtime` is a system call of its own here, taking the `timeval` as it comes, so the bound is
+/// the range an instant holds rather than anything libc imposes.
+pub const ADJTIME_SECONDS: i64 = i64::MAX / 1_000_000_000;
+
+/// Whether the kernel would let this process set the clock: an effective uid of 0 here, since
+/// FreeBSD gates the call on the superuser rather than on a capability.
+#[must_use]
+pub fn may_set_the_clock() -> bool {
+    // Safety: `geteuid` reads process state and cannot fail.
+    let euid = unsafe { libc::geteuid() };
+    euid == 0
+}
+
+/// Sets this thread's `errno`, which is how a refused call reports itself in libc's convention.
+pub fn set_errno(value: libc::c_int) {
+    // Safety: `__error` answers this thread's own `errno`, taking nothing.
+    let location = unsafe { libc::__error() };
+    // Safety: the location libc just named is live for as long as this thread is.
+    unsafe { *location = value };
+}
+
 /// Takes the write lock on `fd`, once this arm exists.
 ///
 /// # Safety

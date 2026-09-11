@@ -9,6 +9,10 @@
 //! | `genuine_clock_gettime` | Reads a genuine clock into the caller's `timespec`, libc's convention. Async-signal-safe, and never routed through a symbol we interpose. |
 //! | `genuine_times` | Reads the genuine `tms` and the elapsed ticks `times` answers, libc's convention. Never routed through a symbol we interpose. |
 //! | `genuine_getrusage` | Reads the genuine `rusage` of a target, libc's convention. Never routed through a symbol we interpose. |
+//! | `genuine_settimeofday`, `genuine_clock_settime`, `genuine_adjtime` | Set the genuine clock, libc's convention, for a process this library is not faking. |
+//! | `may_set_the_clock` | Whether the kernel would let this process set the clock genuinely. |
+//! | `ADJTIME_SECONDS` | The widest delta the platform's own `adjtime` takes before it refuses. |
+//! | `set_errno` | Sets this thread's `errno`, which is how a refused call reports itself. |
 //! | `take_write_lock` | Takes the write lock on a descriptor, blocking. libc's convention. |
 //! | `probe_write_lock` | Asks the kernel whether the write lock is held, taking nothing. |
 //! | `random_bytes` | Fills a buffer with randomness, for the session name. |
@@ -93,6 +97,15 @@ pub fn timebase_allowed(family: Family, clock: libc::clockid_t) -> bool {
         Some(Family::Realtime) => family == Family::Realtime && clock == clock::REALTIME,
         _ => false,
     }
+}
+
+/// Whether the kernel would let `clock_settime` name this clock at all.
+///
+/// The wall clock alone, on all three platforms: every other clock is one the kernel derives rather
+/// than keeps, so naming it is `EINVAL` however privileged the caller is.
+#[must_use]
+pub const fn settable(clock: libc::clockid_t) -> bool {
+    clock == clock::REALTIME
 }
 
 /// Reads a genuine clock. `None` only when the kernel refuses the id.

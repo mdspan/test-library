@@ -2,9 +2,10 @@
 //! write section at `commit`.
 
 use std::io;
+use std::path::Path;
 
-use common::session::layout::{FamilyValue, Header, ParamsValue};
-use common::sync::{Anchor, WriteLock};
+use common::session::layout::{FamilyValue, Header, Keeper, ParamsValue};
+use common::sync::{self, Anchor, WriteLock};
 use common::time::{Family, Nanos, Rate};
 
 use crate::Error;
@@ -165,8 +166,29 @@ pub struct Transaction<'a> {
 }
 
 impl<'a> Transaction<'a> {
+    /// **W1** over a session the caller already holds mapped: takes the write lock, and nothing
+    /// else.
+    ///
+    /// The sequence counter stays even, so every reader in the session keeps reading the old
+    /// parameters until the commit and only other writers wait. The wait has no bound: a held lock
+    /// means a live writer that will finish.
+    ///
+    /// [`Controller::begin`](crate::Controller::begin) is this over the session a controller
+    /// attached. A target that sets the time is a writer for that one call and comes through here
+    /// with the mapping its own constructor made, so a setter opens no second view of the session.
+    ///
+    /// # Errors
+    /// [`Error::UnsupportedForKeeper`] on a null session, which has no parameters to change, and
+    /// [`Error::Io`] when the lock file cannot be opened, is not ours, or cannot be locked.
+    pub fn begin(header: &'a Header, lock_path: &Path) -> Result<Self, Error> {
+        if Keeper::from_tag(header.keeper) != Some(Keeper::Affine) {
+            return Err(Error::UnsupportedForKeeper);
+        }
+        Ok(Self::new(header, sync::begin(header, lock_path)?))
+    }
+
     /// A transaction over `header`, holding the write lock `lock`, with nothing staged yet.
-    pub(crate) const fn new(header: &'a Header, lock: WriteLock) -> Self {
+    const fn new(header: &'a Header, lock: WriteLock) -> Self {
         Self {
             header,
             lock,

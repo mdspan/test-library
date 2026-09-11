@@ -197,6 +197,7 @@ pub(crate) struct Run {
     env: BTreeMap<String, String>,
     preload: bool,
     session_dir: Option<PathBuf>,
+    through: Vec<String>,
 }
 
 impl Run {
@@ -207,6 +208,7 @@ impl Run {
             env: BTreeMap::new(),
             preload: true,
             session_dir: None,
+            through: Vec::new(),
         }
     }
 
@@ -237,6 +239,16 @@ impl Run {
         self
     }
 
+    /// Runs the target through a command that execs it, which is how a case gives the target
+    /// something this process does not have to hand it directly.
+    ///
+    /// The wrapper is the first process under the library, so it is the one that creates the
+    /// session and the target attaches to it by the inherited path, as any exec does.
+    pub(crate) fn through(mut self, wrapper: &[String]) -> Self {
+        self.through = wrapper.to_vec();
+        self
+    }
+
     /// Runs the target and asserts it succeeded, which is what every case but a deliberate
     /// failure wants.
     pub(crate) fn run(self) -> Report {
@@ -255,7 +267,14 @@ impl Run {
 
     /// The same, handing back whatever the target did, for a case where exiting is the point.
     pub(crate) fn run_unchecked(self) -> Report {
-        let mut command = Command::new(&self.program);
+        let mut command = match self.through.split_first() {
+            Some((wrapper, rest)) => {
+                let mut command = Command::new(wrapper);
+                command.args(rest).arg(&self.program);
+                command
+            }
+            None => Command::new(&self.program),
+        };
         command
             .args(&self.args)
             .env_clear()

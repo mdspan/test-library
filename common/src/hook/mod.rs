@@ -305,6 +305,33 @@ impl Hook {
         self.ask(&held, &call)
     }
 
+    /// A setter: the program asked the clock to show an instant, and the hook may take that set
+    /// into its own state instead of the keeper.
+    ///
+    /// The fake-to-genuine instant shape, with `value` the instant the program asked for. A setter
+    /// is the one call with no number to decline to, so `keeper` carries the genuine instant that
+    /// one lands at, which is now; [`Status::Handled`] means the program sees success and `*out` is
+    /// ignored.
+    ///
+    /// [`Status::Declined`] means the keeper runs the set, which is also the answer when this
+    /// thread is already inside the hook or the kernel will not read `clock`.
+    #[must_use]
+    #[inline]
+    pub fn set(&self, func: Func, clock: libc::clockid_t, value: Nanos) -> Status {
+        let Some(held) = gate::enter() else {
+            return Status::Declined;
+        };
+        let Some(real) = platform::genuine_nanos(clock) else {
+            return Status::Declined;
+        };
+        let call = self.call(func, Kind::InstantToGenuine, clock, value, real, real);
+        if self.ask(&held, &call).is_some() {
+            Status::Handled
+        } else {
+            Status::Declined
+        }
+    }
+
     /// One conversion, as the hook sees it: this hook's arena and the numbers of one call.
     #[inline]
     fn call(
@@ -640,6 +667,43 @@ mod answering {
             hook.read_clock(Func::ClockGettime, clock::REALTIME, None),
             Some(Nanos(1))
         );
+    }
+
+    #[test]
+    fn a_handled_setter_is_success_and_a_declined_one_leaves_the_set_to_the_keeper() {
+        let hook = hook();
+        answers(Status::Handled, -42);
+        assert_eq!(
+            hook.set(Func::Settimeofday, clock::REALTIME, Nanos(1_234)),
+            Status::Handled
+        );
+
+        let seen = SEEN.get().expect("the hook was reached");
+        assert_eq!(seen.func, Func::Settimeofday as u32);
+        assert_eq!(seen.kind, Kind::InstantToGenuine as u32);
+        assert_eq!(seen.clock, clock::REALTIME);
+        assert_eq!(seen.value, 1_234, "the instant the program asked for");
+        // A setter has no number to decline to, so the field carries the genuine instant the one
+        // it asked for lands at, which is now.
+        assert_eq!(seen.keeper, seen.real_ns);
+        assert!(seen.real_ns > 1_700_000_000 * Nanos::SECOND);
+
+        answers(Status::Declined, -42);
+        assert_eq!(
+            hook.set(Func::ClockSettime, clock::REALTIME, Nanos(1_234)),
+            Status::Declined
+        );
+    }
+
+    #[test]
+    fn a_setter_on_a_clock_the_kernel_will_not_read_declines_without_reaching_the_hook() {
+        let hook = hook();
+        answers(Status::Handled, 0);
+        assert_eq!(
+            hook.set(Func::ClockSettime, 0x7fff_ffff, Nanos(1_234)),
+            Status::Declined
+        );
+        assert_eq!(SEEN.get(), None, "there was no genuine reading to hand it");
     }
 
     #[test]

@@ -14,9 +14,7 @@ mod transaction;
 
 use std::path::Path;
 
-use common::session::layout::Keeper;
 use common::session::{self, Session, naming};
-use common::sync;
 
 pub use error::Error;
 pub use transaction::Transaction;
@@ -65,11 +63,9 @@ impl Controller {
     /// [`Error::UnsupportedForKeeper`] on a null session, which has no parameters to change, and
     /// [`Error::Io`] when the lock file cannot be opened, is not ours, or cannot be locked.
     pub fn begin(&self) -> Result<Transaction<'_>, Error> {
-        let header = self.session.header();
-        if Keeper::from_tag(header.keeper) != Some(Keeper::Affine) {
-            return Err(Error::UnsupportedForKeeper);
-        }
-        let lock = sync::begin(header, &naming::lock_path(self.session.path()))?;
-        Ok(Transaction::new(header, lock))
+        Transaction::begin(
+            self.session.header(),
+            &naming::lock_path(self.session.path()),
+        )
     }
 }
