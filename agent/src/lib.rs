@@ -4,7 +4,9 @@
 //!
 //! What the shared object exports is exactly the `no_mangle` items below and in `platform`:
 //! rustc's own version script hides the rest, and a second one of ours cannot be added because a
-//! linker takes only one anonymous version tag.
+//! linker takes only one anonymous version tag. dyld is told the same list another way, as the
+//! exported symbols of the image, and what puts those in front of a program there is the
+//! interpose table rather than the name.
 
 mod interpose;
 mod platform;
@@ -128,6 +130,10 @@ fn constructor() {
     // loader's own lock, and this is the one moment where nothing of the program's is holding it.
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     genuine::prime();
+    // The same on macOS, where the genuine side of every row of the interpose table comes from
+    // libSystem by name rather than from a system call number.
+    #[cfg(target_os = "macos")]
+    common::platform::prime_genuine();
     // The auxiliary vector, before the environment it sits behind can be moved: `publish` below
     // writes one of ours, and a libc that grows the environment moves it off the stack the vector
     // is on.

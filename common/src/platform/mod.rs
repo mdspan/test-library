@@ -22,13 +22,17 @@
 //! | `random_bytes` | Fills a buffer with randomness, for the session name. |
 //!
 //! [`genuine_symbol`] is the one way back to a genuine function that needs no arm of its own: the
-//! loader answers it the same way on all three platforms.
+//! loader answers it the same way on all three platforms. macOS asks libSystem by name instead for
+//! the functions in the table above, because there it is the one image that can answer.
 //!
 //! An arm may hold more than the table: Linux also supplies `genuine_syscall`, because `syscall()`
 //! is one of the calls we take over there, and only that arm's interposers name it, and
 //! `kernel_clock_gettime` with `kernel_gettimeofday`, which answer in the convention a vDSO entry
 //! owes its caller in place of libc's. FreeBSD supplies `AT_TIMEKEEP`, `any_process_maps` and
 //! `genuine_nanosleep`, which the timekeep page and its updater need and no other platform has.
+//! macOS supplies `prime_genuine`, which finds libSystem's own definition of every function the
+//! interpose table stands in front of, once, at load; a lookup there takes the loader's lock, and
+//! the constructor is the one moment where nothing of the program's is holding it.
 
 use std::ffi::{c_char, c_void};
 use std::ptr::NonNull;
@@ -120,7 +124,7 @@ pub const fn settable(clock: libc::clockid_t) -> bool {
 /// The loader's name for "the definition after the one asking": all ones on Linux, macOS, and
 /// FreeBSD alike. The libc crate spells it for the BSDs and not for Linux, so it is spelled here
 /// once for all three.
-const RTLD_NEXT: *mut c_void = std::ptr::without_provenance_mut(usize::MAX);
+pub(crate) const RTLD_NEXT: *mut c_void = std::ptr::without_provenance_mut(usize::MAX);
 
 /// The definition of `name` past ours: the one the loader would have bound the program to had we
 /// never been loaded.
@@ -160,8 +164,8 @@ pub fn genuine_nanos(clock: libc::clockid_t) -> Option<Nanos> {
     Some(Nanos::from_timespec(&ts))
 }
 
-// The two arms that are filled in. Each also carries the cases for its own family table.
-#[cfg(all(test, any(target_os = "linux", target_os = "freebsd")))]
+// Every arm answers these. Each also carries the cases for its own family table.
+#[cfg(test)]
 mod tests {
     use std::io;
 

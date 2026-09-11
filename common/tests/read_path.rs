@@ -2,10 +2,6 @@
 //! one can be written from wherever a clock read can happen.
 //!
 //! A counting allocator is a whole-binary thing, so this check lives in a test binary of its own.
-//!
-//! Creating a session reads a genuine clock and the system's randomness, so this needs a
-//! filled-in platform arm.
-#![cfg(any(target_os = "linux", target_os = "freebsd"))]
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;

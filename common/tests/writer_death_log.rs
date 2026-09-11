@@ -2,10 +2,6 @@
 //!
 //! Installing a destination is a whole-process thing, and so is the record of what this process
 //! has already reported, so this check lives in a test binary of its own.
-//!
-//! Creating a session reads a genuine clock and the system's randomness, so this needs a
-//! filled-in platform arm.
-#![cfg(any(target_os = "linux", target_os = "freebsd"))]
 
 use std::sync::atomic::Ordering;
 

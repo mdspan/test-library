@@ -1362,7 +1362,5 @@ fn project(line: &layout::FamilyLine) -> Option<Nanos> {
     )
 }
 
-// Creating a session reads a genuine clock and the system's randomness, so these cases need a
-// filled-in platform arm.
-#[cfg(all(test, any(target_os = "linux", target_os = "freebsd")))]
+#[cfg(test)]
 mod tests;

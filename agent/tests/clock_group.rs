@@ -3,7 +3,6 @@
 //!
 //! The target is linked against the library rather than preloading it, which is how it reaches the
 //! genuine-clock symbol and glibc's internal aliases in one process.
-#![cfg(any(target_os = "linux", target_os = "freebsd"))]
 #![expect(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -17,9 +16,7 @@ mod harness;
 
 use std::path::{Path, PathBuf};
 
-use common::platform::{clock, default_timebase};
-use common::time::Family;
-use harness::{HOUR, Report, Run, Seen, calls_seen, only_session};
+use harness::{HOUR, Report, Run};
 
 /// Every function that answers the wall clock, by the key `clocks` reports it under. The three
 /// `sys_` keys are `syscall()` asked for the same three numbers libc would use.
@@ -38,8 +35,19 @@ const WALL_CLOCK_READS: &[&str] = &[
     "sys_gettimeofday",
 ];
 
-/// The same for FreeBSD, whose libc has no `ftime` and no internal aliases, and whose `syscall()`
-/// the library does not take over.
+/// The same for macOS, which keeps `ftime` and has no internal aliases, and whose `syscall()` the
+/// library does not take over.
+#[cfg(target_os = "macos")]
+const WALL_CLOCK_READS: &[&str] = &[
+    "clock_gettime",
+    "gettimeofday",
+    "time",
+    "timespec_get",
+    "ftime",
+];
+
+/// The same for FreeBSD, whose libc has neither `ftime` nor the aliases, and whose `syscall()` the
+/// library does not take over either.
 #[cfg(target_os = "freebsd")]
 const WALL_CLOCK_READS: &[&str] = &["clock_gettime", "gettimeofday", "time", "timespec_get"];
 
@@ -101,11 +109,12 @@ fn every_way_of_asking_the_wall_clock_is_faked() {
     assert_eq!(report.nanos("timespec_get.base"), 1);
     assert_eq!(report.nanos("timespec_get.bad_base"), 0);
     #[cfg(target_os = "linux")]
+    if report.nanos("has_sys_time") == 1 {
+        assert_near("sys_time", report.nanos("sys_time"), genuine - 2 * HOUR);
+    }
+    // `ftime`'s other two fields are the ones libc left at zero.
+    #[cfg(not(target_os = "freebsd"))]
     {
-        if report.nanos("has_sys_time") == 1 {
-            assert_near("sys_time", report.nanos("sys_time"), genuine - 2 * HOUR);
-        }
-        // `ftime`'s other two fields are the ones libc left at zero.
         assert_eq!(report.nanos("ftime.timezone"), 0);
         assert_eq!(report.nanos("ftime.dstflag"), 0);
     }
@@ -160,6 +169,9 @@ fn the_cpu_group_scales_what_the_process_consumed() {
         5,
         10_000_000,
     );
+    // A thread's own consumption, where the platform has a `getrusage` that can be asked about
+    // one. macOS asks Mach for that instead, and has no such target.
+    #[cfg(not(target_os = "macos"))]
     assert_close(
         "a.thread_rusage.cpu",
         report.nanos("a.thread_rusage.cpu"),
@@ -254,17 +266,22 @@ fn the_calls_that_must_stay_genuine_stay_genuine() {
     for key in ["adjtimex.time", "ntp_adjtime.time"] {
         assert_near(key, faked.nanos(key), faked.nanos("realtime.genuine"));
     }
-    assert!(faked.nanos("ntp_adjtime.rc") >= 0);
-    // An id from `clock_getcpuclockid` or `pthread_getcpuclockid` is a reading about somebody, so
-    // it stays genuine even when it names this very process.
-    for key in ["own_cpuclockid", "pthread_cpuclockid"] {
-        assert_close(
-            key,
-            faked.nanos(key),
-            faked.nanos(&format!("{key}.genuine")),
-            1,
-            50_000_000,
-        );
+    // `ntp_adjtime` and the ids `clock_getcpuclockid` hands out are calls macOS does not have: a
+    // CPU clock is asked for through Mach there rather than named by an id.
+    #[cfg(not(target_os = "macos"))]
+    {
+        assert!(faked.nanos("ntp_adjtime.rc") >= 0);
+        // An id from `clock_getcpuclockid` or `pthread_getcpuclockid` is a reading about somebody,
+        // so it stays genuine even when it names this very process.
+        for key in ["own_cpuclockid", "pthread_cpuclockid"] {
+            assert_close(
+                key,
+                faked.nanos(key),
+                faked.nanos(&format!("{key}.genuine")),
+                1,
+                50_000_000,
+            );
+        }
     }
     // And a dynamic clock id reaches the kernel, which refuses it the same way either side.
     // Only Linux has such ids; FreeBSD names a hardware clock no other way.
@@ -305,8 +322,15 @@ fn syscall_hands_every_other_number_to_the_kernel_untouched() {
     );
 }
 
+/// A hook is a library of the session's the target loads, which is the macOS half that lands with
+/// the rest of that platform's groups.
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn every_function_of_the_group_reaches_the_hook_with_its_own_func_and_kind() {
+    use common::platform::{clock, default_timebase};
+    use common::time::Family;
+    use harness::{Seen, calls_seen, only_session};
+
     let dir = tempfile::tempdir().unwrap();
     let hook = harness::hook_library("clock_group");
     let report = clocks(

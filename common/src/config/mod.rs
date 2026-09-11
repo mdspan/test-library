@@ -16,9 +16,16 @@ pub const ENV_SHARED_FILE: &str = "LIBTIMEWARP__SHARED_FILE";
 /// and returns at once rather than attaching as a target would.
 pub const ENV_UPDATER: &str = "LIBTIMEWARP__UPDATER";
 
-/// The loader's variable for a library to put ahead of libc. Ours is the value a target runs
-/// under, and the one place a controller inside a faked tree can read our own path from.
-pub const ENV_PRELOAD: &str = "LD_PRELOAD";
+/// The loader's variable for a library to put ahead of libc.
+///
+/// Ours is the value a target runs under, and the one place a controller inside a faked tree can
+/// read our own path from. dyld spells it differently, and prunes it from a restricted process's
+/// environment besides.
+pub const ENV_PRELOAD: &str = if cfg!(target_os = "macos") {
+    "DYLD_INSERT_LIBRARIES"
+} else {
+    "LD_PRELOAD"
+};
 
 /// Overrides the directory session files are created in.
 pub const ENV_SESSION_DIR: &str = "LIBTIMEWARP_SESSION_DIR";

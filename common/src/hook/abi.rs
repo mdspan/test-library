@@ -414,7 +414,7 @@ mod tests {
         );
         assert_eq!(call.func, Func::Nanosleep as u32);
         assert_eq!(call.kind, Kind::DurationToGenuine as u32);
-        assert_eq!(call.clock, libc::CLOCK_MONOTONIC);
+        assert_eq!(call.clock, platform::clock_id(libc::CLOCK_MONOTONIC));
         assert_eq!((call.value, call.real_ns, call.keeper), (7, 11, 13));
         assert!(call.arena.is_null(), "a call with no arena carries none");
         assert_eq!(call.size, 0);

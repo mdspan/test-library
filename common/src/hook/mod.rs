@@ -504,9 +504,7 @@ mod tests {
 }
 
 /// The dispatch itself, against a hook in this process rather than one on disk.
-///
-/// Reading a genuine clock needs a filled-in platform arm, so these cases apply where there is one.
-#[cfg(all(test, any(target_os = "linux", target_os = "freebsd")))]
+#[cfg(test)]
 mod answering {
     use std::cell::Cell;
 
@@ -582,7 +580,7 @@ mod answering {
         let seen = SEEN.get().expect("the hook was reached");
         assert_eq!(seen.func, Func::ClockGettime as u32);
         assert_eq!(seen.kind, Kind::InstantToFake as u32);
-        assert_eq!(seen.clock, clock::REALTIME);
+        assert_eq!(seen.clock, platform::clock_id(clock::REALTIME));
         assert_eq!(seen.keeper, 7, "the keeper's answer travels with the call");
         // A clock read converts the genuine reading, so the two are one number.
         assert_eq!(seen.value, seen.real_ns);
@@ -681,7 +679,7 @@ mod answering {
         let seen = SEEN.get().expect("the hook was reached");
         assert_eq!(seen.func, Func::Settimeofday as u32);
         assert_eq!(seen.kind, Kind::InstantToGenuine as u32);
-        assert_eq!(seen.clock, clock::REALTIME);
+        assert_eq!(seen.clock, platform::clock_id(clock::REALTIME));
         assert_eq!(seen.value, 1_234, "the instant the program asked for");
         // A setter has no number to decline to, so the field carries the genuine instant the one
         // it asked for lands at, which is now.

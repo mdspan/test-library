@@ -32,6 +32,20 @@ static const struct {
     {"prof", CLOCK_PROF},
     /* 16 is CLOCK_TAI, which exists from 15.0 and which older headers do not name. */
     {"tai", 16},
+#elif defined(__APPLE__)
+    {"realtime", CLOCK_REALTIME},
+    /* macOS keeps no TAI clock of its own, so the name reads the wall clock and the case that
+       asks about the offset says it went unexercised. */
+    {"tai", CLOCK_REALTIME},
+    /* The two elapsed names are the reverse of Linux's: `CLOCK_UPTIME_RAW` stops while the machine
+       sleeps and `CLOCK_MONOTONIC` keeps counting. */
+    {"monotonic", CLOCK_UPTIME_RAW},
+    {"monotonic_approx", CLOCK_UPTIME_RAW_APPROX},
+    {"boottime", CLOCK_MONOTONIC},
+    {"boottime_raw", CLOCK_MONOTONIC_RAW},
+    {"boottime_raw_approx", CLOCK_MONOTONIC_RAW_APPROX},
+    {"process_cpu", CLOCK_PROCESS_CPUTIME_ID},
+    {"thread_cpu", CLOCK_THREAD_CPUTIME_ID},
 #else
     {"realtime", CLOCK_REALTIME},
     {"realtime_coarse", CLOCK_REALTIME_COARSE},
@@ -95,7 +109,9 @@ static void ids(void) {
 
 int main(void) {
     struct timespec pause = {0, 200000000};
+#ifndef __APPLE__
     clockid_t own;
+#endif
 
     ids();
     burn(50000000);
@@ -108,12 +124,15 @@ int main(void) {
     burn(50000000);
     round_of("b");
 
+#ifndef __APPLE__
     /* An id from `clock_getcpuclockid` is a reading about a process rather than a clock this
-       process consumes, so it stays genuine even for our own pid. */
+       process consumes, so it stays genuine even for our own pid. macOS hands out no such id: a
+       CPU clock is asked for through Mach there. */
     if (clock_getcpuclockid(getpid(), &own) == 0) {
         printf("own_cpuclockid=%lld\n", faked(own));
         printf("own_cpuclockid.genuine=%lld\n", genuine(own));
     }
+#endif
 
     {
         const char *shared = getenv("LIBTIMEWARP__SHARED_FILE");

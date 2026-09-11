@@ -3,16 +3,6 @@
 //! Every path here is a read path: no lock, no allocation, nothing written to shared memory, and
 //! nothing that could recurse into a symbol we took over.
 
-// Every body here is reached through a platform arm, and macOS names a part of them so far.
-#![cfg_attr(
-    not(any(target_os = "linux", target_os = "freebsd")),
-    allow(
-        dead_code,
-        reason = "reached only through a platform arm, and the macOS arm names a part of these so \
-                  far"
-    )
-)]
-
 use common::hook::{Func, Kind};
 use common::platform::{
     clock, genuine_clock_gettime, genuine_getrusage, genuine_nanos, genuine_times,
@@ -160,8 +150,9 @@ pub(crate) unsafe fn time(t: *mut libc::time_t) -> libc::time_t {
     seconds
 }
 
-/// The buffer `ftime` fills. No libc declares it any more: glibc dropped `<sys/timeb.h>` at 2.33
-/// and kept the symbol, so a program built against an older one still calls it.
+/// The buffer `ftime` fills. glibc dropped `<sys/timeb.h>` at 2.33 and kept the symbol, so a
+/// program built against an older one still calls it, and macOS keeps both the header and the
+/// function as the obsolete things they are.
 #[derive(Debug)]
 #[repr(C)]
 pub(crate) struct Timeb {
@@ -178,10 +169,10 @@ pub(crate) struct Timeb {
 /// # Safety
 /// `tp` must be null or valid for writes of a `timeb`.
 #[cfg_attr(
-    not(target_os = "linux"),
+    target_os = "freebsd",
     expect(
         dead_code,
-        reason = "a call only glibc still exports, so no other arm has one of a program's to catch"
+        reason = "a call this libc does not have, so that arm has none of a program's to catch"
     )
 )]
 #[inline]

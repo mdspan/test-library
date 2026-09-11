@@ -79,8 +79,9 @@ jobs:
         shell: bash
         run: .github/report-failure.sh "$PLATFORM" "$RUNNER_TEMP/test.log"
 
-  # Builds the library and runs the part of the suite that already applies here. It grows as the
-  # macOS port lands.
+  # Builds the library and runs the part of the suite that already applies here: the platform seam,
+  # the session with its locks, the seqlock, the hook's dispatch, and the clock group a program
+  # reaches through the interpose table. It grows as the rest of the macOS port lands.
   macos:
     name: macos aarch64
     runs-on: macos-15
@@ -92,8 +93,20 @@ jobs:
       - name: Install the toolchain rust-toolchain.toml pins
         run: rustup toolchain install
 
+      - name: Formatting
+        run: cargo fmt --all --check
+
       - name: Build
         run: cargo build --locked --workspace --all-targets --all-features
+
+      - name: Clippy
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+
+      # A replacement with no row in `__DATA,__interpose` is never called, so the table is read back
+      # out of the library that was just built before anything is run against it. This is the one
+      # check a compiler that is happy cannot stand in for.
+      - name: The interpose table
+        run: cargo test --locked -p agent --test interpose
 
       - name: Test
         shell: bash

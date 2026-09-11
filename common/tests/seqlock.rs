@@ -5,10 +5,6 @@
 //! parameters they read really do live in shared memory and the writer they race really can be
 //! killed. Children never panic and never allocate on the checking path: they return an exit code
 //! and leave through `_exit`, since the test harness around them is the parent's, not theirs.
-//!
-//! Creating a session reads a genuine clock and the system's randomness, so this needs a
-//! filled-in platform arm.
-#![cfg(any(target_os = "linux", target_os = "freebsd"))]
 
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;

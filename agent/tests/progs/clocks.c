@@ -2,12 +2,14 @@
 
    Linked against the library rather than preloading it, so the genuine reading of a clock comes
    from the library's own symbol and the two can be compared here. The genuine `times` and
-   `getrusage` come through `syscall()`, which on Linux is a call the library passes every other
-   number of through untouched, and which on FreeBSD it does not take over at all.
+   `getrusage` come through `syscall()` where the library leaves that function alone, and on macOS,
+   which has no such call to make, through the loader: the library exports private names there, so
+   `RTLD_NEXT` finds libSystem's own definition and not ours.
 
-   What only one platform has is behind `__FreeBSD__`: glibc's internal aliases, `ftime`, the
-   numbers a program can ask `syscall()` for, dynamic clock ids, `adjtimex`, and the `times`
-   system call, which FreeBSD does not have at all.
+   What only Linux has is behind `__linux__`: glibc's internal aliases, `ftime`, the numbers a
+   program can ask `syscall()` for, dynamic clock ids, and `adjtimex`. What macOS has not is behind
+   `__APPLE__`: `ntp_adjtime`, the ids `clock_getcpuclockid` hands out, and a `getrusage` that can
+   be asked about one thread.
 
    argv[1], when given, names a file of two pages whose second page this maps through `syscall()`,
    so a system call using all six argument registers proves they are forwarded. */
@@ -22,14 +24,23 @@
 #include <sys/resource.h>
 #include <sys/syscall.h>
 #include <sys/time.h>
-#include <sys/timex.h>
 #include <sys/times.h>
 #include <time.h>
 #include <unistd.h>
+#ifdef __APPLE__
+#include <dlfcn.h>
+#else
+#include <sys/timex.h>
+#endif
 
 extern int libtimewarp_genuine_clock_gettime(clockid_t clock, struct timespec *ts);
 
-#ifndef __FreeBSD__
+#ifdef __APPLE__
+/* macOS keeps both the header and the function, obsolete as they are. */
+#include <sys/timeb.h>
+#endif
+
+#ifdef __linux__
 /* glibc dropped <sys/timeb.h> at 2.33 and kept the symbol, so the shape is declared here. */
 struct timeb {
     time_t time;
@@ -46,6 +57,29 @@ extern time_t __time(time_t *t);
 
 /* A dynamic clock id, the way the kernel encodes one from a descriptor. */
 #define FD_TO_CLOCKID(fd) ((clockid_t)((~(unsigned int)(fd) << 3) | 3u))
+#endif
+
+#ifdef __APPLE__
+/* The definition past ours, which on macOS is libSystem's own: the library exports
+   `libtimewarp_getrusage` and puts it in front of the program through the interpose table, so the
+   libc name is one nothing of ours defines and `RTLD_NEXT` finds the genuine function. */
+static void *genuine_symbol(const char *name) {
+    void *found = dlsym(RTLD_NEXT, name);
+    if (found == NULL) {
+        fprintf(stderr, "no genuine %s\n", name);
+        exit(1);
+    }
+    return found;
+}
+
+static int genuine_getrusage(int who, struct rusage *usage) {
+    int (*fn)(int, struct rusage *) = (int (*)(int, struct rusage *))genuine_symbol("getrusage");
+    return fn(who, usage);
+}
+#else
+static int genuine_getrusage(int who, struct rusage *usage) {
+    return (int)syscall(SYS_getrusage, who, usage);
+}
 #endif
 
 #define NS_PER_S 1000000000LL
@@ -93,13 +127,18 @@ static void wall_clocks(void) {
     say("timespec_get.base", timespec_get(&ts, TIME_UTC));
     say("timespec_get", nanos(&ts));
     say("timespec_get.bad_base", timespec_get(&ts, 99));
-#ifndef __FreeBSD__
+#if defined(__linux__) || defined(__APPLE__)
     {
         struct timeb tb;
         ftime(&tb);
         say("ftime", (long long)tb.time * NS_PER_S + (long long)tb.millitm * 1000000LL);
         say("ftime.timezone", tb.timezone);
         say("ftime.dstflag", tb.dstflag);
+    }
+#endif
+#ifdef __linux__
+    {
+        struct timeb tb;
 
         __clock_gettime(CLOCK_REALTIME, &ts);
         say("__clock_gettime", nanos(&ts));
@@ -130,19 +169,23 @@ static void wall_clocks(void) {
     say("monotonic.genuine", genuine(CLOCK_MONOTONIC));
 }
 
-/* The genuine `times`, through the numbers the library leaves alone. FreeBSD has no `times`
-   system call: its libc builds the answer out of two `getrusage` calls and one clock read, and so
-   does this. */
+/* The genuine `times`, through whatever the library leaves alone here. Linux has a system call for
+   it. macOS has the function and no such number, so the loader answers instead. FreeBSD has
+   neither: its libc builds the answer out of two `getrusage` calls and one clock read, and so does
+   this. */
 static clock_t genuine_times(struct tms *out) {
-#ifdef SYS_times
+#if defined(SYS_times)
     return (clock_t)syscall(SYS_times, out);
+#elif defined(__APPLE__)
+    clock_t (*fn)(struct tms *) = (clock_t (*)(struct tms *))genuine_symbol("times");
+    return fn(out);
 #else
     long hz = sysconf(_SC_CLK_TCK);
     struct rusage mine, theirs;
     struct timespec ts;
 
-    if (syscall(SYS_getrusage, RUSAGE_SELF, &mine) != 0
-        || syscall(SYS_getrusage, RUSAGE_CHILDREN, &theirs) != 0
+    if (genuine_getrusage(RUSAGE_SELF, &mine) != 0
+        || genuine_getrusage(RUSAGE_CHILDREN, &theirs) != 0
         || syscall(SYS_clock_gettime, CLOCK_MONOTONIC, &ts) != 0) {
         return (clock_t)-1;
     }
@@ -193,7 +236,7 @@ static void cpu_group(const char *tag) {
     memset(&faked_ru, 0, sizeof faked_ru);
     memset(&real_ru, 0, sizeof real_ru);
     getrusage(RUSAGE_SELF, &faked_ru);
-    syscall(SYS_getrusage, RUSAGE_SELF, &real_ru);
+    genuine_getrusage(RUSAGE_SELF, &real_ru);
     snprintf(key, sizeof key, "%s.rusage.cpu", tag);
     say(key, (long long)faked_ru.ru_utime.tv_sec * NS_PER_S + faked_ru.ru_utime.tv_usec * 1000LL
                  + (long long)faked_ru.ru_stime.tv_sec * NS_PER_S + faked_ru.ru_stime.tv_usec * 1000LL);
@@ -209,23 +252,27 @@ static void cpu_group(const char *tag) {
     snprintf(key, sizeof key, "%s.rusage.minflt.genuine", tag);
     say(key, (long long)real_ru.ru_minflt);
 
+#ifndef __APPLE__
     memset(&faked_thread, 0, sizeof faked_thread);
     memset(&real_thread, 0, sizeof real_thread);
     getrusage(RUSAGE_THREAD, &faked_thread);
-    syscall(SYS_getrusage, RUSAGE_THREAD, &real_thread);
+    genuine_getrusage(RUSAGE_THREAD, &real_thread);
     snprintf(key, sizeof key, "%s.thread_rusage.cpu", tag);
     say(key, (long long)faked_thread.ru_utime.tv_sec * NS_PER_S + faked_thread.ru_utime.tv_usec * 1000LL
                  + (long long)faked_thread.ru_stime.tv_sec * NS_PER_S + faked_thread.ru_stime.tv_usec * 1000LL);
     snprintf(key, sizeof key, "%s.thread_rusage.cpu.genuine", tag);
     say(key, (long long)real_thread.ru_utime.tv_sec * NS_PER_S + real_thread.ru_utime.tv_usec * 1000LL
                  + (long long)real_thread.ru_stime.tv_sec * NS_PER_S + real_thread.ru_stime.tv_usec * 1000LL);
+#else
+    /* macOS has no `RUSAGE_THREAD`: a thread's own consumption is asked for through Mach there. */
+    (void)faked_thread;
+    (void)real_thread;
+#endif
 }
 
 /* The list that reaches the genuine function untouched. */
 static void passed_through(void) {
     struct timespec res;
-    struct timex tx;
-    clockid_t own = 0;
     struct timespec ts;
     (void)ts;
 
@@ -236,29 +283,39 @@ static void passed_through(void) {
     clock_getres(CLOCK_PROCESS_CPUTIME_ID, &res);
     say("getres.process_cpu", nanos(&res));
 
-    memset(&tx, 0, sizeof tx);
-    say("ntp_adjtime.rc", ntp_adjtime(&tx));
-#ifndef __FreeBSD__
-    say("ntp_adjtime.time", (long long)tx.time.tv_sec * NS_PER_S);
-    memset(&tx, 0, sizeof tx);
-    say("adjtimex.rc", adjtimex(&tx));
-    say("adjtimex.time", (long long)tx.time.tv_sec * NS_PER_S);
+#ifndef __APPLE__
+    /* `ntp_adjtime` reads the kernel's own clock, which our shift never reaches. macOS has no such
+       call, and no ids from `clock_getcpuclockid` either: a CPU clock is asked for through Mach
+       there rather than named by an id a program can hand to `clock_gettime`. */
+    {
+        struct timex tx;
+        clockid_t own = 0;
+
+        memset(&tx, 0, sizeof tx);
+        say("ntp_adjtime.rc", ntp_adjtime(&tx));
+#ifdef __linux__
+        say("ntp_adjtime.time", (long long)tx.time.tv_sec * NS_PER_S);
+        memset(&tx, 0, sizeof tx);
+        say("adjtimex.rc", adjtimex(&tx));
+        say("adjtimex.time", (long long)tx.time.tv_sec * NS_PER_S);
 #endif
 
-    /* An id naming this process's CPU clock, and one naming this thread's, are readings about
-       somebody rather than clocks this process consumes, so they stay genuine. */
-    if (clock_getcpuclockid(getpid(), &own) == 0) {
-        clock_gettime(own, &ts);
-        say("own_cpuclockid", nanos(&ts));
-        say("own_cpuclockid.genuine", genuine(own));
+        /* An id naming this process's CPU clock, and one naming this thread's, are readings about
+           somebody rather than clocks this process consumes, so they stay genuine. */
+        if (clock_getcpuclockid(getpid(), &own) == 0) {
+            clock_gettime(own, &ts);
+            say("own_cpuclockid", nanos(&ts));
+            say("own_cpuclockid.genuine", genuine(own));
+        }
+        if (pthread_getcpuclockid(pthread_self(), &own) == 0) {
+            clock_gettime(own, &ts);
+            say("pthread_cpuclockid", nanos(&ts));
+            say("pthread_cpuclockid.genuine", genuine(own));
+        }
     }
-    if (pthread_getcpuclockid(pthread_self(), &own) == 0) {
-        clock_gettime(own, &ts);
-        say("pthread_cpuclockid", nanos(&ts));
-        say("pthread_cpuclockid.genuine", genuine(own));
-    }
+#endif
 
-#ifndef __FreeBSD__
+#ifdef __linux__
     /* A dynamic clock id names a hardware device. Ours names a descriptor that is no such device,
        so the kernel refuses it, faked and genuine alike. */
     errno = 0;
@@ -281,7 +338,7 @@ static void passed_through(void) {
 #endif
 }
 
-#ifndef __FreeBSD__
+#ifdef __linux__
 /* A system call that uses all six argument registers: the second page of `path`, mapped through
    `syscall()`, whose last argument is the offset. */
 static void six_arguments(const char *path) {
@@ -319,7 +376,7 @@ int main(int argc, char **argv) {
     cpu_group("b");
 
     passed_through();
-#ifndef __FreeBSD__
+#ifdef __linux__
     if (argc > 1) {
         six_arguments(argv[1]);
     }

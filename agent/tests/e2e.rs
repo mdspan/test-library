@@ -1,8 +1,4 @@
 //! The narrow complete path: a shifted wall clock, seen by a preloaded program.
-//!
-//! `LD_PRELOAD` needs a platform arm that exports the interposed names, and the target needs one
-//! that can read a genuine clock, so these cases only apply where both exist.
-#![cfg(any(target_os = "linux", target_os = "freebsd"))]
 #![expect(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -255,6 +251,10 @@ fn the_session_directory_follows_xdg_runtime_dir_when_no_dir_is_named() {
 /// an object of the program's was built with, and the one symbol of our own that a hook or a
 /// controller calls. Nothing else: a name here that the interposition table does not list would be
 /// a name we answer for by accident.
+///
+/// macOS defines none of these: dyld would bind a second definition of a libc name to libc all the
+/// same, so a replacement there carries a private name and reaches the program through a table.
+/// The cases for that table are `tests/interpose.rs`.
 #[cfg(target_os = "linux")]
 const INTERPOSED: &[&str] = &[
     "__clock_gettime",
@@ -387,6 +387,7 @@ const INTERPOSED: &[&str] = &[
 
 /// The names glibc routed `stat` and its neighbours through until 2.33, which only a build
 /// targeting such a glibc defines.
+#[cfg(not(target_os = "macos"))]
 const LEGACY_STAT: &[&str] = &[
     "__fxstat",
     "__fxstat64",
@@ -399,6 +400,7 @@ const LEGACY_STAT: &[&str] = &[
 ];
 
 /// Every name the library should define, sorted the way `nm` reports them.
+#[cfg(not(target_os = "macos"))]
 fn interposed_names() -> Vec<String> {
     let legacy = if cfg!(all(target_os = "linux", glibc_pre_2_33)) {
         LEGACY_STAT
@@ -414,6 +416,7 @@ fn interposed_names() -> Vec<String> {
     wanted
 }
 
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn the_library_exports_the_interposed_names_and_nothing_else() {
     let output = std::process::Command::new("nm")
@@ -594,8 +597,9 @@ fn the_cpu_family_scales_each_clock_on_its_own() {
 fn the_tai_clock_keeps_its_offset_from_the_wall_clock() {
     let report = families(&[("LIBTIMEWARP_TIME", "1990-01-01T00:00:00Z")]);
     if !clock::is_tai(report.nanos("id.tai").try_into().unwrap()) {
-        // FreeBSD grew a TAI clock at 15.0, so a kernel below that has none to read.
-        eprintln!("this kernel has no TAI clock, so that case went unexercised");
+        // FreeBSD grew a TAI clock at 15.0, so a kernel below that has none to read, and macOS
+        // keeps none at all.
+        eprintln!("this platform has no TAI clock, so that case went unexercised");
         return;
     }
 
@@ -668,6 +672,9 @@ fn a_monotonic_family_can_be_moved_as_long_as_it_stays_above_zero() {
     );
 }
 
+/// The ids `clock_getcpuclockid` hands out, which macOS has none of: a CPU clock is asked for
+/// through Mach there rather than named by an id a program can hand to `clock_gettime`.
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn the_clocks_the_family_table_leaves_alone_read_genuine() {
     let report = families(&[("LIBTIMEWARP_RATE", "10"), ("LIBTIMEWARP_CPU_RATE", "8")]);

@@ -235,8 +235,13 @@ const fn frequency() -> Option<u64> {
     None
 }
 
-/// The same, from the register the architecture publishes it in.
+/// The same, from the register the architecture publishes it in, which every aarch64 has.
 #[cfg(target_arch = "aarch64")]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "one shape for every architecture, and the others have nowhere to read a frequency \
+              from"
+)]
 fn frequency() -> Option<u64> {
     let hertz: u64;
     // Safety: `cntfrq_el0` is readable from user mode and holds a constant of the running system.

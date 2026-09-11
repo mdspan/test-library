@@ -29,6 +29,18 @@ fn boottime() -> libc::clockid_t {
     timebase_of(Family::Boottime)
 }
 
+/// A clock id no platform has a clock for, so no family holds it.
+const STRANGER: libc::clockid_t = 0x7fff_ffff;
+
+/// Every id the family table leaves alone that this platform can spell. Linux encodes dynamic
+/// clocks and the ids `clock_getcpuclockid` hands out below zero; macOS spells a `clockid_t`
+/// unsigned, so there are no such numbers to ask about there.
+#[cfg(target_os = "macos")]
+const STRANGERS: &[libc::clockid_t] = &[STRANGER];
+/// The same, with the ids a signed `clockid_t` can carry.
+#[cfg(not(target_os = "macos"))]
+const STRANGERS: &[libc::clockid_t] = &[-4, -6, STRANGER];
+
 /// Genuine readings a plan can be built against without waiting for a clock.
 fn readings(clock: libc::clockid_t) -> Option<Nanos> {
     if clock == clock::REALTIME {
@@ -551,8 +563,10 @@ fn a_family_variable_wins_over_the_bare_one() {
 /// Realtime to track and one for Monotonic, both of them clocks that measure elapsed time.
 #[cfg(target_os = "linux")]
 const OVERRIDE_NAMES: (&str, &str) = ("CLOCK_BOOTTIME", "CLOCK_MONOTONIC_RAW");
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "freebsd")]
 const OVERRIDE_NAMES: (&str, &str) = ("CLOCK_BOOTTIME", "CLOCK_MONOTONIC_PRECISE");
+#[cfg(target_os = "macos")]
+const OVERRIDE_NAMES: (&str, &str) = ("CLOCK_MONOTONIC_RAW", "CLOCK_UPTIME_RAW_APPROX");
 
 #[test]
 fn a_timebase_override_is_taken_by_name() {
@@ -829,7 +843,7 @@ fn an_amount_of_consumed_cpu_scales_by_the_cpu_rate() {
     }
     // A clock of any other family has no such amount to convert, and neither has one we leave
     // alone: the reading of those comes from the clock itself.
-    for id in [clock::REALTIME, monotonic(), boottime(), -4] {
+    for id in [clock::REALTIME, monotonic(), boottime(), STRANGER] {
         assert_eq!(cpu_scaled(header, id, Nanos(250)), None, "{id}");
     }
 }
@@ -871,7 +885,7 @@ fn a_timer_query_converts_the_genuine_remaining_into_the_familys_own_units() {
         Some(Nanos(Nanos::SECOND / 20))
     );
     // A clock the family table leaves alone counts down in genuine units.
-    assert_eq!(timer_remaining(header, -4, tenth), None);
+    assert_eq!(timer_remaining(header, STRANGER, tenth), None);
 }
 
 #[test]
@@ -1049,8 +1063,7 @@ fn the_clocks_the_family_table_leaves_alone_read_genuine() {
     let tmp = tempfile::tempdir().unwrap();
     let session = create(&setup_in(tmp.path())).unwrap();
 
-    // A dynamic clock and an id from `clock_getcpuclockid` are both encoded below zero.
-    for id in [-4, -6, 0x7fff_ffff] {
+    for &id in STRANGERS {
         assert_eq!(clock_now(session.header(), id), None, "{id}");
     }
 }

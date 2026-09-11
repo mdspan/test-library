@@ -75,6 +75,14 @@ fn build_library(extra: &[&str], into: &Path) -> PathBuf {
     path
 }
 
+/// The variable that loads the library ahead of the program: `DYLD_INSERT_LIBRARIES` on macOS,
+/// where dyld reads our interpose table out of it, and `LD_PRELOAD` on the other two.
+pub(crate) const PRELOAD: &str = if cfg!(target_os = "macos") {
+    "DYLD_INSERT_LIBRARIES"
+} else {
+    "LD_PRELOAD"
+};
+
 static COMPILE: Mutex<()> = Mutex::new(());
 
 /// Compiles `agent/tests/progs/<name>.c`, once per test run.
@@ -84,7 +92,8 @@ pub(crate) fn program(name: &str) -> PathBuf {
 
 /// The same, linked against the library instead of preloading it. That is how a program reaches
 /// the library's own public symbols, and it interposes just the same: our `DT_NEEDED` entry comes
-/// before libc's, so the loader finds our definitions first.
+/// before libc's, so the loader finds our definitions first, and on macOS dyld applies the
+/// interpose table of every image loaded at launch, linked or inserted alike.
 pub(crate) fn program_linked_to_library(name: &str) -> PathBuf {
     let library = library();
     compile(
@@ -212,14 +221,15 @@ fn build(source: &Path, binary: &Path, extra: &[String]) -> PathBuf {
         .and_then(|b| Ok(b.modified()? >= std::fs::metadata(source)?.modified()?))
         .unwrap_or(false);
     if !fresh {
-        let status = Command::new(std::env::var("CC").as_deref().unwrap_or("cc"))
-            .arg("-O0")
-            .arg("-o")
-            .arg(binary)
-            .arg(source)
-            .args(extra)
-            .status()
-            .expect("a C compiler");
+        let mut command = Command::new(std::env::var("CC").as_deref().unwrap_or("cc"));
+        command.arg("-O0").arg("-o").arg(binary).arg(source);
+        // macOS keeps part of its own surface behind this macro, the open-file-description locks
+        // and the calls it kept from before POSIX withdrew them among them, so a C file of ours
+        // asks for all of it rather than for whatever the default happens to be.
+        if cfg!(target_os = "macos") {
+            command.arg("-D_DARWIN_C_SOURCE");
+        }
+        let status = command.args(extra).status().expect("a C compiler");
         assert!(status.success(), "compiling {}", source.display());
     }
     binary.to_path_buf()
@@ -428,7 +438,8 @@ impl Run {
             .env_clear()
             .env("PATH", "/usr/bin:/bin");
         if self.preload {
-            command.env("LD_PRELOAD", self.library.clone().unwrap_or_else(library));
+            let library = self.library.clone().unwrap_or_else(library);
+            command.env(PRELOAD, library);
         }
         if let Some(dir) = &self.session_dir {
             command.env("LIBTIMEWARP_SESSION_DIR", dir);
