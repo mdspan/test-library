@@ -29,6 +29,7 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
+use common::hook::{Func, Kind};
 use common::time::Family;
 use controller::Controller;
 use harness::{Report, Run, Seen, calls_seen, only_session};
@@ -313,12 +314,37 @@ fn slept_for(child: &mut Child, printing: &mut BufReader<std::process::ChildStdo
     line.trim_start_matches("genuine=").trim().parse().unwrap()
 }
 
+/// Blocks until the sleeper's `nanosleep` has reached the hook as a duration to convert.
+///
+/// `sleeping=1` goes out before the call, so it says nothing about whether the conversion has
+/// happened yet; the hook sees the conversion itself. Without this wait a change can land on a
+/// sleep that has not converted, which measures the new rate rather than the question being asked.
+fn wait_for_the_conversion(dir: &Path) {
+    let session = only_session(dir);
+    for _ in 0..2_000 {
+        if calls_seen(&session).iter().any(|seen| {
+            seen.func == i64::from(Func::Nanosleep as u32)
+                && seen.kind == i64::from(Kind::DurationToGenuine as u32)
+        }) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    panic!("the sleeper never converted its sleep");
+}
+
 #[test]
 fn a_rate_change_landing_mid_sleep_does_not_reach_the_sleep() {
     let dir = tempfile::tempdir().unwrap();
+    let hook = harness::hook_library("clock_group");
     // One genuine second, at the rate the sleep converted with.
-    let (mut child, mut printing) = sleeping(dir.path(), 1_000, &[]);
+    let (mut child, mut printing) = sleeping(
+        dir.path(),
+        1_000,
+        &[("LIBTIMEWARP_HOOK", &format!("{}@65536", hook.display()))],
+    );
     let controller = attach_to_session(dir.path());
+    wait_for_the_conversion(dir.path());
 
     let mut transaction = controller.begin().unwrap();
     transaction.set_rate(Family::Monotonic, 100.0).unwrap();

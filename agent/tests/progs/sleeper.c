@@ -3,7 +3,8 @@
 
    Linked against the library rather than preloading it, so the genuine clock comes from the
    library's own symbol. argv[1] is the fake duration in milliseconds. `sleeping=1` goes out before
-   the sleep, which is after the conversion, so a case knows exactly when to make its change. */
+   the call, so it says only that the sleep is imminent, not that it has converted yet; a case that
+   needs the conversion itself waits on the hook. */
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
