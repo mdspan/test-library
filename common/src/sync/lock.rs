@@ -46,10 +46,11 @@ pub fn lock_request() -> libc::flock {
     request
 }
 
-/// `fcntl`'s lock kinds and whences are `c_int` constants held in a `c_short` field. Each is a
-/// small number on every platform we support, so nothing is ever lost here.
-fn kind(value: libc::c_int) -> libc::c_short {
-    libc::c_short::try_from(value).unwrap_or(0)
+/// `fcntl`'s lock kinds and whences live in a `c_short` field, and each platform declares the
+/// constants at whatever width it likes: `c_int` on Linux, `c_short` on the BSDs. Widening to
+/// `i64` first accepts either. Each is a small number everywhere we support, so nothing is lost.
+fn kind<T: Into<i64>>(value: T) -> libc::c_short {
+    libc::c_short::try_from(value.into()).unwrap_or(0)
 }
 
 /// Names the lock file this process's readers probe, creating it if it is missing.
@@ -115,7 +116,7 @@ pub fn probe_held() -> Option<bool> {
     unsafe { libc::close(fd) };
     // One parser for all three platforms: any lock kind other than `F_UNLCK` means held. The pid
     // the kernel fills in is -1 for a description-owned lock and plays no part in the answer.
-    answered.then(|| libc::c_int::from(request.l_type) != libc::F_UNLCK)
+    answered.then(|| i64::from(request.l_type) != i64::from(libc::F_UNLCK))
 }
 
 /// **W1**: the write lock, held across the whole write flow.
