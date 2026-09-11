@@ -6,6 +6,35 @@ use common::session::SessionError;
 use common::session::layout::BadHeader;
 use common::time::Family;
 
+/// What an operation on Cpu, and a `get` of it, are refused with.
+pub(crate) const CPU_HAS_ONE_SETTING: &str =
+    "Cpu has one setting, its rate, fixed at creation, and no single value it shows now";
+
+/// The stable number a controller call answers with outside Rust.
+///
+/// Zero is success, so a caller tests for it and asks for the message otherwise. A number is fixed
+/// for good: a code added later takes a new one rather than renumbering its neighbours.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(i32)]
+pub enum Code {
+    /// The call did what it was asked.
+    Ok = 0,
+    /// [`Error::NoSession`].
+    NoSession = 1,
+    /// [`Error::BadSessionFile`].
+    BadSessionFile = 2,
+    /// [`Error::BadArgument`].
+    BadArgument = 3,
+    /// [`Error::WouldGoBackwards`].
+    WouldGoBackwards = 4,
+    /// [`Error::UnsupportedForKeeper`].
+    UnsupportedForKeeper = 5,
+    /// [`Error::NotOurs`].
+    NotOurs = 6,
+    /// [`Error::Io`].
+    Io = 7,
+}
+
 /// Why a controller call did not do what it was asked.
 ///
 /// The variant is the stable part: the message beside it names the particular value or file and
@@ -28,6 +57,22 @@ pub enum Error {
     NotOurs(&'static str),
     /// Anything else the operating system refused.
     Io(io::Error),
+}
+
+impl Error {
+    /// The stable number this refusal answers with outside Rust.
+    #[must_use]
+    pub const fn code(&self) -> Code {
+        match self {
+            Self::NoSession => Code::NoSession,
+            Self::BadSessionFile(_) => Code::BadSessionFile,
+            Self::BadArgument(_) => Code::BadArgument,
+            Self::WouldGoBackwards(_) => Code::WouldGoBackwards,
+            Self::UnsupportedForKeeper => Code::UnsupportedForKeeper,
+            Self::NotOurs(_) => Code::NotOurs,
+            Self::Io(_) => Code::Io,
+        }
+    }
 }
 
 impl std::fmt::Display for Error {

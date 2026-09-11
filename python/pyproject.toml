@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "libtimewarp"
+version = "0.1.0"
+description = "Read and change a live libtimewarp session, over the library's C API."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.9"
+# Nothing but the standard library: the tool reaches libtimewarp_controller through ctypes, which
+# is what keeps it installable anywhere the shared object is.
+dependencies = []
+
+[project.scripts]
+libtimewarp = "libtimewarp.cli:main"
+
+[tool.setuptools]
+packages = ["libtimewarp"]

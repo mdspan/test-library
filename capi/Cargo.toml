@@ -1,0 +1,25 @@
+[package]
+name = "capi"
+version.workspace = true
+edition.workspace = true
+description = "The C library over the controller: libtimewarp_controller.so and the header beside it."
+license.workspace = true
+repository.workspace = true
+
+# A cdylib alone, and a crate of its own rather than a second crate type on `controller`, so that
+# this library's exported names stay out of the preloaded libtimewarp.so, whose exports are the
+# interposed functions and nothing else.
+[lib]
+name = "timewarp_controller"
+crate-type = ["cdylib"]
+
+[lints]
+workspace = true
+
+[dependencies]
+common = { path = "../common" }
+controller = { path = "../controller" }
+
+[dev-dependencies]
+common = { path = "../common" }
+tempfile = "3.24.0"

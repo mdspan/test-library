@@ -1,0 +1,99 @@
+//! Building the C library under test, and the sessions a case points it at.
+#![expect(
+    clippy::expect_used,
+    reason = "test support: a failed assumption should fail the test loudly"
+)]
+
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
+
+use common::session::layout::Keeper;
+use common::session::{self, Session, Setup};
+
+/// A case that creates a session takes this: the lock file a reader probes is named once per
+/// process, so two sessions at once would cross their probes.
+static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
+
+pub(crate) fn one_at_a_time() -> MutexGuard<'static, ()> {
+    ONE_AT_A_TIME.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Where cargo put the artifacts of this test run.
+pub(crate) fn target_dir() -> PathBuf {
+    let mut dir = std::env::current_exe().expect("test executable has a path");
+    dir.pop(); // deps
+    if dir.ends_with("deps") {
+        dir.pop();
+    }
+    dir
+}
+
+/// The repository's root, which is where the shipped header and the Python tool live.
+pub(crate) fn repository() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .canonicalize()
+        .expect("the crate sits inside the repository")
+}
+
+static LIBRARY: OnceLock<PathBuf> = OnceLock::new();
+
+/// The C library under test, built once per test run.
+///
+/// A test binary of this crate is linked against the rlib rather than the `cdylib`, so the shared
+/// object a C caller or the Python tool loads has to be asked for by name.
+pub(crate) fn library() -> PathBuf {
+    LIBRARY
+        .get_or_init(|| {
+            let dir = target_dir();
+            let mut cargo =
+                Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
+            cargo
+                .args(["build", "-p", "capi"])
+                .current_dir(env!("CARGO_MANIFEST_DIR"))
+                .env_remove("CARGO_MAKEFLAGS");
+            if dir.ends_with("release") {
+                cargo.arg("--release");
+            }
+            let status = cargo.status().expect("cargo builds the library under test");
+            assert!(status.success(), "building the library under test");
+
+            let path = dir.join(format!(
+                "{}timewarp_controller{}",
+                std::env::consts::DLL_PREFIX,
+                std::env::consts::DLL_SUFFIX
+            ));
+            assert!(path.exists(), "{} was not built", path.display());
+            path
+        })
+        .clone()
+}
+
+/// A directory of our own with one session in it, kept mapped so the file stays whole.
+pub(crate) struct Fixture {
+    pub(crate) dir: tempfile::TempDir,
+    pub(crate) session: Session,
+}
+
+impl Fixture {
+    pub(crate) fn on(keeper: Keeper) -> Self {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let session = session::create(&Setup {
+            keeper,
+            ..Setup::plain(dir.path().join("libtimewarp"))
+        })
+        .expect("a session of our own");
+        Self { dir, session }
+    }
+
+    /// Where a case points the tool: the directory holding session files, which is the one the
+    /// naming rule computes under `LIBTIMEWARP_SESSION_DIR`.
+    pub(crate) fn session_dir(&self) -> PathBuf {
+        self.dir.path().join("libtimewarp")
+    }
+
+    pub(crate) fn path(&self) -> &Path {
+        self.session.path()
+    }
+}

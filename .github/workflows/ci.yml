@@ -56,6 +56,13 @@ jobs:
           cargo test --locked --workspace --all-features --no-fail-fast 2>&1 \
             | tee "$RUNNER_TEMP/test.log"
 
+      # The Python tool is pure Python over the C library, so its own cases run wherever an
+      # interpreter does. The ones that read another process's environment exercise this
+      # platform's way of asking for it, which is the part that differs between the three.
+      - name: Python tool
+        working-directory: python
+        run: PYTHONPATH=. python3 -m unittest discover -s tests -t .
+
       - name: Name what failed
         if: failure()
         shell: bash
@@ -84,6 +91,10 @@ jobs:
           cargo test --locked --workspace --all-features --no-fail-fast 2>&1 \
             | tee "$RUNNER_TEMP/test.log"
 
+      - name: Python tool
+        working-directory: python
+        run: PYTHONPATH=. python3 -m unittest discover -s tests -t .
+
       - name: Name what failed
         if: failure()
         shell: bash
@@ -107,7 +118,9 @@ jobs:
           prepare: |
             # The base system carries no root certificates, so cargo cannot reach crates.io
             # until this package drops a bundle at /etc/ssl/cert.pem.
-            pkg install -y ca_root_nss rustup-init
+            # python3 is for the Python tool's own cases; procstat, which those cases use to
+            # read another process's environment here, is in the base system.
+            pkg install -y ca_root_nss rustup-init python3
             rustup-init -y --no-modify-path --default-toolchain none
           run: |
             . "$HOME/.cargo/env"
@@ -117,6 +130,7 @@ jobs:
             cargo test --locked --workspace --all-features --no-fail-fast >test.log 2>&1
             status=$?
             cat test.log
+            (cd python && PYTHONPATH=. python3 -m unittest discover -s tests -t .) || status=1
             if [ $status -ne 0 ]; then
               echo "=== freebsd x86_64 failed ==="
               grep -E '^test .+ \.\.\. FAILED$' test.log

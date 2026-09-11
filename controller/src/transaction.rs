@@ -9,14 +9,11 @@ use common::sync::{self, Anchor, WriteLock};
 use common::time::{Family, Nanos, Rate};
 
 use crate::Error;
+use crate::error::CPU_HAS_ONE_SETTING;
 
 /// What a move out of the range an instant can hold is refused with. Instants are signed 64-bit
 /// nanoseconds, so the range spans about 1678 to 2262.
 const OUT_OF_RANGE: &str = "the move would leave the range an instant can hold";
-
-/// What an operation on Cpu is refused with.
-const CPU_HAS_ONE_SETTING: &str =
-    "Cpu has one setting, its rate, fixed at creation, and no single value it shows now";
 
 /// What a rate the fixed point cannot carry is refused with.
 const BAD_RATE: &str = "a rate must be a number at or above zero and below the ceiling, 2^32";

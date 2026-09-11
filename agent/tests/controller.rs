@@ -1,5 +1,6 @@
 //! A controller changing a session while the processes in it read the clock: every reader sees all
-//! of a transaction or none of it, on its next read, and never a step the spec forbids.
+//! of a transaction or none of it, on its next read, and never a step the spec forbids. And a
+//! controller reading one: what a target left in the session, including what went wrong with it.
 //!
 //! `LD_PRELOAD` needs a platform arm that exports the interposed names, and creating a session
 //! needs one that can read a genuine clock, so these cases only apply where both exist.
@@ -27,11 +28,11 @@ use std::process::{Command, Stdio};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use common::platform::{clock, genuine_nanos};
-use common::session::layout::{Header, Params};
+use common::session::layout::{FaultCode, Header, Keeper, Params};
 use common::session::{self, Setup};
 use common::sync::read;
 use common::time::{Family, Nanos, Rate};
-use controller::Controller;
+use controller::{Code, Controller};
 
 const SECOND: i64 = Nanos::SECOND;
 const HOUR: i64 = 3_600 * SECOND;
@@ -263,6 +264,63 @@ fn now() -> Nanos {
 
 fn deadline(after: i64) -> Nanos {
     Nanos(now().0.saturating_add(after))
+}
+
+#[test]
+fn a_controller_reads_the_fault_out_of_a_deliberately_misconfigured_session() {
+    let _one = one_at_a_time();
+    let dir = tempfile::tempdir().unwrap();
+    // A rate no rate can be. The creator cannot set up what it was asked for, so it publishes a
+    // session on the null keeper with no hook and records the fault in it before any child can
+    // attach.
+    let report = harness::Run::prog("probe")
+        .session_dir(dir.path())
+        .env("LIBTIMEWARP_RATE", "-1")
+        .env("LIBTIMEWARP_SHIFT", "-2h")
+        .run();
+    report.assert_wall_clock("probe", 0);
+
+    let path = PathBuf::from(report.get("probe.shared"));
+    let controller = Controller::attach(&path).unwrap();
+    let info = controller.info();
+
+    // What the controller learns is exactly what the chapter says it should: the session fell back
+    // to genuine time, with no hook, and the fault names the process that hit it.
+    assert_eq!(info.keeper, Keeper::Null);
+    assert_eq!(info.hook, None);
+    let fault = info.fault.expect("the creator recorded what went wrong");
+    assert_eq!(fault.code, FaultCode::BadValue);
+    assert_eq!(fault.pid, report.get("probe.pid").parse::<u32>().unwrap());
+
+    // A null session still reads and still refuses every change.
+    let showing = controller.get(Family::Realtime).unwrap();
+    assert!((showing.0 - harness::genuine_now()).abs() < SECOND);
+    assert_eq!(
+        controller.begin().unwrap_err().code(),
+        Code::UnsupportedForKeeper
+    );
+}
+
+#[test]
+fn a_controller_reads_the_hook_a_session_carries() {
+    let _one = one_at_a_time();
+    let dir = tempfile::tempdir().unwrap();
+    let hook = harness::hook_library("setter_log");
+    let report = harness::Run::prog("probe")
+        .session_dir(dir.path())
+        .env("LIBTIMEWARP_HOOK", format!("{}@4096", hook.display()))
+        .run();
+
+    let controller = Controller::attach(Path::new(report.get("probe.shared"))).unwrap();
+    let info = controller.info();
+    assert_eq!(info.keeper, Keeper::Affine);
+    assert_eq!(info.hook.as_deref(), Some(hook.as_path()));
+    assert_eq!(info.fault, None);
+    // A hook sits in front of the keeper and changes none of this, so the families read as they
+    // were set up and a transaction still opens.
+    assert_eq!(info.realtime.rate, Rate::UNITY);
+    assert_eq!(info.realtime.timebase, Some(clock::REALTIME));
+    controller.begin().unwrap().abort();
 }
 
 /// The `tick=` lines of a run, each the wall clock, Monotonic and Boottime as the program read

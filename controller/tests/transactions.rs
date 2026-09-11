@@ -15,83 +15,18 @@
               that would not compile"
 )]
 
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, MutexGuard, PoisonError};
+mod fixture;
 
-use common::platform::{clock, genuine_nanos};
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use common::platform::clock;
 use common::session::layout::{Header, Keeper, Params, ParamsValue};
-use common::session::{self, Session, Setup, clock_now, naming};
+use common::session::naming;
 use common::sync::read;
 use common::time::{Family, Nanos, Rate};
 use controller::{Controller, Error, Transaction};
 
-const SECOND: i64 = Nanos::SECOND;
-const HOUR: i64 = 3_600 * SECOND;
-
-/// Every case takes this, for two reasons. A fork while another thread of this process is inside a
-/// transaction would hand the child the in-process half of the write lock already held, and the
-/// child would wait on it forever. And the lock file a reader probes is named once per process.
-static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
-
-fn one_at_a_time() -> MutexGuard<'static, ()> {
-    ONE_AT_A_TIME.lock().unwrap_or_else(PoisonError::into_inner)
-}
-
-/// A session of our own, and a controller attached to it by its path the way any other process
-/// would attach.
-struct Fixture {
-    _dir: tempfile::TempDir,
-    session: Session,
-    controller: Controller,
-}
-
-fn fixture_on(keeper: Keeper) -> Fixture {
-    let dir = tempfile::tempdir().unwrap();
-    let session = session::create(&Setup {
-        keeper,
-        ..Setup::plain(dir.path().join("libtimewarp"))
-    })
-    .unwrap();
-    let controller = Controller::attach(session.path()).unwrap();
-    Fixture {
-        _dir: dir,
-        session,
-        controller,
-    }
-}
-
-fn fixture() -> Fixture {
-    fixture_on(Keeper::Affine)
-}
-
-impl Fixture {
-    fn header(&self) -> &Header {
-        self.session.header()
-    }
-
-    fn live(&self) -> ParamsValue {
-        self.header().live.load()
-    }
-
-    fn path(&self) -> PathBuf {
-        self.session.path().to_path_buf()
-    }
-
-    /// How many times this session has been published: the sequence counter, which one write
-    /// section moves by exactly two.
-    fn counter(&self) -> u64 {
-        self.header().seqlock.sequence.load(Ordering::Acquire)
-    }
-
-    fn showing(&self, clock: libc::clockid_t) -> Nanos {
-        clock_now(self.header(), clock).unwrap()
-    }
-}
-
-fn genuine(clock: libc::clockid_t) -> Nanos {
-    genuine_nanos(clock).unwrap()
-}
+use fixture::{HOUR, SECOND, fixture, fixture_on, genuine, one_at_a_time};
 
 /// Runs `body` with a thread reading the parameters through the seqlock the whole time, and
 /// asserts that every copy it read was `expected`.
@@ -143,7 +78,7 @@ fn within(value: Nanos, window: (Nanos, Nanos), by: i64) {
 fn attaching_applies_the_checks_a_target_applies() {
     let _one = one_at_a_time();
     let fixture = fixture();
-    let dir = fixture.session.path().parent().unwrap().to_path_buf();
+    let dir = fixture.dir();
 
     let missing = dir.join("pid-1-nothing.session");
     assert!(matches!(
