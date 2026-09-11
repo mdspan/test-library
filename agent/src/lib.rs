@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use common::config::{self, BadValue, ENV_SHARED_FILE, EnvLookup, ProcessEnv};
 use common::log::{self, Level};
 use common::platform::genuine_clock_gettime;
-use common::session::layout::{Fault, FaultCode};
+use common::session::layout::{Fault, FaultCode, Header};
 use common::session::{self, SessionError, Setup, naming};
 
 /// What a process that fails closed exits with: the `EX_CONFIG` of `sysexits.h`.
@@ -63,7 +63,7 @@ fn attach_or_create() {
         // The inherited path always wins, whatever else the environment says: a session built from
         // this environment instead would fake something nobody asked for.
         match session::attach(Path::new(&inherited)) {
-            Ok(session) => state::install(session.leak()),
+            Ok(session) => join(session),
             // The session the parent named is gone or unusable, so there is none to record the
             // failure in either.
             Err(reason) => report_failure(&reason),
@@ -89,7 +89,25 @@ fn publish(session: session::Session) {
     // Safety: a constructor runs before `main`, so nothing in the program is reading `environ` yet
     // to race this write.
     unsafe { std::env::set_var(ENV_SHARED_FILE, session.path()) };
-    state::install(session.leak());
+    let (header, hook) = session.leak();
+    state::install(header, hook);
+}
+
+/// Joins the session this process inherited, loading the hook it names.
+///
+/// A hook that will not load here is the first thing a process can fail at with a session already in
+/// hand, so the fault goes into that session before this process runs on genuine time or leaves. The
+/// session outlives us, and a controller should still be able to read why we gave up on it.
+fn join(mut session: session::Session) {
+    match session.load_hook() {
+        Ok(()) => {
+            let (header, hook) = session.leak();
+            state::install(header, hook);
+        }
+        // Genuine, never half-faked: a hook that failed while the session's settings applied would
+        // fake the wrong thing silently. The session stays as it is for whoever else attaches.
+        Err(bad) => report_failure_in(session.header(), &bad),
+    }
 }
 
 /// A creator that cannot set up what the environment asked for.
@@ -107,6 +125,20 @@ fn fall_back(dir: PathBuf, bad: &BadValue) {
         Ok(session) => publish(session),
         // No place for a file, so the bad value stays in the log alone.
         Err(reason) => common::log!(Level::Error, "{reason}"),
+    }
+}
+
+/// Reports a failure in a session that outlives this process: the fault slot first, then the `error`
+/// line, then the exit when the session fails closed.
+///
+/// First fault wins, so a later process joining the same broken session adds nothing but a line of
+/// its own. The session's own flag decides whether this process runs on, because an attacher reads
+/// none of the setup variables.
+fn report_failure_in(header: &Header, reason: &dyn Display) {
+    header.record_fault(Fault::new(FaultCode::BadValue, std::process::id()));
+    common::log!(Level::Error, "{reason}");
+    if session::fails_closed(Some(header), &ProcessEnv) {
+        fail_closed(reason);
     }
 }
 

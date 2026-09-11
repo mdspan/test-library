@@ -76,30 +76,68 @@ pub(crate) fn copy_named(source: &Path, name: &str) -> PathBuf {
     dest
 }
 
+/// Compiles `agent/tests/hooks/<name>.c` into a shared library a session can load, against the
+/// header the library ships for hook authors.
+pub(crate) fn hook_library(name: &str) -> PathBuf {
+    let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/hooks")
+        .join(format!("{name}.c"));
+    build(
+        &source,
+        &target_dir()
+            .join("timewarp-tests")
+            .join(format!("{name}.so")),
+        &[
+            "-shared".to_owned(),
+            "-fPIC".to_owned(),
+            "-Wall".to_owned(),
+            "-Wextra".to_owned(),
+            "-Werror".to_owned(),
+            format!("-I{}", include_dir().display()),
+        ],
+    )
+}
+
+/// Where the C header a hook author includes lives.
+pub(crate) fn include_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../include")
+        .canonicalize()
+        .expect("the shipped header's directory")
+}
+
 fn compile(name: &str, extra: &[String]) -> PathBuf {
     let source = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/progs")
         .join(format!("{name}.c"));
-    let out_dir = target_dir().join("timewarp-tests");
-    let binary = out_dir.join(name);
+    build(
+        &source,
+        &target_dir().join("timewarp-tests").join(name),
+        extra,
+    )
+}
+
+/// Compiles `source` into `binary`, once per test run, unless the binary is already newer.
+fn build(source: &Path, binary: &Path, extra: &[String]) -> PathBuf {
+    let out_dir = binary.parent().expect("a binary sits in a directory");
 
     let _guard = COMPILE.lock().unwrap();
-    std::fs::create_dir_all(&out_dir).unwrap();
-    let fresh = std::fs::metadata(&binary)
-        .and_then(|b| Ok(b.modified()? >= std::fs::metadata(&source)?.modified()?))
+    std::fs::create_dir_all(out_dir).unwrap();
+    let fresh = std::fs::metadata(binary)
+        .and_then(|b| Ok(b.modified()? >= std::fs::metadata(source)?.modified()?))
         .unwrap_or(false);
     if !fresh {
         let status = Command::new(std::env::var("CC").as_deref().unwrap_or("cc"))
             .arg("-O0")
             .arg("-o")
-            .arg(&binary)
-            .arg(&source)
+            .arg(binary)
+            .arg(source)
             .args(extra)
             .status()
             .expect("a C compiler");
         assert!(status.success(), "compiling {}", source.display());
     }
-    binary
+    binary.to_path_buf()
 }
 
 /// Whether a name in the session directory is a session file. The lock file beside each one is
@@ -109,6 +147,31 @@ pub(crate) fn is_session_file(name: &std::ffi::OsStr) -> bool {
     Path::new(name)
         .extension()
         .is_some_and(|suffix| suffix == "session")
+}
+
+/// Every session file a run left in `dir`, which is the directory a `Run` was given.
+pub(crate) fn session_files(dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir.join("libtimewarp")) else {
+        return Vec::new();
+    };
+    entries
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.file_name().is_some_and(is_session_file))
+        .collect()
+}
+
+/// The one session a run left behind, mapped the way a controller would map it.
+pub(crate) fn only_session(dir: &Path) -> common::session::Session {
+    let files = session_files(dir);
+    let [path] = files.as_slice() else {
+        panic!("wanted the one session file a run leaves behind, found {files:?}");
+    };
+    common::session::attach(path).unwrap()
+}
+
+/// Whatever a run wrote to the log file it was given, or nothing when it wrote none.
+pub(crate) fn log_of(path: &Path) -> String {
+    std::fs::read_to_string(path).unwrap_or_default()
 }
 
 /// One run of a target program under the library.

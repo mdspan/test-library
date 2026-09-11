@@ -3,7 +3,7 @@
 pub mod layout;
 pub mod naming;
 
-use std::ffi::CString;
+use std::ffi::{CString, OsStr, c_void};
 use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
@@ -11,10 +11,11 @@ use std::ptr::NonNull;
 use std::sync::atomic::Ordering;
 
 use crate::config::{
-    self, BadValue, ENV_CPU_RATE, ENV_EMULATE_VDSO, ENV_FAIL_CLOSED, ENV_KEEPER, ENV_RATE,
-    ENV_REALTIME_SHIFT, ENV_SHIFT, ENV_TIME, ENV_TIMEKEEP_INTERVAL, EnvLookup, Reason,
+    self, BadValue, ENV_CPU_RATE, ENV_EMULATE_VDSO, ENV_FAIL_CLOSED, ENV_HOOK, ENV_KEEPER,
+    ENV_RATE, ENV_REALTIME_SHIFT, ENV_SHIFT, ENV_TIME, ENV_TIMEKEEP_INTERVAL, EnvLookup, Reason,
     duration_var, flag_var, rate_var, timestamp_var,
 };
+use crate::hook::{self, Hook, Init, Spec};
 use crate::platform::{self, clock};
 use crate::sync;
 use crate::time::{Family, Line, Nanos, Rate};
@@ -79,6 +80,11 @@ fn keeper_from_env(env: &impl EnvLookup) -> Result<Keeper, BadValue> {
         })
 }
 
+/// The hook the environment names, or `None` when it names none. An empty value means none.
+fn hook_from_env(env: &impl EnvLookup) -> Option<Spec> {
+    Spec::parse(&env.nonempty(ENV_HOOK)?)
+}
+
 /// Whether a process that cannot set up what it was asked for exits rather than running genuine.
 ///
 /// The choice belongs to the session: it is read at creation, recorded in the header, and followed
@@ -121,6 +127,9 @@ pub struct Setup {
     pub dir: PathBuf,
     /// Which timekeeper computes what the families show.
     pub keeper: Keeper,
+    /// The hook in front of the keeper, or `None` when the session has none. Independent of the
+    /// keeper: a hook over the null keeper answers what it wants and leaves the rest genuine.
+    pub hook: Option<Spec>,
     /// An absolute value for the Realtime family, from `LIBTIMEWARP_TIME`, in place of a shift.
     pub realtime_at: Option<Nanos>,
     /// The wall clock.
@@ -149,6 +158,7 @@ impl Setup {
         Self {
             dir,
             keeper: Keeper::Affine,
+            hook: None,
             realtime_at: None,
             realtime: FamilySetup::tracking(clock::REALTIME),
             monotonic: FamilySetup::tracking(clock::MONOTONIC),
@@ -186,6 +196,8 @@ impl Setup {
     pub fn from_env(env: &impl EnvLookup, dir: PathBuf) -> Result<Self, BadValue> {
         let session = Self {
             keeper: keeper_from_env(env)?,
+            // Read whichever keeper the session runs: the two are independent.
+            hook: hook_from_env(env),
             emulate_vdso: flag_var(env, ENV_EMULATE_VDSO, true),
             fail_closed: flag_var(env, ENV_FAIL_CLOSED, false),
             timekeep_interval: duration_var(env, ENV_TIMEKEEP_INTERVAL)?
@@ -418,6 +430,7 @@ pub struct Session {
     base: NonNull<u8>,
     len: usize,
     path: PathBuf,
+    hook: Option<Hook>,
 }
 
 // Safety: the mapping is shared memory, and every field the library touches through it is an
@@ -449,14 +462,64 @@ impl Session {
         &self.path
     }
 
-    /// Hands the mapping to the process for good.
+    /// The hook in front of the keeper, or `None` when the session has none.
     #[must_use]
-    pub fn leak(self) -> &'static Header {
+    pub const fn hook(&self) -> Option<&Hook> {
+        self.hook.as_ref()
+    }
+
+    /// Loads the hook this session names, if it names one, without running its `init`.
+    ///
+    /// An attacher joins a session whose arena `init` already filled, so it loads the library and
+    /// nothing more. A creator has its hook loaded already, and calling this again would load the
+    /// library a second time.
+    ///
+    /// # Errors
+    /// The [`BadValue`] naming what the hook library could not do. The session stays mapped, so a
+    /// caller can record the fault in it before it runs on genuine time.
+    pub fn load_hook(&mut self) -> Result<(), BadValue> {
+        let recorded = self.header().hook_path();
+        if recorded.is_empty() {
+            return Ok(());
+        }
+        let path = Path::new(OsStr::from_bytes(recorded));
+        let (arena, size) = arena_in(self.base, self.len, self.header());
+        self.hook = Some(
+            hook::load(path)
+                .and_then(|hook| hook.open_arena(arena, size, Init::Skip))
+                .map_err(|why| BadValue::new(ENV_HOOK, Reason::Hook(why)))?,
+        );
+        Ok(())
+    }
+
+    /// Hands the mapping and the hook to the process for good.
+    #[must_use]
+    pub fn leak(mut self) -> (&'static Header, Option<&'static Hook>) {
+        let hook = self.hook.take().map(|hook| &*Box::leak(Box::new(hook)));
         let session = std::mem::ManuallyDrop::new(self);
         // Safety: the mapping outlives the process, because `ManuallyDrop` keeps `Drop` from
         // unmapping it.
-        unsafe { &*header_ptr(session.base) }
+        (unsafe { &*header_ptr(session.base) }, hook)
     }
+}
+
+/// The arena inside a mapping, and how long it is: the pair a hook is handed.
+///
+/// A session with no arena, and one whose mapping is shorter than the arena its header names, both
+/// answer null and zero, which the ABI defines as no arena at all. Never a pointer without its
+/// length, and never a length without its pointer.
+fn arena_in(base: NonNull<u8>, len: usize, header: &Header) -> (Option<NonNull<c_void>>, u64) {
+    let whole = usize::try_from(header.arena_offset)
+        .ok()
+        .zip(usize::try_from(header.arena_size).ok())
+        .filter(|&(_, size)| size > 0)
+        .filter(|&(offset, size)| offset.checked_add(size).is_some_and(|end| end <= len));
+    let Some((offset, _)) = whole else {
+        return (None, 0);
+    };
+    // Safety: the arena lies inside a mapping of `len` bytes, which the filters above checked.
+    let arena = unsafe { base.add(offset) };
+    (Some(arena.cast()), header.arena_size)
 }
 
 impl Drop for Session {
@@ -611,15 +674,10 @@ pub fn create_named(
         Keeper::Affine => setup.plan(&platform::genuine_nanos)?,
         Keeper::Null => genuine_plan(&platform::genuine_nanos),
     };
+    let mut build = Build::new(setup, fault)?;
 
-    let pid = std::process::id();
     let (path, tmp) = naming::session_paths(&setup.dir, name);
-    // The lock file carries no data, so it is made here and never touched again: writers take the
-    // lock on it and readers probe it, whichever generation of the state the session file holds.
-    sync::install(&naming::lock_path(&path))?;
-
-    let page = page_size();
-    let len = layout::file_size(page, 0);
+    let len = build.len;
 
     let c_tmp = cstring(&tmp)?;
     // Safety: `c_tmp` is a live NUL-terminated path.
@@ -656,7 +714,33 @@ pub fn create_named(
     drop(guard);
 
     // Safety: nothing else can reach this file: it is under a private name and not yet linked.
-    unsafe { initialize(header_ptr(base), setup, &plan, fault, pid, page, len) };
+    unsafe { initialize(header_ptr(base), setup, &plan, &build) };
+
+    // Safety: the mapping is a header long and holds the header just written.
+    let header = unsafe { &*header_ptr(base) };
+    // The hook's `init` fills the arena here, while the file is still under its private name, so it
+    // has run before any other process can see the arena.
+    let (arena, arena_size) = arena_in(base, len, header);
+    let opened = build
+        .hook
+        .take()
+        .map(|hook| hook.open_arena(arena, arena_size, Init::Run))
+        .transpose();
+    let hook = match opened {
+        Ok(hook) => hook,
+        Err(why) => {
+            // Safety: the mapping is ours and unaliased.
+            unsafe { libc::munmap(base.as_ptr().cast(), len) };
+            // Safety: `c_tmp` names the temporary file we created.
+            unsafe { libc::unlink(c_tmp.as_ptr()) };
+            return Err(BadValue::new(ENV_HOOK, Reason::Hook(why)).into());
+        }
+    };
+
+    // The lock file carries no data, so it is made here and never touched again: writers take the
+    // lock on it and readers probe it, whichever generation of the state the session file holds. It
+    // comes last of the two files, so a creator that gives up leaves neither behind.
+    sync::install(&naming::lock_path(&path))?;
 
     let c_path = cstring(&path)?;
     // Safety: `c_tmp` and `c_path` are live NUL-terminated paths.
@@ -674,7 +758,64 @@ pub fn create_named(
     // Safety: `c_tmp` names the link we just duplicated.
     unsafe { libc::unlink(c_tmp.as_ptr()) };
 
-    Ok(Session { base, len, path })
+    Ok(Session {
+        base,
+        len,
+        path,
+        hook,
+    })
+}
+
+/// What a creator settles before it touches the disk: the file's shape, the hook path to record,
+/// and who to blame for a fault.
+///
+/// Everything here can fail, and all of it fails before the first byte is written.
+#[derive(Debug)]
+struct Build {
+    page: usize,
+    len: usize,
+    arena: usize,
+    hook_path: PathBuf,
+    hook: Option<Hook>,
+    pid: u32,
+    fault: Option<Fault>,
+}
+
+impl Build {
+    /// Settles the shape and loads the hook library, before the first byte is written, so a hook the
+    /// loader refuses leaves the session directory as clean as any other bad value does.
+    ///
+    /// # Errors
+    /// The [`BadValue`] naming what the hook could not do: a library that will not load, a path too
+    /// long to record, or an arena larger than a session file holds.
+    fn new(setup: &Setup, fault: Option<Fault>) -> Result<Self, BadValue> {
+        let page = page_size();
+        let bad = |why| BadValue::new(ENV_HOOK, Reason::Hook(why));
+        let hook_path = setup
+            .hook
+            .as_ref()
+            .map(Spec::recorded_path)
+            .unwrap_or_default();
+        if hook_path.as_os_str().len() >= layout::HOOK_PATH_MAX {
+            return Err(bad(hook::HookError::PathTooLong));
+        }
+        let (arena, hook) = match &setup.hook {
+            Some(spec) => (
+                spec.arena_bytes(page).map_err(bad)?,
+                Some(hook::load(&hook_path).map_err(bad)?),
+            ),
+            None => (0, None),
+        };
+        Ok(Self {
+            page,
+            len: layout::file_size(page, arena),
+            arena,
+            hook_path,
+            hook,
+            pid: std::process::id(),
+            fault,
+        })
+    }
 }
 
 struct FdGuard(libc::c_int);
@@ -692,15 +833,7 @@ impl Drop for FdGuard {
 /// # Safety
 /// `header` must point at a zeroed mapping of at least `size_of::<Header>()` bytes that no other
 /// process can reach.
-unsafe fn initialize(
-    header: *mut Header,
-    setup: &Setup,
-    plan: &Plan,
-    fault: Option<Fault>,
-    pid: u32,
-    page: usize,
-    len: usize,
-) {
+unsafe fn initialize(header: *mut Header, setup: &Setup, plan: &Plan, build: &Build) {
     // Safety: the caller guarantees a zeroed, header-sized mapping nobody else can reach.
     let header = unsafe { &mut *header };
     header.magic = layout::MAGIC;
@@ -709,11 +842,18 @@ unsafe fn initialize(
     header.keeper = setup.keeper as u32;
     header.emulate_vdso = u32::from(setup.emulate_vdso);
     header.fail_closed = u32::from(setup.fail_closed);
-    header.file_size = u32::try_from(len).unwrap_or(u32::MAX);
-    header.page_size = u32::try_from(page).unwrap_or(u32::MAX);
-    header.arena_offset = 0;
-    header.arena_size = 0;
-    header.creator_pid = pid;
+    header.file_size = u32::try_from(build.len).unwrap_or(u32::MAX);
+    header.page_size = u32::try_from(build.page).unwrap_or(u32::MAX);
+    // The arena sits after the library's own structures, page-aligned, and is absent when the hook
+    // asked for none: offset and size are zero together.
+    header.arena_offset = if build.arena == 0 {
+        0
+    } else {
+        layout::arena_offset(build.page) as u64
+    };
+    header.arena_size = build.arena as u64;
+    write_hook_path(header, &build.hook_path);
+    header.creator_pid = build.pid;
     header.creation_time = plan.creation_time.0;
     // A negative interval is not a thing; it lands as zero rather than as an enormous one.
     header.timekeep_interval = u64::try_from(setup.timekeep_interval.0).unwrap_or(0);
@@ -733,11 +873,20 @@ unsafe fn initialize(
     params.epoch.store(0, Ordering::Relaxed);
     copy_params(&header.live, &header.shadow);
 
-    if let Some(fault) = fault {
+    if let Some(fault) = build.fault {
         header.record_fault(fault);
     }
 
     header.ready.store(1, Ordering::Release);
+}
+
+/// Records the hook library every process of the session loads, NUL-terminated, or leaves the field
+/// empty when the session has no hook. `Build` has already refused a path too long to fit.
+fn write_hook_path(header: &mut Header, path: &Path) {
+    let bytes = path.as_os_str().as_bytes();
+    if let Some(field) = header.hook_path.get_mut(..bytes.len()) {
+        field.copy_from_slice(bytes);
+    }
 }
 
 fn copy_params(from: &layout::Params, to: &layout::Params) {
@@ -804,6 +953,7 @@ pub fn attach(path: &Path) -> Result<Session, SessionError> {
         base,
         len,
         path: path.to_path_buf(),
+        hook: None,
     };
     if let Err(why) = session.header().validate(len, platform::PLATFORM_TAG) {
         return Err(SessionError::BadSessionFile(why));

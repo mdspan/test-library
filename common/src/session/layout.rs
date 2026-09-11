@@ -6,6 +6,7 @@
 
 use std::sync::atomic::{AtomicI32, AtomicI64, AtomicU32, AtomicU64, Ordering};
 
+use crate::platform::clock_id;
 use crate::time::{Line, Nanos, Rate};
 
 /// The first eight bytes of every session file.
@@ -20,13 +21,6 @@ pub const HOOK_PATH_MAX: usize = 4096;
 /// Apple silicon pairs 128-byte lines, and x86 prefetches in pairs of 64, so 128 is the width that
 /// keeps the seqlock words and each copy of the parameters off each other's line everywhere.
 pub const CACHE_LINE: usize = 128;
-
-/// The header spells a clock id as a signed 32-bit word, but `clockid_t` is signed on Linux and
-/// FreeBSD and unsigned on macOS, so both directions of the conversion go through `TryFrom`. Every
-/// id stored comes from the platform's own table, which makes the fallback unreachable.
-fn clock_id<U, T: TryFrom<U> + Default>(value: U) -> T {
-    T::try_from(value).unwrap_or_default()
-}
 
 /// Which timekeeper computes the families' values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

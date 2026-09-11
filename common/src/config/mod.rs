@@ -22,6 +22,10 @@ pub const ENV_XDG_RUNTIME_DIR: &str = "XDG_RUNTIME_DIR";
 /// underneath. Read at creation and recorded in the header, like every choice a session makes.
 pub const ENV_KEEPER: &str = "LIBTIMEWARP_KEEPER";
 
+/// Names a hook library and the size of its arena: `path/to/lib.so@arena_size`. Read at creation
+/// and recorded in the header, so an attacher loads the same library without the variable.
+pub const ENV_HOOK: &str = "LIBTIMEWARP_HOOK";
+
 /// How far the Realtime family is moved from the genuine clock, as a duration. A bare shift moves
 /// Realtime alone: applying it to the monotonic clocks would drive them negative most of the time.
 pub const ENV_SHIFT: &str = "LIBTIMEWARP_SHIFT";
@@ -191,6 +195,8 @@ pub enum Reason {
     BelowZero,
     /// A timekeeper this library does not have.
     UnknownKeeper,
+    /// A hook library the library could not put in front of the keeper.
+    Hook(crate::hook::HookError),
 }
 
 impl std::fmt::Display for Reason {
@@ -206,6 +212,7 @@ impl std::fmt::Display for Reason {
             Self::OutOfRange => f.write_str("outside the range an instant can hold"),
             Self::BelowZero => f.write_str("would put a nondecreasing family below zero"),
             Self::UnknownKeeper => f.write_str("not a timekeeper this library has"),
+            Self::Hook(why) => write!(f, "{why}"),
         }
     }
 }

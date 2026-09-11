@@ -15,37 +15,13 @@ mod harness;
 use std::path::{Path, PathBuf};
 
 use common::session::layout::{Fault, FaultCode, Keeper};
-use common::session::{self, Session};
-use harness::{HOUR, Run};
+use harness::{HOUR, Run, log_of, only_session, session_files};
 
 /// One of the values the library refuses, and the shortest of them to write.
 const A_BAD_VALUE: (&str, &str) = ("LIBTIMEWARP_RATE", "-1");
 
 /// The `EX_CONFIG` of `sysexits.h`, which is what a process that fails closed leaves behind.
 const EX_CONFIG: i32 = 78;
-
-fn session_files(dir: &Path) -> Vec<PathBuf> {
-    let Ok(entries) = std::fs::read_dir(dir.join("libtimewarp")) else {
-        return Vec::new();
-    };
-    entries
-        .map(|entry| entry.unwrap().path())
-        .filter(|path| path.file_name().is_some_and(harness::is_session_file))
-        .collect()
-}
-
-/// The one session a run left behind, mapped the way a controller would map it.
-fn only_session(dir: &Path) -> Session {
-    let files = session_files(dir);
-    let [path] = files.as_slice() else {
-        panic!("wanted the one session file a run leaves behind, found {files:?}");
-    };
-    session::attach(path).unwrap()
-}
-
-fn log_of(path: &Path) -> String {
-    std::fs::read_to_string(path).unwrap_or_default()
-}
 
 #[test]
 fn the_null_keeper_leaves_every_clock_genuine() {

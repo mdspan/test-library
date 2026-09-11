@@ -44,6 +44,16 @@ pub const ARCH_TAG: u32 = if cfg!(target_arch = "x86_64") {
 /// architecture wrote them.
 pub const PLATFORM_TAG: u32 = (OS_TAG << 16) | ARCH_TAG;
 
+/// Converts a clock id between the platform's own `clockid_t` and the signed 32-bit word the
+/// session header and the hook ABI spell one with.
+///
+/// `clockid_t` is signed on Linux and FreeBSD and unsigned on macOS, so both directions go through
+/// `TryFrom`. Every id converted comes from a platform table or from the program's own call, which
+/// makes the fallback unreachable.
+pub fn clock_id<U, T: TryFrom<U> + Default>(value: U) -> T {
+    T::try_from(value).unwrap_or_default()
+}
+
 /// The first clock in the family's column of the family table.
 ///
 /// A family's zero always comes from it, and with no override it is the timebase too. Cpu has

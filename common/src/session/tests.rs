@@ -4,7 +4,7 @@ use std::sync::atomic::Ordering;
 
 use super::*;
 use crate::config::{
-    ENV_BOOTTIME_SHIFT, ENV_CPU_RATE, ENV_EMULATE_VDSO, ENV_FAIL_CLOSED, ENV_KEEPER,
+    ENV_BOOTTIME_SHIFT, ENV_CPU_RATE, ENV_EMULATE_VDSO, ENV_FAIL_CLOSED, ENV_HOOK, ENV_KEEPER,
     ENV_MONOTONIC_SHIFT, ENV_MONOTONIC_TIMEBASE, ENV_RATE, ENV_REALTIME_RATE,
     ENV_REALTIME_TIMEBASE, ENV_SHIFT, ENV_TIME, ENV_TIMEKEEP_INTERVAL,
 };
@@ -910,4 +910,72 @@ fn the_keeper_computation_survives_garbage_parameters() {
             }
         }
     }
+}
+
+#[test]
+fn a_hook_is_read_whichever_keeper_the_session_runs() {
+    let library = "/nonexistent/lib.so";
+    for keeper in [Keeper::Affine, Keeper::Null] {
+        let setup = setup_from(&[
+            (ENV_KEEPER, keeper.as_str()),
+            (ENV_HOOK, "/nonexistent/lib.so@4096"),
+        ])
+        .unwrap();
+        let hook = setup.hook.expect("the hook is read on either keeper");
+        assert_eq!(hook.path, PathBuf::from(library));
+        assert_eq!(hook.arena_size, 4096);
+    }
+    // And an empty value is unset, like every other variable.
+    assert!(setup_from(&[(ENV_HOOK, "")]).unwrap().hook.is_none());
+    assert!(setup_from(&[]).unwrap().hook.is_none());
+}
+
+#[test]
+fn a_session_with_no_hook_records_neither_a_path_nor_an_arena() {
+    let tmp = tempfile::tempdir().unwrap();
+    let session = create(&setup_in(tmp.path())).unwrap();
+    let header = session.header();
+
+    assert_eq!(header.hook_path(), b"");
+    assert_eq!((header.arena_offset, header.arena_size), (0, 0));
+    assert!(session.hook().is_none());
+    // Nothing to load, so joining the session is no work at all.
+    let mut joined = attach(session.path()).unwrap();
+    assert_eq!(joined.load_hook(), Ok(()));
+    assert!(joined.hook().is_none());
+}
+
+#[test]
+fn a_hook_the_loader_refuses_leaves_the_directory_clean() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut setup = setup_in(tmp.path());
+    setup.hook = Spec::parse(OsStr::new("/nonexistent/lib.so@4096"));
+
+    let err = create(&setup).unwrap_err();
+    match err {
+        SessionError::BadValue(bad) => assert_eq!(
+            bad,
+            BadValue::new(ENV_HOOK, Reason::Hook(hook::HookError::Unloadable))
+        ),
+        other => panic!("{other:?}"),
+    }
+    // Not the session file, and not the lock file either: nothing for the user to clean up.
+    assert_eq!(fs::read_dir(&setup.dir).unwrap().count(), 0);
+}
+
+#[test]
+fn an_arena_no_session_file_could_carry_is_refused_before_anything_is_written() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut setup = setup_in(tmp.path());
+    setup.hook = Spec::parse(OsStr::new("/nonexistent/lib.so@4294967296"));
+
+    let err = create(&setup).unwrap_err();
+    match err {
+        SessionError::BadValue(bad) => assert_eq!(
+            bad,
+            BadValue::new(ENV_HOOK, Reason::Hook(hook::HookError::Oversized))
+        ),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(fs::read_dir(&setup.dir).unwrap().count(), 0);
 }
