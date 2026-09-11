@@ -28,5 +28,6 @@ vdso = []
 
 [dev-dependencies]
 common = { path = "../common" }
+controller = { path = "../controller" }
 libc = { workspace = true }
 tempfile = "3.24.0"

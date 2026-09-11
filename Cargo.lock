@@ -8,6 +8,7 @@ version = "0.1.0"
 dependencies = [
  "cfg-if",
  "common",
+ "controller",
  "ctor",
  "libc",
  "tempfile",
@@ -30,6 +31,15 @@ name = "common"
 version = "0.1.0"
 dependencies = [
  "cfg-if",
+ "libc",
+ "tempfile",
+]
+
+[[package]]
+name = "controller"
+version = "0.1.0"
+dependencies = [
+ "common",
  "libc",
  "tempfile",
 ]
