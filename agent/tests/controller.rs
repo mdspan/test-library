@@ -66,6 +66,9 @@ fn a_program_reading_its_clocks_follows_every_transaction_and_never_steps_back()
         .env("PATH", "/usr/bin:/bin")
         .env("LD_PRELOAD", harness::library())
         .env("LIBTIMEWARP_SESSION_DIR", dir.path())
+        // The transactions below take the wall clock away from the elapsed families, which is a
+        // pair the timekeep page could not carry.
+        .envs(harness::separate_family_rates().iter().copied())
         .stdout(Stdio::piped())
         .spawn()
         .unwrap();
@@ -176,7 +179,13 @@ mod verdict {
 fn a_three_family_transaction_is_observed_whole() {
     let _one = one_at_a_time();
     let dir = tempfile::tempdir().unwrap();
-    let session = session::create(&Setup::plain(dir.path().join("libtimewarp"))).unwrap();
+    // Every family takes a rate of its own here, which is a set the timekeep page could not
+    // carry, so this session keeps none.
+    let session = session::create(&Setup {
+        emulate_vdso: false,
+        ..Setup::plain(dir.path().join("libtimewarp"))
+    })
+    .unwrap();
     let header = session.header();
     let controller = Controller::attach(session.path()).unwrap();
 

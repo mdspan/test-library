@@ -601,3 +601,62 @@ fn wait_to_be_killed() -> ! {
         unsafe { libc::pause() };
     }
 }
+
+/// The timekeep page carries one rate for the wall clock and the elapsed clock it serves, so a
+/// commit that would separate them is refused. FreeBSD is the platform that keeps such a page.
+#[cfg(target_os = "freebsd")]
+#[test]
+fn a_commit_that_would_separate_the_two_clocks_the_page_serves_is_refused() {
+    let _one = one_at_a_time();
+    let fixture = fixture::fixture_with(Keeper::Affine, true);
+    let before = fixture.live();
+    let elapsed = common::session::page_elapsed_family().unwrap();
+
+    let mut transaction = fixture.controller.begin().unwrap();
+    transaction.set_rate(Family::Realtime, 4.0).unwrap();
+    assert!(matches!(transaction.commit(), Err(Error::BadArgument(_))));
+    assert_eq!(
+        fixture.live(),
+        before,
+        "a refused commit published a change"
+    );
+
+    // Both in one transaction is how a session with the page on asks for a faster clock, and that
+    // is what passes.
+    let mut transaction = fixture.controller.begin().unwrap();
+    transaction.set_rate(Family::Realtime, 4.0).unwrap();
+    transaction.set_rate(elapsed, 4.0).unwrap();
+    transaction.commit().unwrap();
+    let fast = Rate::from_f64(4.0).unwrap();
+    assert_eq!(fixture.live().realtime.line.rate, fast);
+}
+
+#[test]
+fn a_move_of_the_value_bumps_the_epoch_and_a_change_of_speed_leaves_it() {
+    let _one = one_at_a_time();
+    let fixture = fixture();
+    let started = fixture.live().epoch;
+
+    // A rate change leaves the line where it is, so the page's republisher has continuity to
+    // enforce rather than a step to follow.
+    let mut transaction = fixture.controller.begin().unwrap();
+    transaction.set_rate(Family::Realtime, 2.0).unwrap();
+    transaction.set_rate(Family::Monotonic, 2.0).unwrap();
+    transaction.set_rate(Family::Boottime, 2.0).unwrap();
+    transaction.commit().unwrap();
+    assert_eq!(fixture.live().epoch, started, "a rate change bumped it");
+
+    // A move of the value is the user's own discontinuity, and the epoch is what says so.
+    let mut transaction = fixture.controller.begin().unwrap();
+    transaction.shift(Family::Realtime, Nanos(HOUR)).unwrap();
+    transaction.commit().unwrap();
+    let shifted = fixture.live().epoch;
+    assert_ne!(shifted, started, "a shift left the epoch alone");
+
+    let mut transaction = fixture.controller.begin().unwrap();
+    transaction
+        .set_time(Family::Realtime, Nanos(SECOND))
+        .unwrap();
+    transaction.commit().unwrap();
+    assert_ne!(fixture.live().epoch, shifted, "a set_time left it alone");
+}

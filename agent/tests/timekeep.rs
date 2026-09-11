@@ -32,7 +32,7 @@ use std::time::Duration;
 use common::platform::{clock, genuine_nanos};
 use common::session::naming;
 use common::time::{Family, Nanos};
-use controller::Controller;
+use controller::{Controller, Transaction};
 
 use harness::{HOUR, Report, Run};
 
@@ -452,4 +452,153 @@ fn wait_for_session(dir: &Path) -> PathBuf {
 
 fn now() -> Nanos {
     genuine_nanos(clock::MONOTONIC).unwrap_or(Nanos::ZERO)
+}
+
+/// How far apart two readings taken microseconds apart may be before the pair is not one line.
+const REJOINED_NS: i64 = 5 * 1_000_000;
+
+/// How long a case leaves a rate in place before changing it again: long enough for the widest
+/// lead either interval below leaves to drain away.
+const BETWEEN_CHANGES: Duration = Duration::from_millis(700);
+
+/// And how long it watches the drain after the last change.
+const UNTIL_THEY_REJOIN: Duration = Duration::from_millis(1_500);
+
+/// The rate a session starts at here, dropped to one and raised back by the changes below.
+const SHARP: f64 = 4.0;
+
+#[test]
+fn a_sharp_rate_drop_leaves_a_go_reader_and_a_libc_reader_monotonic_and_converging() {
+    let Some(program) = harness::go_program("go_continuity") else {
+        return;
+    };
+    // The lag between a change landing in the seqlock and the page carrying it is a republish
+    // interval, so what a change leaves for the drain to give back is proportional to it.
+    let Some(quick) = rate_changes_under(&program, "1ms") else {
+        return;
+    };
+    let Some(slow) = rate_changes_under(&program, "20ms") else {
+        return;
+    };
+
+    for (interval, pairs) in [("1ms", &quick), ("20ms", &slow)] {
+        assert!(
+            pairs.len() > 100,
+            "only {} readings at {interval}",
+            pairs.len()
+        );
+        // Neither reader ever ran backwards, however far the two were apart.
+        for pair in pairs.windows(2) {
+            let [before, after] = [pair[0], pair[1]];
+            assert!(
+                after[0] >= before[0],
+                "the Go reader stepped back from {} to {} at {interval}",
+                before[0],
+                after[0],
+            );
+            assert!(
+                after[1] >= before[1],
+                "the libc reader stepped back from {} to {} at {interval}",
+                before[1],
+                after[1],
+            );
+        }
+        // And the two rejoined: the lead came back forward while the readers kept running.
+        let last = pairs[pairs.len() - 1];
+        assert!(
+            (last[0] - last[1]).abs() < REJOINED_NS,
+            "the two readers are still {} ns apart at {interval}",
+            last[0] - last[1],
+        );
+    }
+
+    // What remains is the coherence gap, and it is the interval that sets it: what a change
+    // leaves behind is the lag times the rate change, and the lag is a republish interval.
+    let widest = |pairs: &[[i64; 2]]| pairs.iter().map(|p| (p[0] - p[1]).abs()).max().unwrap_or(0);
+    let (narrow, wide) = (widest(&quick), widest(&slow));
+    assert!(narrow > 0, "the two readers never disagreed at all");
+    // Twenty-fold in the interval, and a factor of two asked of the gap: a machine that runs the
+    // heartbeat late lengthens the lag of both runs by the same amount, and the comparison is
+    // loose enough to survive that.
+    assert!(
+        wide > 2 * narrow,
+        "a twenty-fold interval left a gap of {wide} ns against {narrow} ns",
+    );
+}
+
+/// Runs the Go program under a session at [`SHARP`] times speed and changes the rate under it,
+/// with nothing but the heartbeat to carry each change, answering the pairs of readings it printed.
+///
+/// The transaction is opened over the session with no page, which is the writer the design's widest
+/// window belongs to: one that publishes and dies before its own republish. From there the page is
+/// the updater's to bring back, at the interval this session was created with.
+///
+/// `None` when the Go runtime is not reading our page at all, which is a machine whose kernel page
+/// names a counter this build cannot take.
+fn rate_changes_under(program: &Path, interval: &str) -> Option<Vec<[i64; 2]>> {
+    let dir = tempfile::tempdir().unwrap();
+    // More readings than the case has time for, because the case is what stops the program: two
+    // hundred microseconds of faketime between them, which is what keeps the drain of a lead
+    // covered by a hundred readings or more.
+    let mut child = Command::new(program)
+        .arg("1000000")
+        .arg("200")
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("LD_PRELOAD", harness::library())
+        .env("LIBTIMEWARP_SESSION_DIR", dir.path())
+        .env("LIBTIMEWARP_SHIFT", "-2h")
+        .env("LIBTIMEWARP_RATE", SHARP.to_string())
+        .env("LIBTIMEWARP_TIMEKEEP_INTERVAL", interval)
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // Drained as it is printed, so the program keeps reading the clock instead of blocking on a
+    // full pipe while the changes below land.
+    let mut printing = child.stdout.take().unwrap();
+    let drained = std::thread::spawn(move || {
+        let mut text = String::new();
+        printing.read_to_string(&mut text).unwrap();
+        text
+    });
+
+    let session = common::session::attach(&wait_for_session(dir.path())).unwrap();
+    let elapsed = common::session::page_elapsed_family().unwrap();
+    std::thread::sleep(BETWEEN_CHANGES);
+    // A drop, a rise, and a drop: the drop leaves the page ahead of the session and the rise leaves
+    // it behind, which are the two sides of the rule.
+    for rate in [1.0, SHARP, 1.0] {
+        let mut transaction =
+            Transaction::begin(session.header(), None, &naming::lock_path(session.path())).unwrap();
+        transaction.set_rate(Family::Realtime, rate).unwrap();
+        transaction.set_rate(elapsed, rate).unwrap();
+        transaction.commit().unwrap();
+        std::thread::sleep(BETWEEN_CHANGES);
+    }
+    std::thread::sleep(UNTIL_THEY_REJOIN);
+
+    drop(child.kill());
+    drop(child.wait());
+    let printed = drained.join().unwrap();
+    let pairs = readings(&printed);
+
+    let Some(&first) = pairs.first() else {
+        panic!("the Go program printed no readings at all");
+    };
+    // The runtime is reading our page when the two readers start out on one line; a runtime
+    // reading the kernel's own page would be two hours away from the libc reader.
+    ((first[0] - first[1]).abs() < SECOND).then_some(pairs)
+}
+
+/// The pairs of readings the Go program printed: what the runtime computed from the page, and what
+/// libc answered beside it.
+fn readings(printed: &str) -> Vec<[i64; 2]> {
+    printed
+        .lines()
+        .filter_map(|line| line.strip_prefix("pair="))
+        .filter_map(|values| {
+            let mut numbers = values.split_whitespace().map(str::parse::<i64>);
+            Some([numbers.next()?.ok()?, numbers.next()?.ok()?])
+        })
+        .collect()
 }

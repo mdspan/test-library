@@ -206,6 +206,9 @@ pub enum Reason {
     /// Something that cannot run while the timekeep page is on, which is the hook: the page
     /// carries numbers and a hook answers with a function.
     NeedsPageOff,
+    /// A rate that would leave the two clocks the timekeep page serves running at different
+    /// speeds, which its one scale cannot carry.
+    PageSharesARate,
     /// A hook library the library could not put in front of the keeper.
     Hook(crate::hook::HookError),
 }
@@ -226,6 +229,11 @@ impl std::fmt::Display for Reason {
             Self::NeedsPageOff => write!(
                 f,
                 "cannot be used while the timekeep page is on; set {ENV_EMULATE_VDSO}=0"
+            ),
+            Self::PageSharesARate => write!(
+                f,
+                "differs from the wall clock's rate, which the timekeep page cannot carry \
+                 alongside it; set {ENV_EMULATE_VDSO}=0"
             ),
             Self::Hook(why) => write!(f, "{why}"),
         }

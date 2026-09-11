@@ -4,8 +4,6 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Rate(pub u64);
 
-const FRACTION_BITS: u32 = 32;
-
 /// Unity as a float. A power of two, so the scaling below is exact and precision is only ever lost
 /// in the mantissa of the caller's own value.
 const SCALE: f64 = 4_294_967_296.0;
@@ -14,8 +12,11 @@ const SCALE: f64 = 4_294_967_296.0;
 const CEILING: f64 = SCALE * SCALE;
 
 impl Rate {
+    /// How many bits of a rate are the fraction. Unity is one shifted this far left.
+    pub const FRACTION_BITS: u32 = 32;
+
     /// One fake nanosecond per genuine nanosecond.
-    pub const UNITY: Self = Self(1 << FRACTION_BITS);
+    pub const UNITY: Self = Self(1 << Self::FRACTION_BITS);
 
     /// A stopped clock.
     pub const FROZEN: Self = Self(0);
@@ -57,7 +58,8 @@ impl Rate {
     /// Scales a duration. Saturating, so an extreme rate gives a wrong clock that stays ordered.
     #[must_use]
     pub fn scale(self, nanos: i64) -> i64 {
-        let magnitude = (u128::from(nanos.unsigned_abs()) * u128::from(self.0)) >> FRACTION_BITS;
+        let magnitude =
+            (u128::from(nanos.unsigned_abs()) * u128::from(self.0)) >> Self::FRACTION_BITS;
         let clamped = i64::try_from(magnitude).unwrap_or(i64::MAX);
         if nanos < 0 { -clamped } else { clamped }
     }
@@ -72,7 +74,8 @@ impl Rate {
         if self.0 == 0 {
             return if nanos < 0 { i64::MIN } else { i64::MAX };
         }
-        let magnitude = (u128::from(nanos.unsigned_abs()) << FRACTION_BITS) / u128::from(self.0);
+        let magnitude =
+            (u128::from(nanos.unsigned_abs()) << Self::FRACTION_BITS) / u128::from(self.0);
         let clamped = i64::try_from(magnitude).unwrap_or(i64::MAX);
         if nanos < 0 { -clamped } else { clamped }
     }

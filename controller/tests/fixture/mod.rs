@@ -44,9 +44,18 @@ pub(crate) struct Fixture {
 }
 
 pub(crate) fn fixture_on(keeper: Keeper) -> Fixture {
+    // With the timekeep page on, the wall clock and the elapsed clock it serves share a rate, and
+    // most of the cases here give the families rates of their own. The page is not what they are
+    // about, so it is off, which is what the design says a session wanting that pair must do.
+    fixture_with(keeper, false)
+}
+
+/// The same, saying whether the session keeps a timekeep page live.
+pub(crate) fn fixture_with(keeper: Keeper, emulate_vdso: bool) -> Fixture {
     let dir = tempfile::tempdir().unwrap();
     let session = session::create(&Setup {
         keeper,
+        emulate_vdso,
         ..Setup::plain(dir.path().join("libtimewarp"))
     })
     .unwrap();

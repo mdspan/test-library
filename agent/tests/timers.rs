@@ -355,8 +355,9 @@ fn fired_after(child: &mut Child, printing: &mut BufReader<std::process::ChildSt
 #[test]
 fn a_rate_change_landing_after_the_arm_does_not_reach_the_timer() {
     let dir = tempfile::tempdir().unwrap();
-    // One genuine second, at the rate the arm converted with.
-    let (mut child, mut printing, _) = arming(dir.path(), 1_000, &[]);
+    // One genuine second, at the rate the arm converted with. The rate below lands on the two
+    // elapsed families alone, which is a pair the timekeep page could not carry.
+    let (mut child, mut printing, _) = arming(dir.path(), 1_000, harness::separate_family_rates());
     let controller = attach_to_session(dir.path());
 
     let mut transaction = controller.begin().unwrap();

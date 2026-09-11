@@ -6,7 +6,7 @@ use super::*;
 use crate::config::{
     ENV_BOOTTIME_SHIFT, ENV_CPU_RATE, ENV_EMULATE_VDSO, ENV_FAIL_CLOSED, ENV_HOOK, ENV_KEEPER,
     ENV_MONOTONIC_SHIFT, ENV_MONOTONIC_TIMEBASE, ENV_RATE, ENV_REALTIME_RATE,
-    ENV_REALTIME_TIMEBASE, ENV_SHIFT, ENV_TIME, ENV_TIMEKEEP_INTERVAL,
+    ENV_REALTIME_TIMEBASE, ENV_SHIFT, ENV_TIME, ENV_TIMEKEEP_INTERVAL, family_vars,
 };
 use layout::{Fault, FaultCode};
 
@@ -1295,4 +1295,43 @@ fn an_arena_no_session_file_could_carry_is_refused_before_anything_is_written() 
         other => panic!("{other:?}"),
     }
     assert_eq!(fs::read_dir(&setup.dir).unwrap().count(), 0);
+}
+
+#[test]
+fn the_two_clocks_the_timekeep_page_serves_have_to_share_a_rate() {
+    // One scale serves both, so a session with the page live cannot give them rates of their own.
+    let fast = Rate::from_f64(2.0).unwrap();
+    assert!(page_rates_differ(true, true, Rate::UNITY, fast));
+    assert!(!page_rates_differ(true, true, fast, fast));
+    // A session that turned the page off, and a build that carries none, take any pair.
+    assert!(!page_rates_differ(true, false, Rate::UNITY, fast));
+    assert!(!page_rates_differ(false, true, Rate::UNITY, fast));
+}
+
+#[test]
+fn rates_the_page_could_not_carry_are_a_bad_value_where_it_is_live() {
+    let elapsed = page_elapsed_family().expect("CLOCK_MONOTONIC belongs to a family");
+    let separated = [(ENV_REALTIME_RATE, "2"), (family_vars(elapsed).rate, "3")];
+    let together = [(ENV_REALTIME_RATE, "2"), (family_vars(elapsed).rate, "2")];
+
+    // The rule binds where the page is live: this platform reads the clock from one, this build
+    // can write one, and the session left it on.
+    if platform::HAS_TIMEKEEP_PAGE && cfg!(feature = "vdso") {
+        assert_eq!(
+            setup_from(&separated).unwrap_err().reason,
+            Reason::PageSharesARate,
+        );
+        // And turning the page off is what the message tells the user to do.
+        let off = [
+            (ENV_REALTIME_RATE, "2"),
+            (family_vars(elapsed).rate, "3"),
+            (ENV_EMULATE_VDSO, "0"),
+        ];
+        assert!(setup_from(&off).is_ok());
+    } else {
+        assert!(setup_from(&separated).is_ok());
+    }
+    // A bare rate covers both, so the usual way of asking for a fast clock is never refused.
+    assert!(setup_from(&together).is_ok());
+    assert!(setup_from(&[(ENV_RATE, "10")]).is_ok());
 }

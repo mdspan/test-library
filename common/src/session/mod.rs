@@ -22,7 +22,7 @@ use crate::sync;
 use crate::time::{Family, Line, Nanos, Rate};
 
 use layout::{BadHeader, Fault, Header, Keeper};
-use timekeep::Timekeep;
+use timekeep::Page;
 
 /// What the environment asked one family to do. Cpu has no line, so it has none of this: its rate
 /// is [`Setup::cpu_rate`].
@@ -234,14 +234,44 @@ impl Setup {
             return Err(BadValue::new(ENV_TIME, Reason::SaidTwice(shift)));
         }
 
-        Ok(Self {
+        let session = Self {
             realtime: FamilySetup::from_env(env, Family::Realtime, bare_shift, bare_rate)?,
             monotonic: FamilySetup::from_env(env, Family::Monotonic, None, bare_rate)?,
             boottime: FamilySetup::from_env(env, Family::Boottime, None, bare_rate)?,
             cpu_rate: rate_var(env, ENV_CPU_RATE)?.unwrap_or(Rate::UNITY),
             realtime_at,
             ..session
-        })
+        };
+
+        // The page carries one scale for the wall clock and the elapsed clock it serves, so the
+        // two families cannot be given rates of their own while it is live.
+        if let Some(family) = page_elapsed_family()
+            && let Some(elapsed) = session.family(family)
+            && page_rates_differ(
+                platform::HAS_TIMEKEEP_PAGE && cfg!(feature = "vdso"),
+                session.emulate_vdso,
+                session.realtime.rate,
+                elapsed.rate,
+            )
+        {
+            return Err(BadValue::new(
+                config::family_vars(family).rate,
+                Reason::PageSharesARate,
+            ));
+        }
+        Ok(session)
+    }
+
+    /// One family's settings, or `None` for Cpu, which carries no line and keeps its one setting
+    /// in [`Setup::cpu_rate`].
+    #[must_use]
+    pub const fn family(&self, family: Family) -> Option<&FamilySetup> {
+        match family {
+            Family::Realtime => Some(&self.realtime),
+            Family::Monotonic => Some(&self.monotonic),
+            Family::Boottime => Some(&self.boottime),
+            Family::Cpu => None,
+        }
     }
 
     /// Turns what the environment asked for into the parameters the session starts with.
@@ -277,6 +307,40 @@ impl Setup {
             creation_time: realtime_zero,
         })
     }
+}
+
+/// The family the timekeep page's elapsed clock belongs to: the one `CLOCK_MONOTONIC` names,
+/// which is Monotonic through FreeBSD 14.x and Boottime from 15.0.
+///
+/// `None` where that clock belongs to no family, which is a platform that fakes it some other way.
+#[must_use]
+#[cfg_attr(
+    not(target_os = "freebsd"),
+    expect(
+        clippy::missing_const_for_fn,
+        reason = "the FreeBSD arm of `family_of` asks the running kernel which column of the \
+                  family table applies, so this is a call there and not a constant"
+    )
+)]
+pub fn page_elapsed_family() -> Option<Family> {
+    clock::family_of(clock::MONOTONIC)
+}
+
+/// Whether a session would leave the two clocks the timekeep page serves running at different
+/// speeds.
+///
+/// The page carries one scale, so the wall clock and the elapsed clock it computes from that scale
+/// advance together whatever the session says. Three things have to be true for that to bind: the
+/// platform reads the clock from such a page, this build can write one, and the session asked for
+/// it.
+#[must_use]
+const fn page_rates_differ(
+    page_in_this_build: bool,
+    emulate_vdso: bool,
+    realtime: Rate,
+    elapsed: Rate,
+) -> bool {
+    page_in_this_build && emulate_vdso && realtime.0 != elapsed.0
 }
 
 /// Whether a session asks for a hook on a platform whose timekeep page it also leaves on.
@@ -527,7 +591,7 @@ impl Session {
     /// one, and the session asked for it. Everywhere else the page is present in the file, zero,
     /// and unread.
     #[must_use]
-    pub fn timekeep(&self) -> Option<&Timekeep> {
+    pub fn timekeep(&self) -> Option<&Page> {
         let page = timekeep_in(self.base, self.len, self.header())?;
         // Safety: the page lies inside a mapping this `Session` keeps alive, and every word of it
         // is an atomic, so a shared reference to it is sound however many processes hold one.
@@ -540,7 +604,7 @@ impl Session {
         mut self,
     ) -> (
         &'static Header,
-        Option<&'static Timekeep>,
+        Option<&'static Page>,
         Option<&'static Hook>,
     ) {
         let hook = self.hook.take().map(|hook| &*Box::leak(Box::new(hook)));
@@ -574,16 +638,16 @@ pub const fn page_is_live(header: &Header) -> bool {
 
 /// Where the timekeep page sits inside a mapping, or `None` when this session keeps none live or
 /// the mapping is too short to hold one.
-fn timekeep_in(base: NonNull<u8>, len: usize, header: &Header) -> Option<NonNull<Timekeep>> {
+fn timekeep_in(base: NonNull<u8>, len: usize, header: &Header) -> Option<NonNull<Page>> {
     if !page_is_live(header) {
         return None;
     }
     let offset = layout::timekeep_offset(usize::try_from(header.page_size).ok()?);
-    if offset.checked_add(size_of::<Timekeep>())? > len {
+    if offset.checked_add(size_of::<Page>())? > len {
         return None;
     }
     // Safety: the page lies inside a mapping of `len` bytes, which the check above holds to.
-    Some(unsafe { base.add(offset) }.cast::<Timekeep>())
+    Some(unsafe { base.add(offset) }.cast::<Page>())
 }
 
 /// The arena inside a mapping, and how long it is: the pair a hook is handed.

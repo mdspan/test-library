@@ -79,8 +79,12 @@ pub(crate) struct Fixture {
 impl Fixture {
     pub(crate) fn on(keeper: Keeper) -> Self {
         let dir = tempfile::tempdir().expect("a temporary directory");
+        // With the timekeep page on, the wall clock and the elapsed clock it serves share a
+        // rate, and the surface below gives one family a rate of its own. The page is not what
+        // these cases are about, so it is off.
         let session = session::create(&Setup {
             keeper,
+            emulate_vdso: false,
             ..Setup::plain(dir.path().join("libtimewarp"))
         })
         .expect("a session of our own");

@@ -225,6 +225,22 @@ fn build(source: &Path, binary: &Path, extra: &[String]) -> PathBuf {
     binary.to_path_buf()
 }
 
+/// What a case sets beside its own environment when it gives one family a rate of its own.
+///
+/// The FreeBSD timekeep page carries one rate for the wall clock and the elapsed clock it serves,
+/// so a session with the page on refuses a pair that differs, and a case about one family's line
+/// runs there with the page off, which is what the design says such a case must do. Everywhere
+/// else there is no such page and this is empty. A case that names such a rate in its environment
+/// is noticed by `Run` without asking; this is for the ones that reach for the controller instead,
+/// and for the ones that build their own command.
+pub(crate) const fn separate_family_rates() -> &'static [(&'static str, &'static str)] {
+    if cfg!(target_os = "freebsd") {
+        &[("LIBTIMEWARP_EMULATE_VDSO", "0")]
+    } else {
+        &[]
+    }
+}
+
 /// Whether a name in the session directory is a session file. The lock file beside each one is
 /// not: it carries no data, and what the cases counting these want is how many sessions a run
 /// made.
@@ -365,6 +381,22 @@ impl Run {
         self
     }
 
+    /// Whether this run gives one family a rate of its own.
+    ///
+    /// The timekeep page carries one rate for the wall clock and the elapsed clock it serves, so a
+    /// session with the page on refuses a pair that differs: the page is what rules the
+    /// combination out. A bare `LIBTIMEWARP_RATE` covers every family at once and needs none of
+    /// this, which is what leaves the cases about the page itself running with it on.
+    fn names_one_familys_rate(&self) -> bool {
+        [
+            "LIBTIMEWARP_REALTIME_RATE",
+            "LIBTIMEWARP_MONOTONIC_RATE",
+            "LIBTIMEWARP_BOOTTIME_RATE",
+        ]
+        .iter()
+        .any(|name| self.env.contains_key(*name))
+    }
+
     /// Runs the target and asserts it succeeded, which is what every case but a deliberate
     /// failure wants.
     pub(crate) fn run(self) -> Report {
@@ -401,11 +433,12 @@ impl Run {
         if let Some(dir) = &self.session_dir {
             command.env("LIBTIMEWARP_SESSION_DIR", dir);
         }
-        // On FreeBSD the timekeep page and a hook cannot both be on: the page carries numbers and
-        // a hook answers with a function, so a session with both is a bad value. A case that loads
-        // a hook there therefore runs with the page off, and a case that says otherwise still
-        // wins, because its own settings go on below.
-        if cfg!(target_os = "freebsd") && self.env.contains_key("LIBTIMEWARP_HOOK") {
+        // On FreeBSD the timekeep page rules out two things a case may ask for, and a case that
+        // asks for either runs with the page off, as the design says such a case must. A case that
+        // says otherwise still wins, because its own settings go on below.
+        if cfg!(target_os = "freebsd")
+            && (self.env.contains_key("LIBTIMEWARP_HOOK") || self.names_one_familys_rate())
+        {
             command.env("LIBTIMEWARP_EMULATE_VDSO", "0");
         }
         for (name, value) in &self.env {

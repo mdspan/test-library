@@ -53,7 +53,7 @@ fn the_interval_comes_from_the_header_and_stays_inside_what_the_page_survives() 
     let mut setup = Setup::plain(tmp.path().join("libtimewarp"));
     setup.timekeep_interval = Nanos(2_000_000);
     let session = crate::session::create(&setup).unwrap();
-    assert_eq!(interval_of(session.header()), Nanos(2_000_000));
+    assert_eq!(timekeep::interval(session.header()), Nanos(2_000_000));
 
     // A respawned updater reads the header rather than the environment, so a value nothing would
     // survive is held to the range instead of being taken at its word.
@@ -61,8 +61,11 @@ fn the_interval_comes_from_the_header_and_stays_inside_what_the_page_survives() 
     let mut copy = Setup::plain(tmp.path().join("libtimewarp"));
     copy.timekeep_interval = Nanos(0);
     let frozen = crate::session::create(&copy).unwrap();
-    assert_eq!(interval_of(frozen.header()), LEAST_INTERVAL);
-    assert!(interval_of(header) <= MOST_INTERVAL);
+    assert_eq!(
+        timekeep::interval(frozen.header()),
+        timekeep::LEAST_INTERVAL
+    );
+    assert!(timekeep::interval(header) <= timekeep::MOST_INTERVAL);
 }
 
 #[test]

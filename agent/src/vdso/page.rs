@@ -41,9 +41,12 @@ pub(super) fn install(header: &Header) -> Option<()> {
     let basis = timekeep::counter::basis()?;
     // Fresh before anybody follows the entry to it. An attacher may be the first process in a while
     // to touch a session whose updater died, and a page left stale would answer with the instant it
-    // went stale at.
-    timekeep::republish(header, page, basis)?;
-    let at = std::ptr::from_ref(page).expose_provenance();
+    // went stale at. A republish somebody else is making at this very instant is as good as ours,
+    // so the entry is pointed at the page either way.
+    timekeep::republish(header, page, basis);
+    // The structure a reader follows sits at the front of the page, so the entry names its
+    // first byte and what the republishers keep behind it stays out of sight.
+    let at = std::ptr::from_ref(&page.timekeep).expose_provenance();
     auxv::point_at(at).then_some(())
 }
 

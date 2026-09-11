@@ -7,7 +7,7 @@ use std::sync::atomic::{Ordering, fence};
 
 use crate::platform::{self, clock};
 use crate::session::layout::{Header, ParamsValue, WriterState};
-use crate::session::timekeep::{self, Timekeep};
+use crate::session::timekeep::{self, Page};
 use crate::sync::lock::WriteLock;
 use crate::sync::read;
 use crate::time::Nanos;
@@ -86,7 +86,7 @@ impl WriteLock {
     pub fn publish<E>(
         &self,
         header: &Header,
-        page: Option<&Timekeep>,
+        page: Option<&Page>,
         compute: impl FnOnce(&Anchor, ParamsValue) -> Result<ParamsValue, E>,
     ) -> Result<(), E> {
         let published = self.section(header, compute);

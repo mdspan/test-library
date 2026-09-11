@@ -42,15 +42,6 @@ pub use spawn::UPDATER_FLAG;
 /// goes wrong from noticing a moment late.
 const LIVENESS_INTERVAL: Nanos = Nanos(5 * Nanos::SECOND);
 
-/// The shortest republish interval that still leaves the updater asleep most of the time. A session
-/// asking for less gets this.
-const LEAST_INTERVAL: Nanos = Nanos(50_000);
-
-/// The longest one. A counter difference is multiplied by the page's scale in 64 bits, which at
-/// ordinary rates leaves about a second of room and rather less at fast ones, so a session asking
-/// for more than this gets this.
-const MOST_INTERVAL: Nanos = Nanos(100 * 1_000_000);
-
 /// Room for the process list of one uid, and for one process's mappings.
 ///
 /// Fixed and taken once, because an updater allocates nothing after startup: it is mlocked, so
@@ -179,7 +170,7 @@ pub fn run(session: &Path) -> libc::c_int {
     let mut mappings = vec![0u8; MAPPING_BUFFER];
     pin_in_memory();
 
-    let interval = interval_of(header);
+    let interval = timekeep::interval(header);
     let mut checked = now();
     loop {
         timekeep::republish(header, page, basis);
@@ -194,16 +185,6 @@ pub fn run(session: &Path) -> libc::c_int {
     }
     drop(held);
     0
-}
-
-/// How often this session's page is republished: what the header recorded at creation, held to a
-/// range the page's own arithmetic survives.
-///
-/// Read from the header rather than from the environment, so an updater respawned long after the
-/// creator is gone keeps the cadence the session was set up with.
-fn interval_of(header: &Header) -> Nanos {
-    let recorded = i64::try_from(header.timekeep_interval).unwrap_or(MOST_INTERVAL.0);
-    Nanos(recorded.clamp(LEAST_INTERVAL.0, MOST_INTERVAL.0))
 }
 
 /// Whether any process of this uid still has the session file mapped.

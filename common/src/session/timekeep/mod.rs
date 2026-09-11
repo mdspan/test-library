@@ -15,6 +15,15 @@
 //! The page goes stale on its own, because a difference of two counter readings overflows both the
 //! mask and the scale within a second or so. What keeps it fresh is the
 //! [updater](crate::updater), and what republishes it at once on a change is every writer.
+//!
+//! The page is published by swap, and a swap lags the seqlock: between a change landing and the
+//! page carrying it, a reader of the page computes from the old parameters. Republishing onto the
+//! session's line without more would then step such a reader's clock back. So a republisher obeys
+//! the rule a seqlock writer obeys — a swap-published linear clock is continuous at its swap
+//! instant — and [`continuous`] is that rule: new parameters anchor at the value the page itself
+//! shows, a page behind snaps forward onto the session's line, and a page ahead runs slightly under
+//! the session's rate until the two rejoin. Only a step the user asked for, which the session's
+//! discontinuity epoch records, is followed as it stands.
 
 pub mod counter;
 
@@ -141,6 +150,18 @@ pub struct Hands {
     pub boottime: Bintime,
 }
 
+/// What the page shows for both of the clocks it serves, at one reading of the counter.
+///
+/// The pair a republisher anchors on: the page carries one scale and two offsets, so the two
+/// clocks move together between republishes but each has a lead of its own over the session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Shown {
+    /// What a reader computes for the wall clock.
+    pub realtime: Nanos,
+    /// What it computes for the elapsed clock.
+    pub elapsed: Nanos,
+}
+
 impl Hands {
     /// What a reader of these parameters computes at counter reading `count`: the elapsed clock,
     /// and the wall clock when `absolute`.
@@ -158,6 +179,15 @@ impl Hands {
             shown.plus(self.boottime)
         } else {
             shown
+        }
+    }
+
+    /// Both clocks at once, which is what a republisher anchors its new parameters at.
+    #[must_use]
+    pub fn shows(&self, count: u32) -> Shown {
+        Shown {
+            realtime: self.showing(count, true).to_nanos(),
+            elapsed: self.showing(count, false).to_nanos(),
         }
     }
 }
@@ -207,6 +237,34 @@ pub struct Timekeep {
     pub hands: [Timehands; HANDS],
 }
 
+/// Page 1 of the session file: the structure a reader of the page follows, and the republishers'
+/// own words behind it.
+///
+/// A reader knows the head of this page and nothing else, so what sits past the end of
+/// [`Timekeep`] is ours to use. What lives there is what one republisher has to tell the next:
+/// which republisher holds the page right now, when the last republish was, and which
+/// discontinuity epoch it followed. None of it is on any reader's path.
+#[derive(Debug)]
+#[repr(C)]
+pub struct Page {
+    /// The parameters a reader follows, in the layout the kernel fixes.
+    pub timekeep: Timekeep,
+    /// What the republishers keep for each other.
+    continuity: Continuity,
+}
+
+/// The republishers' own words: not part of any layout a reader knows.
+#[derive(Debug)]
+#[repr(C)]
+struct Continuity {
+    /// The genuine instant the republisher in flight took the page at, or zero when none holds it.
+    publishing: AtomicI64,
+    /// The genuine instant of the last republish, or zero before the first one.
+    published_at: AtomicI64,
+    /// The session's discontinuity epoch as of that republish.
+    epoch: AtomicU64,
+}
+
 const _: () = {
     // The shape the kernel fixes and a reader has compiled in. `th_scale` puts the whole structure
     // on an eight-byte alignment, which is what places the first timehands at 16.
@@ -214,6 +272,11 @@ const _: () = {
     assert!(align_of::<Timehands>() == 8);
     assert!(std::mem::offset_of!(Timekeep, hands) == 16);
     assert!(size_of::<Timekeep>() == 16 + HANDS * 88);
+    // A reader follows the page from its first byte, and everything of ours sits past what such a
+    // reader knows, inside the one page the layout sets aside.
+    assert!(std::mem::offset_of!(Page, timekeep) == 0);
+    assert!(std::mem::offset_of!(Page, continuity) == size_of::<Timekeep>());
+    assert!(size_of::<Page>() <= 4096);
 };
 
 impl Timehands {
@@ -372,7 +435,8 @@ impl Timekeep {
     }
 }
 
-/// The two clocks a reader of the page computes, and the rate they share.
+/// The two clocks a reader of the page computes, the rate they share, and the epoch that says
+/// whether the user has moved them.
 ///
 /// The page carries one scale, so the wall clock and the elapsed clock it serves advance together
 /// between republishes. Which elapsed clock that is follows the family table: `CLOCK_MONOTONIC` is
@@ -385,29 +449,238 @@ pub struct View {
     pub elapsed: Nanos,
     /// How fast the pair runs.
     pub rate: Rate,
+    /// The session's discontinuity epoch: bumped by a move of a family's value, left alone by a
+    /// change of its rate.
+    pub epoch: u64,
 }
 
-/// Rewrites the page from the session's own parameters.
+impl Page {
+    /// Makes a fresh page one a reader will look at, and clears what the republishers keep.
+    pub fn initialize(&self) {
+        self.continuity.publishing.store(0, Ordering::Relaxed);
+        self.continuity.published_at.store(0, Ordering::Relaxed);
+        self.continuity.epoch.store(0, Ordering::Relaxed);
+        self.timekeep.initialize();
+    }
+
+    /// Takes the page for one republish, or `None` when another republisher holds it.
+    ///
+    /// Republishing reads the page and writes it, and two republishers doing that at once would
+    /// undo each other: the later publish would anchor at a value the earlier one had already left
+    /// behind, which is the backwards step this whole rule exists to prevent. There is no blocking
+    /// here and none wanted, because whoever holds the page is publishing a value at least as fresh
+    /// as ours, so standing aside loses nothing.
+    ///
+    /// A republisher that dies holding the page would wedge it for the session's life, so a page
+    /// held for longer than [`HELD_TOO_LONG`] is broken and taken in the same step. A republish is
+    /// a handful of loads and stores, so only a holder that is gone is ever broken — with the one
+    /// exception every stopped writer shares, a holder stopped inside those stores.
+    fn take(&self, now: Nanos) -> Option<Publishing<'_>> {
+        // Zero is what says nobody holds the page, so a republisher taking it at that instant says
+        // the next nanosecond instead.
+        let mine = now.0.max(1);
+        let Err(held) = self.continuity.publishing.compare_exchange(
+            0,
+            mine,
+            Ordering::Acquire,
+            Ordering::Relaxed,
+        ) else {
+            return Some(Publishing(self));
+        };
+        if now.0.saturating_sub(held) < HELD_TOO_LONG.0 {
+            return None;
+        }
+        self.continuity
+            .publishing
+            .compare_exchange(held, mine, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok()
+            .then_some(Publishing(self))
+    }
+
+    /// What the page shows for both its clocks at `count`, or `None` when it shows nothing a
+    /// republisher may anchor on.
+    ///
+    /// That is a page nothing has published yet, a page written against a counter this process
+    /// cannot take, and a page whose last republish is further back than the counter takes to come
+    /// round: past that, what the page shows is a value from some wrap nobody can name, rather than
+    /// a value a reader's clock came from.
+    fn showing(&self, basis: Basis, count: u32, now: Nanos) -> Option<Shown> {
+        let published_at = self.continuity.published_at.load(Ordering::Relaxed);
+        if published_at == 0 || now.0.saturating_sub(published_at) >= wrap_period(basis).0 {
+            return None;
+        }
+        let hands = self.timekeep.load()?;
+        (hands.algo == basis.algo && hands.flavour == basis.flavour).then(|| hands.shows(count))
+    }
+}
+
+/// The page held for one republish, released when this is dropped.
+#[derive(Debug)]
+struct Publishing<'a>(&'a Page);
+
+impl Drop for Publishing<'_> {
+    fn drop(&mut self) {
+        // Release, so the next republisher's own take sees the epoch and the instant written under
+        // this one.
+        self.0.continuity.publishing.store(0, Ordering::Release);
+    }
+}
+
+/// How long a page may be held for republishing before whoever holds it is taken to be gone.
+///
+/// A republish is a handful of loads and stores, which is nanoseconds, and no session republishes
+/// less often than [`MOST_INTERVAL`], so this is far above the one and at the other.
+const HELD_TOO_LONG: Nanos = MOST_INTERVAL;
+
+/// The shortest republish interval that still leaves the updater asleep most of the time. A session
+/// asking for less gets this.
+pub const LEAST_INTERVAL: Nanos = Nanos(50_000);
+
+/// The longest one, which a session asking for more than this gets.
+///
+/// A counter difference is multiplied by the page's scale in 64 bits, which at ordinary rates
+/// leaves about a second of room and rather less at fast ones.
+pub const MOST_INTERVAL: Nanos = Nanos(100 * 1_000_000);
+
+/// How often this session's page is republished: what the header recorded at creation, held to a
+/// range the page's own arithmetic survives.
+///
+/// Read from the header rather than from the environment, so an updater respawned long after the
+/// creator is gone keeps the cadence the session was set up with, and so the drain a republisher
+/// aims at matches the cadence that will deliver it.
+#[must_use]
+pub fn interval(header: &Header) -> Nanos {
+    let recorded = i64::try_from(header.timekeep_interval).unwrap_or(MOST_INTERVAL.0);
+    Nanos(recorded.clamp(LEAST_INTERVAL.0, MOST_INTERVAL.0))
+}
+
+/// How long the counter takes to come back round to where it started, in genuine nanoseconds.
+///
+/// A reader masks the difference of two counter readings to the counter's width, so parameters
+/// older than this describe a clock nobody can compute: the difference has wrapped, and what comes
+/// out is a small number of ticks rather than a large one.
+fn wrap_period(basis: Basis) -> Nanos {
+    let ticks = u128::from(basis.mask) + 1;
+    // The scale is genuine seconds per tick in units of 2^-64, so the product is genuine seconds in
+    // the same units, and the nanoseconds come out of the shift. Both stay far inside a `u128`: the
+    // scale is bounded by the slowest counter we believe and the mask by its width.
+    let nanos = (u128::from(basis.scale) * ticks * SECOND_FRAC) >> u64::BITS;
+    Nanos(i64::try_from(nanos).unwrap_or(i64::MAX))
+}
+
+/// What a republish publishes: the two clocks it anchors at, and the rate it runs them at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Republish {
+    /// What the page will show for the wall clock at the anchor instant.
+    pub realtime: Nanos,
+    /// What it will show for the elapsed clock there.
+    pub elapsed: Nanos,
+    /// How fast it will run until the next republish.
+    pub rate: Rate,
+}
+
+/// The continuity rule: what to publish, given the session's own values, what the page shows at the
+/// same instant, and whether the user has stepped the clock since the last republish.
+///
+/// A swap-published linear clock must be continuous at its swap instant, so new parameters anchor
+/// at the value the page itself shows and the page never steps back of its own accord. What that
+/// leaves is a lead over the session, which drains:
+///
+/// - **Behind the session.** Republishing onto the session's line is a forward step, so it snaps.
+/// - **Ahead of it.** The page keeps its own value and runs under the session's rate, by enough to
+///   give the lead back by the next republish and never by more than [`SLEW_DIVISOR`] allows, the
+///   way NTP slews rather than steps. A frozen session publishes frozen, so the lead holds until
+///   the next forward motion absorbs it.
+/// - **Stepped.** A move of the value is the user's own discontinuity, and the wall clock follows
+///   it in either direction. The elapsed clock follows forward only, which is what its API
+///   promises.
+#[must_use]
+pub fn continuous(view: &View, shown: Option<Shown>, stepped: bool, interval: Nanos) -> Republish {
+    let Some(shown) = shown else {
+        // Nothing a reader has carried off yet, so there is nothing to be continuous with.
+        return Republish {
+            realtime: view.realtime,
+            elapsed: view.elapsed,
+            rate: view.rate,
+        };
+    };
+    let realtime = if stepped {
+        view.realtime
+    } else {
+        shown.realtime.max(view.realtime)
+    };
+    let elapsed = shown.elapsed.max(view.elapsed);
+    // One scale serves both clocks, so the slew answers the further of the two leads. The other
+    // clock falls behind the session by the difference and snaps forward at the next republish,
+    // which is a forward step and allowed.
+    let lead = realtime
+        .0
+        .saturating_sub(view.realtime.0)
+        .max(elapsed.0.saturating_sub(view.elapsed.0))
+        .max(0);
+    Republish {
+        realtime,
+        elapsed,
+        rate: drained(view.rate, Nanos(lead), interval),
+    }
+}
+
+/// How far under the session's rate a page ahead of it may run: a rate change a reader sees as a
+/// slew rather than as a stall, and the bound on how long a lead takes to drain.
+const SLEW_DIVISOR: u64 = 8;
+
+/// The rate a page leading the session by `lead` publishes.
+///
+/// Enough under the session's own to give the whole lead back by the next republish, where that is
+/// a rate the page may run at, and the most the slew allows otherwise. A frozen session has no rate
+/// to come down from, so the lead simply holds.
+fn drained(rate: Rate, lead: Nanos, interval: Nanos) -> Rate {
+    if lead.0 <= 0 {
+        return rate;
+    }
+    let per_interval = (u128::from(lead.0.unsigned_abs()) << Rate::FRACTION_BITS)
+        / u128::from(interval.0.max(1).unsigned_abs());
+    let slewed = rate
+        .0
+        .saturating_sub(u64::try_from(per_interval).unwrap_or(u64::MAX));
+    Rate(slewed.max(rate.0 - rate.0 / SLEW_DIVISOR))
+}
+
+/// Rewrites the page from the session's own parameters, continuous at the instant it does so.
 ///
 /// Done by the updater at every tick and by every writer as part of its publish, so a change
-/// reaches a reader of the page in microseconds rather than at the next tick.
+/// reaches a reader of the page in microseconds rather than at the next tick. `None` when this
+/// process cannot write the page now: another republisher holds it, the clocks will not read, or
+/// the session's keeper is one we do not know.
 ///
 /// The clocks are read before the counter, deliberately: the parameters then describe an instant a
 /// shade before the one they are anchored at, so the page runs a hair behind the session rather
 /// than a hair ahead, and a reader that catches up is stepping forwards.
-pub fn republish(header: &Header, page: &Timekeep, basis: Basis) -> Option<()> {
+pub fn republish(header: &Header, page: &Page, basis: Basis) -> Option<()> {
+    let now = platform::genuine_nanos(clock::MONOTONIC)?;
+    let _publishing = page.take(now)?;
     let view = view(header)?;
     let count = basis.read();
-    let offset = Bintime::from_nanos(view.elapsed);
-    page.publish(&Hands {
+    let shown = page.showing(basis, count, now);
+    let stepped = page.continuity.epoch.load(Ordering::Relaxed) != view.epoch;
+
+    let next = continuous(&view, shown, stepped, interval(header));
+    let offset = Bintime::from_nanos(next.elapsed);
+    page.timekeep.publish(&Hands {
         algo: basis.algo,
         flavour: basis.flavour,
-        scale: scaled(basis.scale, view.rate),
+        scale: scaled(basis.scale, next.rate),
         offset_count: count,
         counter_mask: basis.mask,
         offset,
-        boottime: Bintime::from_nanos(view.realtime).minus(offset),
+        boottime: Bintime::from_nanos(next.realtime).minus(offset),
     });
+    // Under the page, so the next republisher reads these with the take that follows this one's
+    // release. Both are the republishers' own; no reader of the page looks at either.
+    page.continuity.epoch.store(view.epoch, Ordering::Relaxed);
+    page.continuity
+        .published_at
+        .store(now.0.max(1), Ordering::Relaxed);
     Some(())
 }
 
@@ -432,13 +705,16 @@ fn view(header: &Header) -> Option<View> {
                 realtime: super::affine_now(params, Family::Realtime, clock::REALTIME)?,
                 elapsed: super::affine_now(params, family, elapsed_clock)?,
                 rate: super::family_rate(params, family),
+                epoch: params.epoch.load(Ordering::Relaxed),
             })
         }),
-        // Genuine time underneath, so the page carries the kernel's own clocks at real speed.
+        // Genuine time underneath, so the page carries the kernel's own clocks at real speed. No
+        // writer can move a null session, so nothing ever steps it.
         Keeper::Null => Some(View {
             realtime: platform::genuine_nanos(clock::REALTIME)?,
             elapsed: platform::genuine_nanos(elapsed_clock)?,
             rate: Rate::UNITY,
+            epoch: 0,
         }),
     }
 }

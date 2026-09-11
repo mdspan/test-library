@@ -18,11 +18,11 @@ use std::sync::atomic::{AtomicPtr, Ordering};
 
 use common::hook::Hook;
 use common::session::layout::Header;
-use common::session::timekeep::Timekeep;
+use common::session::timekeep::Page;
 
 static SESSION: AtomicPtr<Header> = AtomicPtr::new(ptr::null_mut());
 static HOOK: AtomicPtr<Hook> = AtomicPtr::new(ptr::null_mut());
-static TIMEKEEP: AtomicPtr<Timekeep> = AtomicPtr::new(ptr::null_mut());
+static TIMEKEEP: AtomicPtr<Page> = AtomicPtr::new(ptr::null_mut());
 static LOCK_FILE: OnceLock<PathBuf> = OnceLock::new();
 
 /// Publishes the mapped session, the timekeep page inside it, the hook in front of its keeper, and
@@ -34,7 +34,7 @@ static LOCK_FILE: OnceLock<PathBuf> = OnceLock::new();
 /// lock file already in place.
 pub(crate) fn install(
     header: &'static Header,
-    timekeep: Option<&'static Timekeep>,
+    timekeep: Option<&'static Page>,
     hook: Option<&'static Hook>,
     lock_file: PathBuf,
 ) {
@@ -52,7 +52,7 @@ pub(crate) fn install(
 ///
 /// A writer republishes it as part of its publish, so a change reaches a reader of the page in
 /// microseconds rather than at the updater's next tick.
-pub(crate) fn timekeep() -> Option<&'static Timekeep> {
+pub(crate) fn timekeep() -> Option<&'static Page> {
     let page = TIMEKEEP.load(Ordering::Acquire);
     if page.is_null() {
         return None;
