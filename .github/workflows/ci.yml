@@ -6,18 +6,25 @@ name: CI
 #
 #   every pull request, and every push to main   the Linux pair, and macOS and FreeBSD
 #                                                cross-checked from a Linux runner    1x
-#   every push to main                           one FreeBSD release                  1x
-#   weekly, on demand, or on a labelled PR       both macOS arches, every FreeBSD
-#                                                release, FreeBSD aarch64, a stress
-#                                                run of the racy cases                1x / 10x
+#   weekly, on demand, or on a labelled PR       both macOS arches, and a stress run
+#                                                of the racy cases                    1x / 10x
+#   only when asked for by name                  every FreeBSD release, and FreeBSD
+#                                                aarch64                              1x
 #
 # A branch without a pull request runs nothing: `push` is narrowed to main so a branch that has one
 # open is not billed twice for the same commit. To put the wide tier on a single pull request, add
 # the `ci:full` label to it; to run it now, use the Run workflow button.
 #
+# The FreeBSD VMs start for nothing on their own. A VM job is twenty-odd minutes and the sweep is
+# six of them, which is most of a month's allowance for a platform whose code changes rarely. What
+# still runs on every push is the cross-check below, which compiles and lints the FreeBSD arms on a
+# Linux runner; what it cannot catch is a link error or a wrong answer at run time. So ask for a VM
+# before merging anything that touches the FreeBSD code: the `ci:freebsd` label on a pull request
+# runs one release, and the box on the Run workflow button runs the whole sweep.
+#
 # The knob to turn if the wide tier is too rare: add `github.ref == 'refs/heads/main'` to the `if:`
-# the macos, freebsd-wide and stress jobs share, which buys a full platform sweep on every merge for
-# about 200 billed minutes a time.
+# the macos and stress jobs share, which buys a full platform sweep on every merge for about 200
+# billed minutes a time.
 
 on:
   push:
@@ -29,6 +36,11 @@ on:
     # run, so a nightly one would spend the month's allowance three times over.
     - cron: "0 3 * * 0"
   workflow_dispatch:
+    inputs:
+      freebsd:
+        description: "Run the FreeBSD VMs too, which nothing else starts"
+        type: boolean
+        default: false
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -164,12 +176,12 @@ jobs:
             echo "::endgroup::"
           done
 
-  # The one FreeBSD release a merge waits on. The rest of the releases, and the other architecture,
-  # are in the wide tier below. Not on pull requests: a VM job is twenty-odd minutes, and at the
-  # rate branches are pushed that outspends the merges it would be protecting.
+  # One FreeBSD release, for a pull request that wants a VM without wanting six. Started by the
+  # `ci:freebsd` label alone: see the note at the top about what the VMs cost and what stands in
+  # for them on a push.
   freebsd:
     name: freebsd x86_64 15.0
-    if: github.event_name == 'push'
+    if: contains(github.event.pull_request.labels.*.name, 'ci:freebsd')
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
@@ -314,6 +326,8 @@ jobs:
           retention-days: 7
 
   # Every FreeBSD release the family table distinguishes, and the architecture no other job builds.
+  # Started by the box on the Run workflow button alone, which is the other half of the switch the
+  # job above carries: one release on a labelled pull request, the whole sweep on demand.
   #
   # The releases matter because the running kernel picks between the table's two FreeBSD columns:
   # 13.x and 14.x are where nothing counts suspended time, and 15.x is where `CLOCK_MONOTONIC` and
@@ -321,10 +335,7 @@ jobs:
   # assembly per architecture, and the aarch64 arm of it is compiled by nothing else here.
   freebsd-wide:
     name: freebsd ${{ matrix.arch }} ${{ matrix.release }}
-    if: >-
-      github.event_name == 'schedule' ||
-      github.event_name == 'workflow_dispatch' ||
-      contains(github.event.pull_request.labels.*.name, 'ci:full')
+    if: inputs.freebsd
     runs-on: ubuntu-24.04
     # The aarch64 VM is emulated rather than accelerated, so it runs several times slower than the
     # others and carries the longer bound.
@@ -342,8 +353,8 @@ jobs:
           - release: "14.5"
             arch: x86_64
             timeout: 60
-          # The release the merge job also runs, repeated here so the wide tier is a whole sweep on
-          # its own rather than one with a hole where that job would have been.
+          # The release the single-VM job above runs. The two never start together, so this is the
+          # sweep's own row rather than a repeat of one.
           - release: "15.0"
             arch: x86_64
             timeout: 60
