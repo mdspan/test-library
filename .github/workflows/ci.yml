@@ -81,7 +81,7 @@ jobs:
 
   # The same suite the Linux job runs, on the architecture the hosted runners give us. The cases
   # for functions this platform does not have are left out by the lists inside the suite, each
-  # named against the platform it belongs to; the Mach clocks are the one group still to land.
+  # named against the platform it belongs to.
   macos:
     name: macos aarch64
     runs-on: macos-15
@@ -115,6 +115,12 @@ jobs:
       # check a compiler that is happy cannot stand in for.
       - name: The interpose table
         run: cargo test --locked -p agent --test interpose
+
+      # The one group this platform has that neither of the others does, and the one whose
+      # conversion depends on the ratio of the machine it runs on. Named on its own so a failure
+      # here is a line of its own rather than a line in the whole suite's log.
+      - name: The Mach clocks
+        run: cargo test --locked -p agent --test mach_clocks
 
       - name: Test
         shell: bash

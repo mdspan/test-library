@@ -17,11 +17,14 @@ mod state;
 mod timer;
 mod wait;
 
-// Which clock an object of the program's was built with, for the calls that name none. macOS needs
-// no such table: a condition variable there always reads the wall clock, and there are no POSIX
-// timers and no timerfd to create.
-#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+// Which clock an object of the program's was built with, for the calls that name none: a condition
+// variable or a timer on Linux and FreeBSD, a Mach clock port on macOS.
 mod clocks;
+
+// The Mach clocks, which macOS has and neither of the others does. The arithmetic that turns their
+// ticks into nanoseconds is built under test everywhere, so its cases run wherever the suite does.
+#[cfg(any(target_os = "macos", test))]
+mod mach;
 
 // Posing as what a target reads the clock from without libc: the vDSO on Linux, the timekeep page
 // on FreeBSD. macOS hands Go libSystem, which interposition already reaches.
@@ -128,6 +131,9 @@ fn constructor() {
     // rather than from a system call number.
     #[cfg(target_os = "macos")]
     common::platform::prime_genuine();
+    // And the ratio the Mach counter runs at, which every reading of it converts through.
+    #[cfg(target_os = "macos")]
+    mach::prime();
     // The auxiliary vector, before the environment it sits behind can be moved: `publish` below
     // writes one of ours, and a libc that grows the environment moves it off the stack the vector
     // is on.

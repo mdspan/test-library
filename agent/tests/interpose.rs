@@ -20,7 +20,7 @@ mod harness;
 use std::collections::BTreeMap;
 
 /// Every replacement the library carries, by the private name it exports and the libc name that
-/// name stands in for. Every group but the Mach clocks, which read a counter rather than a clock.
+/// name stands in for. Every group, the Mach clocks included.
 ///
 /// The libc name is the one the library must never export, so a spelling that varies by
 /// architecture is written here as the plain one: we export neither.
@@ -29,7 +29,9 @@ const REPLACEMENTS: &[(&str, &str)] = &[
     ("libtimewarp_aio_suspend", "aio_suspend"),
     ("libtimewarp_alarm", "alarm"),
     ("libtimewarp_clock", "clock"),
+    ("libtimewarp_clock_get_time", "clock_get_time"),
     ("libtimewarp_clock_gettime", "clock_gettime"),
+    ("libtimewarp_clock_gettime_nsec_np", "clock_gettime_nsec_np"),
     ("libtimewarp_clock_settime", "clock_settime"),
     ("libtimewarp_fstat", "fstat"),
     ("libtimewarp_fstatat", "fstatat"),
@@ -39,10 +41,16 @@ const REPLACEMENTS: &[(&str, &str)] = &[
     ("libtimewarp_getitimer", "getitimer"),
     ("libtimewarp_getrusage", "getrusage"),
     ("libtimewarp_gettimeofday", "gettimeofday"),
+    (
+        "libtimewarp_host_get_clock_service",
+        "host_get_clock_service",
+    ),
     ("libtimewarp_kevent", "kevent"),
     ("libtimewarp_kevent64", "kevent64"),
     ("libtimewarp_lstat", "lstat"),
     ("libtimewarp_lutimes", "lutimes"),
+    ("libtimewarp_mach_absolute_time", "mach_absolute_time"),
+    ("libtimewarp_mach_wait_until", "mach_wait_until"),
     ("libtimewarp_nanosleep", "nanosleep"),
     ("libtimewarp_poll", "poll"),
     ("libtimewarp_pselect", "pselect"),
@@ -65,8 +73,9 @@ const REPLACEMENTS: &[(&str, &str)] = &[
 ];
 
 /// The rows a build has only where libSystem has the name behind them: the suffixed spellings of
-/// `select` and `pselect` that `x86_64` keeps, and the private form of `kevent`. `build.rs` asks
-/// the linker for each, and sets the `cfg` this reads.
+/// `select` and `pselect` that `x86_64` keeps, the private form of `kevent`, and the three Mach
+/// counters that arrived after the one every release has had. `build.rs` asks the linker for each,
+/// and sets the `cfg` this reads.
 const VARIANTS: &[(&str, &str)] = &[
     #[cfg(darwin_select_1050)]
     ("libtimewarp_select_1050", "select$1050"),
@@ -76,6 +85,15 @@ const VARIANTS: &[(&str, &str)] = &[
     ("libtimewarp_pselect_extsn", "pselect$DARWIN_EXTSN"),
     #[cfg(darwin_kevent_qos)]
     ("libtimewarp_kevent_qos", "kevent_qos"),
+    #[cfg(darwin_mach_approximate_time)]
+    ("libtimewarp_mach_approximate_time", "mach_approximate_time"),
+    #[cfg(darwin_mach_continuous_time)]
+    ("libtimewarp_mach_continuous_time", "mach_continuous_time"),
+    #[cfg(darwin_mach_continuous_approximate_time)]
+    (
+        "libtimewarp_mach_continuous_approximate_time",
+        "mach_continuous_approximate_time",
+    ),
 ];
 
 /// Every replacement of this build: the ones every macOS has, and the ones this one found.

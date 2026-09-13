@@ -13,7 +13,8 @@
 //! `x86_64` carries the suffixed forms the ABI a program was compiled against picks, and aarch64
 //! carries none of them. A name that is not there is a link that fails rather than a row that goes
 //! missing quietly, so each one is asked of the linker for the target architecture before it is
-//! named in the source.
+//! named in the source. The Mach counters that arrived after the first release go the same way: a
+//! deployment target older than they are has `mach_absolute_time` and not its three neighbours.
 
 use std::io::Write as _;
 use std::path::PathBuf;
@@ -43,7 +44,9 @@ fn main() {
 /// macro in the same header. `select$1050` is the conforming spelling a program that is not asking
 /// for the Darwin extensions gets, and `select$DARWIN_EXTSN` the one it gets when it is; `pselect`
 /// has the second of those and not the first. `kevent_qos` is a name Apple keeps private, so
-/// whether the SDK lets anything link against it is a question rather than an assumption.
+/// whether the SDK lets anything link against it is a question rather than an assumption. The three
+/// Mach counters below arrived together, later than the one every release has had, so a deployment
+/// target older than that keeps `mach_absolute_time` and none of them.
 const DARWIN_NAMES: &[(&str, &str, Option<&str>)] = &[
     ("darwin_inode64", "stat$INODE64", Some("x86_64")),
     ("darwin_select_1050", "select$1050", Some("x86_64")),
@@ -54,6 +57,17 @@ const DARWIN_NAMES: &[(&str, &str, Option<&str>)] = &[
         Some("x86_64"),
     ),
     ("darwin_kevent_qos", "kevent_qos", None),
+    (
+        "darwin_mach_approximate_time",
+        "mach_approximate_time",
+        None,
+    ),
+    ("darwin_mach_continuous_time", "mach_continuous_time", None),
+    (
+        "darwin_mach_continuous_approximate_time",
+        "mach_continuous_approximate_time",
+        None,
+    ),
 ];
 
 /// Sets a `cfg` for every name of [`DARWIN_NAMES`] the target's own libSystem exports.

@@ -9,6 +9,10 @@
 //! Adding a function is one entry in [`genuine!`]: the slot, the lookup, and the wrapper all come
 //! from there, and [`prime`] finds it with the rest at load.
 //!
+//! The Mach clocks come by name as well, and so does the sleep measured in their ticks: each is a
+//! name we stand in front of, and the way past ours there is the image rather than the next
+//! definition along.
+//!
 //! The file timestamps come by name too. `stat` has no one system call across the architectures
 //! we support, and the buffer libc fills is libc's own shape rather than the kernel's, so the
 //! honest way past ours is the definition the loader would have bound.
@@ -374,6 +378,49 @@ genuine! {
         data_available: *mut libc::size_t,
         flags: libc::c_uint,
     ) -> libc::c_int;
+
+    /// The genuine `mach_absolute_time`, ticks of the counter that stops while the machine sleeps.
+    /// Every macOS has had it, so it is asked for unconditionally where the three below are not.
+    #[cfg(target_os = "macos")]
+    fn mach_absolute_time() -> u64;
+
+    /// The genuine `mach_approximate_time`, the same counter read from the last tick.
+    #[cfg(darwin_mach_approximate_time)]
+    fn mach_approximate_time() -> u64;
+
+    /// The genuine `mach_continuous_time`, ticks of the counter that counts on while it sleeps.
+    #[cfg(darwin_mach_continuous_time)]
+    fn mach_continuous_time() -> u64;
+
+    /// The genuine `mach_continuous_approximate_time`.
+    #[cfg(darwin_mach_continuous_approximate_time)]
+    fn mach_continuous_approximate_time() -> u64;
+
+    /// The genuine `clock_gettime_nsec_np`, a clock read in nanoseconds rather than a `timespec`.
+    /// Zero is its refusal, with the reason in `errno`, which is why a clock nothing fakes comes
+    /// here rather than being answered as nothing.
+    #[cfg(target_os = "macos")]
+    fn clock_gettime_nsec_np(clock: libc::clockid_t) -> u64;
+
+    /// The genuine `mach_wait_until`, the one sleep this platform measures in ticks.
+    #[cfg(target_os = "macos")]
+    fn mach_wait_until(deadline: u64) -> libc::kern_return_t;
+
+    /// The genuine `host_get_clock_service`, which hands out a port naming one of the Mach clocks.
+    #[cfg(target_os = "macos")]
+    fn host_get_clock_service(
+        host: libc::host_t,
+        id: libc::c_int,
+        port: *mut libc::mach_port_t,
+    ) -> libc::kern_return_t;
+
+    /// The genuine `clock_get_time`, a read on such a port. Its buffer is Mach's own narrower pair,
+    /// which [`crate::mach`] declares.
+    #[cfg(target_os = "macos")]
+    fn clock_get_time(
+        port: libc::mach_port_t,
+        at: *mut crate::mach::MachTimespec,
+    ) -> libc::kern_return_t;
 
     /// The genuine `recvmmsg`. Linux's alone, for the reason `thrd_sleep` is: FreeBSD builds the
     /// call out of the public `ppoll`.

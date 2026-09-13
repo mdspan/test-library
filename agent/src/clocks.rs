@@ -11,9 +11,26 @@
 //! the default, it is what an object nobody named reads, so keeping those would be keeping the
 //! answer we already give.
 //!
+//! macOS reaches for the same slots for something else: a Mach clock port is a name the kernel
+//! hands out and `clock_get_time` reads, so the clock it stands for is learned at
+//! `host_get_clock_service` and looked up again at the read. A port that named neither Mach clock
+//! has no answer of ours at all rather than the default one, which is what [`Table::kept`] is for
+//! beside [`Table::clock_of`].
+//!
 //! A key is whatever number names the object, and every number is one: a condition variable's
-//! address, a descriptor, and a `timer_t`, which glibc counts up from zero. So a slot says whether
-//! it is occupied in a word of its own rather than by a key no object could have.
+//! address, a descriptor, a `timer_t`, which glibc counts up from zero, and a port. So a slot says
+//! whether it is occupied in a word of its own rather than by a key no object could have.
+
+// The condition variables and the timers are Linux's and FreeBSD's, and the clock ports are
+// macOS's, so no one platform reaches for the whole of this.
+#![cfg_attr(
+    target_os = "macos",
+    allow(
+        dead_code,
+        reason = "macOS keeps only the clock ports here: a condition variable there reads the wall \
+                  clock, and the platform has neither a POSIX timer nor a timerfd to create"
+    )
+)]
 
 use std::sync::atomic::{AtomicI32, AtomicU32, AtomicUsize, Ordering};
 
@@ -104,15 +121,18 @@ impl Table {
         if clock == clock::REALTIME {
             self.forget(key);
         } else {
-            self.remember(key, clock);
+            self.keep(key, clock);
         }
     }
 
-    /// Remembers that the object at `key` was built with `clock`.
+    /// Remembers that the object at `key` was built with `clock`, whichever clock that is.
     ///
-    /// A table with no room leaves the object unknown, which is the default answer rather than a
-    /// wrong one.
-    fn remember(&self, key: usize, clock: libc::clockid_t) {
+    /// What a caller needs when every clock is worth a slot, which is a clock port: the two Mach
+    /// clocks are the wall clock and an elapsed one, and a port naming the first has to be told
+    /// apart from a port nobody handed out.
+    ///
+    /// A table with no room leaves the object unknown, which is no answer rather than a wrong one.
+    pub(crate) fn keep(&self, key: usize, clock: libc::clockid_t) {
         for probe in 0..PROBES {
             let Some(slot) = self.slot(key, probe) else {
                 return;
@@ -154,20 +174,23 @@ impl Table {
         }
     }
 
-    /// The clock the object at `key` was built with, or the default when it is unknown.
-    pub(crate) fn clock_of(&self, key: usize) -> libc::clockid_t {
+    /// The clock recorded for the object at `key`, or `None` when nothing recorded one.
+    pub(crate) fn kept(&self, key: usize) -> Option<libc::clockid_t> {
         for probe in 0..PROBES {
-            let Some(slot) = self.slot(key, probe) else {
-                break;
-            };
+            let slot = self.slot(key, probe)?;
             if slot.state.load(Ordering::Acquire) == EMPTY {
                 break;
             }
             if let Some(clock) = slot.held(key) {
-                return clock;
+                return Some(clock);
             }
         }
-        clock::REALTIME
+        None
+    }
+
+    /// The clock the object at `key` was built with, or the default when it is unknown.
+    pub(crate) fn clock_of(&self, key: usize) -> libc::clockid_t {
+        self.kept(key).unwrap_or(clock::REALTIME)
     }
 }
 
@@ -246,6 +269,21 @@ mod tests {
         table.record(first, clock::MONOTONIC);
         assert_eq!(table.clock_of(first), clock::MONOTONIC);
         assert_eq!(table.clock_of(second), boottime());
+    }
+
+    #[test]
+    fn a_kept_object_is_told_apart_from_one_nobody_recorded() {
+        let table = Table::new();
+        // The default clock too, which `record` would have forgotten: a clock port naming the wall
+        // clock is a port we answer for, and one nobody handed out is not.
+        table.keep(key(6), clock::REALTIME);
+        table.keep(key(7), clock::MONOTONIC);
+        assert_eq!(table.kept(key(6)), Some(clock::REALTIME));
+        assert_eq!(table.kept(key(7)), Some(clock::MONOTONIC));
+        assert_eq!(table.kept(key(8)), None);
+        // And the default answer is still the default for whoever wants one.
+        assert_eq!(table.clock_of(key(8)), clock::REALTIME);
+        assert_eq!(table.clock_of(key(7)), clock::MONOTONIC);
     }
 
     #[test]

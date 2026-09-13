@@ -9,8 +9,9 @@
 //! since the replacee would then resolve to us, so every replacement carries a private name,
 //! `libtimewarp_clock_gettime` and the rest, and the libc name is exported nowhere.
 //!
-//! Every group is here but the Mach clocks, which read a hardware counter rather than a clock id
-//! and land with `mach_wait_until`, the one sleep measured in their ticks.
+//! Every group is here, the Mach clocks included: those read a hardware counter rather than a
+//! clock id, so a row of one converts through `mach_timebase_info` on the way out and back, and so
+//! does `mach_wait_until`, the one sleep measured in their ticks. `crate::mach` has the rules.
 //!
 //! Some names have more than one spelling, and which the program calls is the ABI it was compiled
 //! against: on `x86_64` `select` has three, the plain one of 10.4, the `$1050` of the conforming
@@ -28,12 +29,17 @@
 //! | Row | Also catches | Misses |
 //! | --- | --- | --- |
 //! | `clock_gettime` | Nothing. | Reads inside the cache, which reach the commpage without binding to a name. |
+//! | the four `mach_*_time` names | Nothing. | The cache's own use of them, libdispatch's among them, and a program that reads the counter register or the commpage itself rather than calling any of them. |
+//! | `clock_gettime_nsec_np` | Nothing. | The cache's own use of it. |
+//! | `host_get_clock_service` | Nothing, and it converts nothing either: the port it hands back is a name, and the read on that name is the row below. | The cache's own calls, whose ports this never sees, so a read on one of those passes through. |
+//! | `clock_get_time` | Nothing. | A port no row above handed out, and the `mach_msg` a caller could send the port itself. |
 //! | `gettimeofday`, `time`, `timespec_get`, `ftime` | Nothing. | The cache's own use of them. |
 //! | `clock` | Nothing: the answer is computed here rather than passed on. | Nothing beyond that. |
 //! | `times` | Nothing. | The `getrusage` and `gettimeofday` libSystem builds it from, which is why the answer is scaled once, here. |
 //! | `getrusage` | Nothing. | The cache's own calls, `times` among them. |
 //! | `nanosleep` | Nothing. | The `sleep` and `usleep` libSystem builds out of it, which is why each of those is a row too. |
 //! | `sleep`, `usleep` | Nothing. | Nothing beyond that: each converts and then blocks in the genuine `nanosleep` by address. |
+//! | `mach_wait_until` | Nothing. | The cache's own use of it, libdispatch's included. |
 //! | `poll` | Nothing. | The cache's own use of it. |
 //! | the three `select` names, the two `pselect` names | Nothing. | The cache's own use of them. Each answers through the widest spelling the image has, so nothing a caller could name is refused here that would have been allowed without us. |
 //! | `kevent`, `kevent64` | Nothing. | The cache's own use of them, libdispatch's included. |
@@ -53,7 +59,7 @@
 
 use std::ffi::{c_char, c_void};
 
-use crate::{interpose, setter, stamp, timer, wait};
+use crate::{interpose, mach, setter, stamp, timer, wait};
 
 /// One row of the table dyld reads at load: the replacement, and the function it stands in for.
 #[repr(C)]
@@ -68,9 +74,11 @@ struct Row {
 // the loader before any thread of the program exists and only read afterwards.
 unsafe impl Sync for Row {}
 
-// The names libc's own bindings do not spell for this platform, or spell for one architecture of
-// it. `clock` and `ftime` have been in libSystem for as long as macOS has existed, the second of
-// them obsolete for nearly as long, and `timespec_get` arrived at 10.15. The rest are the
+// The names libc's own bindings do not spell for this platform, spell for one architecture of it,
+// or spell only behind a deprecation. `clock` and `ftime` have been in libSystem for as long as
+// macOS has existed, the second of them obsolete for nearly as long, and `timespec_get` arrived at
+// 10.15. The Mach names are there but deprecated in favour of a crate this workspace does not
+// depend on, and the Mach routines proper are not there at all. The rest are the
 // spellings: the binding for `select` is the suffixed one on `x86_64` and the plain one on
 // aarch64, and the binding for the `stat` names is the plain one on both, which on `x86_64` is the
 // narrower
@@ -154,6 +162,37 @@ unsafe extern "C" {
         buf: *mut libc::stat,
         flags: libc::c_int,
     ) -> libc::c_int;
+
+    /// Ticks of the counter that stops while the machine sleeps.
+    fn mach_absolute_time() -> u64;
+
+    /// The same counter read from the last tick rather than from the hardware.
+    #[cfg(darwin_mach_approximate_time)]
+    fn mach_approximate_time() -> u64;
+
+    /// Ticks of the counter that keeps counting while the machine sleeps.
+    #[cfg(darwin_mach_continuous_time)]
+    fn mach_continuous_time() -> u64;
+
+    /// The same read from the last tick.
+    #[cfg(darwin_mach_continuous_approximate_time)]
+    fn mach_continuous_approximate_time() -> u64;
+
+    /// A clock read in nanoseconds, under the ids `clock_gettime` takes.
+    fn clock_gettime_nsec_np(clock: libc::clockid_t) -> u64;
+
+    /// A sleep until the counter reads a given tick.
+    fn mach_wait_until(deadline: u64) -> libc::kern_return_t;
+
+    /// A port naming one of the Mach clocks.
+    fn host_get_clock_service(
+        host: libc::host_t,
+        id: libc::c_int,
+        port: *mut libc::mach_port_t,
+    ) -> libc::kern_return_t;
+
+    /// A read on such a port.
+    fn clock_get_time(port: libc::mach_port_t, at: *mut mach::MachTimespec) -> libc::kern_return_t;
 
     /// The `kevent_qos` of the same family, a name Apple keeps private and the SDK may not let
     /// us reach at all.
@@ -274,6 +313,64 @@ replacements! {
         unsafe { interpose::getrusage(who, usage) }
     }
 
+    // The Mach clocks. Each reads a counter rather than a clock id, so the family's nanoseconds
+    // convert back into ticks on the way out; `mach` has the rules. Which family a counter belongs
+    // to is whether it stops while the machine sleeps.
+
+    /// Ticks of the counter that stops while the machine sleeps, which is the Monotonic family's.
+    replaces mach_absolute_time;
+    fn libtimewarp_mach_absolute_time() -> u64 {
+        mach::mach_absolute_time()
+    }
+
+    /// The same counter read from the last tick, which is the same family.
+    #[cfg(darwin_mach_approximate_time)]
+    replaces mach_approximate_time;
+    fn libtimewarp_mach_approximate_time() -> u64 {
+        mach::mach_approximate_time()
+    }
+
+    /// Ticks of the counter that counts while the machine sleeps, which is Boottime's.
+    #[cfg(darwin_mach_continuous_time)]
+    replaces mach_continuous_time;
+    fn libtimewarp_mach_continuous_time() -> u64 {
+        mach::mach_continuous_time()
+    }
+
+    /// The same counter read from the last tick.
+    #[cfg(darwin_mach_continuous_approximate_time)]
+    replaces mach_continuous_approximate_time;
+    fn libtimewarp_mach_continuous_approximate_time() -> u64 {
+        mach::mach_continuous_approximate_time()
+    }
+
+    /// A clock read in nanoseconds, which follows the family of the id it was handed.
+    replaces clock_gettime_nsec_np;
+    fn libtimewarp_clock_gettime_nsec_np(clock: libc::clockid_t) -> u64 {
+        mach::clock_gettime_nsec_np(clock)
+    }
+
+    /// A port naming one of the Mach clocks, remembered so that a read on it knows which.
+    replaces host_get_clock_service;
+    fn libtimewarp_host_get_clock_service(
+        host: libc::host_t,
+        id: libc::c_int,
+        port: *mut libc::mach_port_t,
+    ) -> libc::kern_return_t {
+        // Safety: the caller is the program, calling under Mach's contract.
+        unsafe { mach::host_get_clock_service(host, id, port) }
+    }
+
+    /// A read on such a port, which answers whichever clock the port names.
+    replaces clock_get_time;
+    fn libtimewarp_clock_get_time(
+        port: libc::mach_port_t,
+        at: *mut mach::MachTimespec,
+    ) -> libc::kern_return_t {
+        // Safety: the caller is the program, calling under Mach's contract.
+        unsafe { mach::clock_get_time(port, at) }
+    }
+
     // The sleeps and the timeouts. Each converts the duration or the deadline the program asked
     // for and blocks in the genuine function; `wait` has the rules.
 
@@ -297,6 +394,13 @@ replacements! {
     replaces libc::usleep;
     fn libtimewarp_usleep(micros: libc::useconds_t) -> libc::c_int {
         wait::usleep(micros)
+    }
+
+    /// A sleep to an absolute deadline in ticks of the counter above, which converts through the
+    /// timebase on both ends and is otherwise the sleep every other one here is.
+    replaces mach_wait_until;
+    fn libtimewarp_mach_wait_until(deadline: u64) -> libc::kern_return_t {
+        mach::mach_wait_until(deadline)
     }
 
     /// A wait on a set of descriptors with a timeout in milliseconds.
