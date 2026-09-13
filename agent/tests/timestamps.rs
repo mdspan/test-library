@@ -36,6 +36,16 @@ const TARGET_SECONDS: i64 = 1_000_000;
 /// The instant that is, in nanoseconds.
 const TARGET: i64 = TARGET_SECONDS * SECOND;
 
+/// Where the clock starts for the row that runs it slow: a day past [`TARGET`].
+///
+/// A setter measures the instant back through the rate, `real_now + (ts - fake_now) / rate`, so a
+/// clock left at the genuine now puts a target half a century behind it four times further back
+/// again, in the year 1800. A filesystem truncates a timestamp to the range it keeps, and every
+/// range in use starts this side of that, so the round trip would read back the floor rather than
+/// what was asked for. Starting the clock a day past the target leaves the genuine instant four
+/// days from now, and divides by the rate just the same.
+const SLOW_START: &str = "@1086400";
+
 /// Every reader of the group, by the key the target reports it under. `statx` is reported
 /// separately, because it is the one with a birth time and the one a system may not have.
 #[cfg(target_os = "linux")]
@@ -211,7 +221,13 @@ fn a_touch_with_an_explicit_time_lands_where_the_program_meant_it() {
     for (env, slack) in [
         (vec![("LIBTIMEWARP_SHIFT", "-2h")], SECOND),
         (vec![("LIBTIMEWARP_RATE", "10")], 10 * SECOND),
-        (vec![("LIBTIMEWARP_RATE", "0.25")], SECOND),
+        (
+            vec![
+                ("LIBTIMEWARP_RATE", "0.25"),
+                ("LIBTIMEWARP_TIME", SLOW_START),
+            ],
+            SECOND,
+        ),
         (vec![("LIBTIMEWARP_TIME", "2001-09-09T01:46:40Z")], SECOND),
     ] {
         let dir = tempfile::tempdir().unwrap();
@@ -264,10 +280,13 @@ fn the_flags_that_name_no_instant_pass_through() {
 #[test]
 fn a_clock_far_in_the_past_clamps_a_timestamp_at_zero() {
     let dir = tempfile::tempdir().unwrap();
-    let report = stamps(dir.path(), &[("LIBTIMEWARP_TIME", "@0")]);
+    let report = stamps(dir.path(), &[("LIBTIMEWARP_SHIFT", "-1000000h")]);
 
-    // The wall clock is at the epoch and the file is older than it in the clock's own terms, which
-    // would put every timestamp before zero. None of them reads below it.
+    // A million hours is a hundred and fourteen years, which puts the wall clock well before the
+    // epoch, so a file written just now carries an instant the clock counts below zero. The epoch
+    // itself would not: a clock starting there reads a shade past it by the time the file is
+    // written, and what the timestamp needs is a clock that is still behind it then. None of them
+    // reads below zero.
     for key in every_reading(&report) {
         assert_eq!(report.nanos(&key), 0, "{key} was not clamped at zero");
     }
