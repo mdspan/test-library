@@ -4,7 +4,8 @@ name: CI
 # of everything else. The free allowance is 2,000 Linux-equivalent minutes a month, which is 200
 # wall-clock minutes of macOS and no more.
 #
-#   every pull request, and every push to main   the Linux pair                       1x
+#   every pull request, and every push to main   the Linux pair, and macOS and FreeBSD
+#                                                cross-checked from a Linux runner    1x
 #   every push to main                           one FreeBSD release                  1x
 #   weekly, on demand, or on a labelled PR       both macOS arches, every FreeBSD
 #                                                release, FreeBSD aarch64, a stress
@@ -38,8 +39,8 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
-  # Everything the suite has, on both architectures we support. This is the job that gates a merge,
-  # and the only one that runs on an ordinary pull request.
+  # Everything the suite has, on both architectures we support. This and the cross-check below are
+  # what an ordinary pull request runs, and between them what gates a merge.
   linux:
     name: linux ${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
@@ -113,6 +114,55 @@ jobs:
           name: log-linux-${{ matrix.arch }}
           path: ${{ runner.temp }}/test.log
           retention-days: 7
+
+  # What a Mac and a FreeBSD box are needed for is linking and running. Type-checking and linting
+  # their code needs neither, so both happen here on an ordinary Linux runner that bills as one
+  # rather than ten. This is what gives a push macOS signal at all: a refactor that breaks a
+  # platform is caught on the push that broke it rather than at the weekly sweep.
+  #
+  # What it cannot catch is a link error or a wrong answer at run time, which is what the jobs on
+  # real machines below are for. FreeBSD aarch64 is missing here too, since that target has no
+  # prebuilt standard library to check against; the emulated VM in the wide tier is its only cover.
+  cross:
+    name: cross-check macos and freebsd
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      PLATFORM: cross-check
+      # Which spellings libSystem has is asked of the linker at build time, and a machine with no
+      # SDK gets no for every one of them. So the rows behind those probes are compiled twice: once
+      # as this machine answers them, and once with all of them forced on, which is the table a
+      # real SDK produces. Neither pass on its own compiles every row.
+      DARWIN_CFGS: >-
+        --cfg darwin_inode64 --cfg darwin_select_1050 --cfg darwin_select_extsn
+        --cfg darwin_pselect_extsn --cfg darwin_kevent_qos --cfg darwin_mach_approximate_time
+        --cfg darwin_mach_continuous_time --cfg darwin_mach_continuous_approximate_time
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the toolchain rust-toolchain.toml pins
+        run: rustup toolchain install
+
+      - name: Add the targets
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin x86_64-unknown-freebsd
+
+      - name: Clippy for each platform
+        run: |
+          for target in aarch64-apple-darwin x86_64-apple-darwin x86_64-unknown-freebsd; do
+            echo "::group::${target}"
+            cargo clippy --locked --workspace --all-targets --all-features \
+              --target "$target" -- -D warnings
+            echo "::endgroup::"
+          done
+
+      - name: Clippy for macOS with every probed row present
+        run: |
+          for target in aarch64-apple-darwin x86_64-apple-darwin; do
+            echo "::group::${target}, every probed row forced on"
+            RUSTFLAGS="$DARWIN_CFGS" cargo clippy --locked --workspace --all-targets \
+              --all-features --target "$target" -- -D warnings
+            echo "::endgroup::"
+          done
 
   # The one FreeBSD release a merge waits on. The rest of the releases, and the other architecture,
   # are in the wide tier below. Not on pull requests: a VM job is twenty-odd minutes, and at the
@@ -396,20 +446,25 @@ jobs:
         shell: bash
         run: .github/report-failure.sh "$PLATFORM" "$RUNNER_TEMP/test.log"
 
-  # One check to point branch protection at. Only the Linux jobs are required: they are the pair
-  # that covers both architectures we support, and neither a hosted macOS runner nor a FreeBSD VM
-  # is something a merge should wait on.
+  # One check to point branch protection at. The Linux pair runs the suite; the cross-check says
+  # the other two platforms still compile. Both are cheap and both run on every pull request, which
+  # is what makes them fit to gate a merge. Neither a hosted macOS runner nor a FreeBSD VM is
+  # something a merge should wait on.
   gate:
     name: gate
-    needs: [linux]
+    needs: [linux, cross]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - name: Require the Linux jobs
+      - name: Require the Linux jobs and the cross-check
         run: |
-          result='${{ needs.linux.result }}'
-          if [ "$result" != "success" ]; then
-            echo "The Linux jobs are $result, so this branch does not merge." >&2
+          failed=
+          [ '${{ needs.linux.result }}' = success ] || failed="the Linux jobs are ${{ needs.linux.result }}"
+          if [ '${{ needs.cross.result }}' != success ]; then
+            failed="${failed:+$failed, and }the cross-check is ${{ needs.cross.result }}"
+          fi
+          if [ -n "$failed" ]; then
+            echo "${failed}, so this branch does not merge." >&2
             exit 1
           fi
