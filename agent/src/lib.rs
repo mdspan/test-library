@@ -65,9 +65,12 @@ pub unsafe extern "C" fn libtimewarp_genuine_clock_gettime(
 /// its way here, by its own path, with `--updater <session>`. Where the object is one the loader can
 /// only load, the constructor below runs the loop instead and this is never reached.
 ///
+/// Left out of a test build of this crate, which is a program with an entry point of its own: two
+/// of those in one binary is a binary that does not link.
+///
 /// # Safety
 /// Called by the C runtime with the argument vector this process was started with.
-#[cfg(all(target_os = "freebsd", feature = "vdso"))]
+#[cfg(all(target_os = "freebsd", feature = "vdso", not(test)))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn main(
     count: libc::c_int,
@@ -87,7 +90,7 @@ pub unsafe extern "C" fn main(
 ///
 /// # Safety
 /// `vector` must hold `count` live NUL-terminated strings.
-#[cfg(all(target_os = "freebsd", feature = "vdso"))]
+#[cfg(all(target_os = "freebsd", feature = "vdso", not(test)))]
 unsafe fn arguments(
     count: libc::c_int,
     vector: *const *const libc::c_char,
