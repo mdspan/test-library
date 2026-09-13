@@ -1,8 +1,33 @@
 name: CI
 
+# Three tiers, because a private repo bills its minutes and macOS bills them at ten times the rate
+# of everything else. The free allowance is 2,000 Linux-equivalent minutes a month, which is 200
+# wall-clock minutes of macOS and no more.
+#
+#   every pull request, and every push to main   the Linux pair                       1x
+#   every push to main                           one FreeBSD release                  1x
+#   weekly, on demand, or on a labelled PR       both macOS arches, every FreeBSD
+#                                                release, FreeBSD aarch64, a stress
+#                                                run of the racy cases                1x / 10x
+#
+# A branch without a pull request runs nothing: `push` is narrowed to main so a branch that has one
+# open is not billed twice for the same commit. To put the wide tier on a single pull request, add
+# the `ci:full` label to it; to run it now, use the Run workflow button.
+#
+# The knob to turn if the wide tier is too rare: add `github.ref == 'refs/heads/main'` to the `if:`
+# the macos, freebsd-wide and stress jobs share, which buys a full platform sweep on every merge for
+# about 200 billed minutes a time.
+
 on:
   push:
+    branches: [main]
+    tags: ["v*"]
   pull_request:
+  schedule:
+    # Sunday, 03:00 UTC. Weekly rather than nightly: the wide tier is about 200 billed minutes a
+    # run, so a nightly one would spend the month's allowance three times over.
+    - cron: "0 3 * * 0"
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -13,10 +38,12 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
-  # Everything the suite has, on both architectures we support. This is the job that gates a merge.
+  # Everything the suite has, on both architectures we support. This is the job that gates a merge,
+  # and the only one that runs on an ordinary pull request.
   linux:
     name: linux ${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -79,89 +106,31 @@ jobs:
         shell: bash
         run: .github/report-failure.sh "$PLATFORM" "$RUNNER_TEMP/test.log"
 
-  # The same suite the Linux job runs, on the architecture the hosted runners give us. The cases
-  # for functions this platform does not have are left out by the lists inside the suite, each
-  # named against the platform it belongs to.
-  macos:
-    name: macos aarch64
-    runs-on: macos-15
-    env:
-      PLATFORM: macos aarch64
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install the toolchain rust-toolchain.toml pins
-        run: rustup toolchain install
-
-      - name: Formatting
-        run: cargo fmt --all --check
-
-      - name: Build
-        run: cargo build --locked --workspace --all-targets --all-features
-
-      - name: Clippy
-        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
-
-      # The suffixed spellings of `select`, `pselect` and the four `stat` names are x86_64's, and
-      # the runner above is not. Building the library for that architecture links every one of
-      # those rows against the SDK, which is what says the names are the ones libSystem has.
-      - name: The rows the other architecture carries
-        run: |
-          rustup target add x86_64-apple-darwin
-          cargo build --locked --target x86_64-apple-darwin -p agent
-
-      # A replacement with no row in `__DATA,__interpose` is never called, so the table is read back
-      # out of the library that was just built before anything is run against it. This is the one
-      # check a compiler that is happy cannot stand in for.
-      - name: The interpose table
-        run: cargo test --locked -p agent --test interpose
-
-      # The one group this platform has that neither of the others does, and the one whose
-      # conversion depends on the ratio of the machine it runs on. Named on its own so a failure
-      # here is a line of its own rather than a line in the whole suite's log.
-      - name: The Mach clocks
-        run: cargo test --locked -p agent --test mach_clocks
-
-      - name: Test
-        shell: bash
-        run: |
-          set -o pipefail
-          cargo test --locked --workspace --all-features --no-fail-fast 2>&1 \
-            | tee "$RUNNER_TEMP/test.log"
-
-      - name: Python tool
-        working-directory: python
-        run: PYTHONPATH=. python3 -m unittest discover -s tests -t .
-
-      - name: Name what failed
+      - name: Keep the log
         if: failure()
-        shell: bash
-        run: .github/report-failure.sh "$PLATFORM" "$RUNNER_TEMP/test.log"
+        uses: actions/upload-artifact@v4
+        with:
+          name: log-linux-${{ matrix.arch }}
+          path: ${{ runner.temp }}/test.log
+          retention-days: 7
 
-  # The same suite the Linux job runs, in a VM, because GitHub has no FreeBSD runner. The log is
-  # written into the shared workspace so the host can read it after the VM is gone. The cases for
-  # functions this platform does not have are left out by the lists inside the suite, each named
-  # against the platform it belongs to.
-  #
-  # Two releases, because the family table has two FreeBSD columns and the running kernel picks
-  # between them: 14.x is the one where nothing counts suspended time, and 15.0 is the one where
-  # `CLOCK_MONOTONIC` and `CLOCK_BOOTTIME` do.
+  # The one FreeBSD release a merge waits on. The rest of the releases, and the other architecture,
+  # are in the wide tier below. Not on pull requests: a VM job is twenty-odd minutes, and at the
+  # rate branches are pushed that outspends the merges it would be protecting.
   freebsd:
-    name: freebsd x86_64 ${{ matrix.release }}
+    name: freebsd x86_64 15.0
+    if: github.event_name == 'push'
     runs-on: ubuntu-24.04
-    strategy:
-      fail-fast: false
-      matrix:
-        release: ["14.2", "15.0"]
+    timeout-minutes: 60
     env:
-      PLATFORM: freebsd x86_64 ${{ matrix.release }}
+      PLATFORM: freebsd x86_64 15.0
     steps:
       - uses: actions/checkout@v4
 
       - name: Build and test in the VM
         uses: vmactions/freebsd-vm@v1
         with:
-          release: ${{ matrix.release }}
+          release: "15.0"
           usesh: true
           prepare: |
             # The base system carries no root certificates, so cargo cannot reach crates.io
@@ -200,6 +169,233 @@ jobs:
         shell: bash
         run: .github/report-failure.sh "$PLATFORM" test.log
 
+  # Both macOS architectures, and the only tier that bills at ten times the rate. Apple silicon
+  # carries the 125:3 timebase and Intel the 1:1, and the Mach conversion has to be right at both;
+  # a job on one of them leaves the other's arithmetic unexecuted.
+  #
+  # The two entries are of different releases on purpose. Two jobs is what the budget buys, and a
+  # pair that differs in both the architecture and the release covers more of what a program meets
+  # than a pair that differs in one: what the rows here interpose is libSystem, which is a
+  # different library on each release. `macos-26` is the current one and `macos-15` the one before.
+  #
+  # `macos-15-intel` goes away in August 2027, and x86_64 goes with it. When it does, the x86_64
+  # rows and the 1:1 ratio lose their runtime coverage and the cross-build step below becomes the
+  # only thing standing behind them. `macos-26-intel` is the newer x86_64 image if this one should
+  # move forward before then.
+  macos:
+    name: macos ${{ matrix.arch }} ${{ matrix.release }}
+    if: >-
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' ||
+      contains(github.event.pull_request.labels.*.name, 'ci:full')
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: aarch64
+            release: "26"
+            runner: macos-26
+            other: x86_64-apple-darwin
+          - arch: x86_64
+            release: "15"
+            runner: macos-15-intel
+            other: aarch64-apple-darwin
+    env:
+      PLATFORM: macos ${{ matrix.arch }} ${{ matrix.release }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the toolchain rust-toolchain.toml pins
+        run: rustup toolchain install
+
+      - name: Formatting
+        run: cargo fmt --all --check
+
+      - name: Build
+        run: cargo build --locked --workspace --all-targets --all-features
+
+      - name: Clippy
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+
+      # Which spellings libSystem has is asked of the linker at build time, and the answer differs
+      # between the two architectures. Building for the other one links every row this runner does
+      # not carry against the SDK, which is what says those names are the ones libSystem has.
+      - name: The rows the other architecture carries
+        run: |
+          rustup target add ${{ matrix.other }}
+          cargo build --locked --target ${{ matrix.other }} -p agent
+
+      # A replacement with no row in `__DATA,__interpose` is never called, so the table is read back
+      # out of the library that was just built before anything is run against it. This is the one
+      # check a compiler that is happy cannot stand in for.
+      - name: The interpose table
+        run: cargo test --locked -p agent --test interpose
+
+      # The one group this platform has that neither of the others does, and the one whose
+      # conversion depends on the ratio of the machine it runs on. Named on its own so a failure
+      # here is a line of its own rather than a line in the whole suite's log.
+      - name: The Mach clocks
+        run: cargo test --locked -p agent --test mach_clocks
+
+      - name: Test
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --locked --workspace --all-features --no-fail-fast 2>&1 \
+            | tee "$RUNNER_TEMP/test.log"
+
+      - name: Python tool
+        working-directory: python
+        run: PYTHONPATH=. python3 -m unittest discover -s tests -t .
+
+      - name: Name what failed
+        if: failure()
+        shell: bash
+        run: .github/report-failure.sh "$PLATFORM" "$RUNNER_TEMP/test.log"
+
+      - name: Keep the log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: log-macos-${{ matrix.arch }}
+          path: ${{ runner.temp }}/test.log
+          retention-days: 7
+
+  # Every FreeBSD release the family table distinguishes, and the architecture no other job builds.
+  #
+  # The releases matter because the running kernel picks between the table's two FreeBSD columns:
+  # 13.x and 14.x are where nothing counts suspended time, and 15.x is where `CLOCK_MONOTONIC` and
+  # `CLOCK_BOOTTIME` do. The aarch64 entry matters because the raw system call path is hand-written
+  # assembly per architecture, and the aarch64 arm of it is compiled by nothing else here.
+  freebsd-wide:
+    name: freebsd ${{ matrix.arch }} ${{ matrix.release }}
+    if: >-
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' ||
+      contains(github.event.pull_request.labels.*.name, 'ci:full')
+    runs-on: ubuntu-24.04
+    # The aarch64 VM is emulated rather than accelerated, so it runs several times slower than the
+    # others and carries the longer bound.
+    timeout-minutes: ${{ matrix.timeout }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - release: "13.5"
+            arch: x86_64
+            timeout: 60
+          - release: "14.2"
+            arch: x86_64
+            timeout: 60
+          - release: "14.5"
+            arch: x86_64
+            timeout: 60
+          # The release the merge job also runs, repeated here so the wide tier is a whole sweep on
+          # its own rather than one with a hole where that job would have been.
+          - release: "15.0"
+            arch: x86_64
+            timeout: 60
+          - release: "15.1"
+            arch: x86_64
+            timeout: 60
+          - release: "15.0"
+            arch: aarch64
+            timeout: 150
+    env:
+      PLATFORM: freebsd ${{ matrix.arch }} ${{ matrix.release }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and test in the VM
+        uses: vmactions/freebsd-vm@v1
+        with:
+          release: ${{ matrix.release }}
+          arch: ${{ matrix.arch }}
+          usesh: true
+          prepare: |
+            pkg install -y ca_root_nss rustup-init python3
+            rustup-init -y --no-modify-path --default-toolchain none
+            kldload mqueuefs || true
+            # Go builds the program that reads the clock from the timekeep page the way a runtime
+            # does. The emulated architecture is slow enough already, so it skips those cases
+            # rather than spending a Go build on them; the accelerated ones run them.
+            if [ "${{ matrix.arch }}" = "x86_64" ]; then
+              pkg install -y go
+            fi
+          run: |
+            . "$HOME/.cargo/env"
+            rustup toolchain install
+            cargo build --locked --workspace --all-targets --all-features
+            cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+            cargo clippy --locked -p agent --no-default-features --all-targets -- -D warnings
+            cargo test --locked --workspace --all-features --no-fail-fast >test.log 2>&1
+            status=$?
+            cat test.log
+            (cd python && PYTHONPATH=. python3 -m unittest discover -s tests -t .) || status=1
+            if [ $status -ne 0 ]; then
+              echo "=== freebsd failed ==="
+              grep -E '^test .+ \.\.\. FAILED$' test.log
+            fi
+            exit $status
+
+      - name: Name what failed
+        if: failure()
+        shell: bash
+        run: .github/report-failure.sh "$PLATFORM" test.log
+
+  # The cases that can disagree with themselves between one run and the next: the seqlock, the page
+  # the updater writes and the readers read, and the clock group racing against a write. Running
+  # them many times on a real machine is what stands in for a model checker here, and it costs
+  # Linux minutes rather than macOS ones.
+  stress:
+    name: linux stress
+    if: >-
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' ||
+      contains(github.event.pull_request.labels.*.name, 'ci:full')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      PLATFORM: linux stress
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the toolchain rust-toolchain.toml pins
+        run: rustup toolchain install
+
+      - name: Build the cases once
+        run: cargo build --locked --workspace --all-targets --all-features
+
+      # A single failing round is the whole point, so the loop stops at the first one and says
+      # which round it was. Repeats are cheap next to the build that precedes them.
+      - name: Repeat the racy cases
+        shell: bash
+        run: |
+          set -u
+          for round in $(seq 1 40); do
+            if ! cargo test --locked -p common --lib session:: >"$RUNNER_TEMP/round.log" 2>&1; then
+              echo "round $round of the timekeep and seqlock cases failed" >&2
+              cat "$RUNNER_TEMP/round.log"
+              cp "$RUNNER_TEMP/round.log" "$RUNNER_TEMP/test.log"
+              exit 1
+            fi
+          done
+          for round in $(seq 1 10); do
+            if ! cargo test --locked -p agent --test clock_group >"$RUNNER_TEMP/round.log" 2>&1; then
+              echo "round $round of the clock group failed" >&2
+              cat "$RUNNER_TEMP/round.log"
+              cp "$RUNNER_TEMP/round.log" "$RUNNER_TEMP/test.log"
+              exit 1
+            fi
+          done
+
+      - name: Name what failed
+        if: failure()
+        shell: bash
+        run: .github/report-failure.sh "$PLATFORM" "$RUNNER_TEMP/test.log"
+
   # One check to point branch protection at. Only the Linux jobs are required: they are the pair
   # that covers both architectures we support, and neither a hosted macOS runner nor a FreeBSD VM
   # is something a merge should wait on.
@@ -208,6 +404,7 @@ jobs:
     needs: [linux]
     if: always()
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
     steps:
       - name: Require the Linux jobs
         run: |
