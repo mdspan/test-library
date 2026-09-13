@@ -2,9 +2,6 @@
 //! of a transaction or none of it, on its next read, and never a step the spec forbids. And a
 //! controller reading one: what a target left in the session, including what went wrong with it.
 //!
-//! `LD_PRELOAD` needs a platform arm that exports the interposed names, and creating a session
-//! needs one that can read a genuine clock, so these cases only apply where both exist.
-#![cfg(any(target_os = "linux", target_os = "freebsd"))]
 #![expect(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -64,7 +61,7 @@ fn a_program_reading_its_clocks_follows_every_transaction_and_never_steps_back()
         .arg(BUDGET.to_string())
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
-        .env("LD_PRELOAD", harness::library())
+        .env(harness::PRELOAD, harness::library())
         .env("LIBTIMEWARP_SESSION_DIR", dir.path())
         // The transactions below take the wall clock away from the elapsed families, which is a
         // pair the timekeep page could not carry.

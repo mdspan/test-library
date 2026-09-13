@@ -1,4 +1,4 @@
-//! Sleeps and timeouts: the bodies behind the names the Linux and FreeBSD arms export.
+//! Sleeps and timeouts: the bodies behind the names every platform arm exports.
 //!
 //! A wait is a promise about faketime: wake when the clock has advanced this far. So every wait
 //! converts once, at the call. A relative duration is divided by the rate of the family the wait
@@ -14,10 +14,16 @@
 //! deadline against the wall clock. The monotonic clock is asked for rather than spelled, because
 //! FreeBSD moved the name from one family to the other at 15.0.
 //!
-//! `epoll` and the two `clockwait` calls are Linux's alone, and `kevent` is FreeBSD's, so each
-//! carries a `cfg` of its own. So do `thrd_sleep`, `cnd_timedwait`, `mtx_timedlock` and
-//! `recvmmsg`: FreeBSD's libc builds each of them out of one call to a wait we already take over,
-//! and the arm there leaves the wait to that call rather than converting it twice.
+//! `epoll` and the two `clockwait` calls are Linux's alone, and `kevent` is the BSDs', in three
+//! spellings on macOS, so each carries a `cfg` of its own. So do `thrd_sleep`, `cnd_timedwait`,
+//! `mtx_timedlock` and `recvmmsg`: FreeBSD's libc builds each of them out of one call to a wait we
+//! already take over, and the arm there leaves the wait to that call rather than converting it
+//! twice.
+//!
+//! macOS has fewer of these than either: no `clock_nanosleep`, no `ppoll`, no timed mutex, rwlock,
+//! semaphore, thread join, signal or message queue, and no way to build a condition variable on a
+//! clock other than the wall clock. What it has beyond them is the two wider spellings of
+//! `kevent`.
 //!
 //! Every path here converts and then blocks in the genuine function. Nothing is written to shared
 //! memory, nothing is allocated, and nothing recurses into a symbol we took over.
@@ -25,6 +31,9 @@
 //! A timer converts by the same rules when it is armed, so [`crate::timer`] reaches these
 //! conversions through [`genuine_duration`] and [`deadline`] rather than building its own.
 
+// Which clock a condition variable was built with, which is a question only where a platform
+// lets one be chosen. macOS reads every deadline of one on the wall clock.
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 pub(crate) mod cond;
 
 use std::ptr;
@@ -206,6 +215,7 @@ pub(crate) fn unsupported() -> libc::c_int {
 }
 
 /// The same, for `mq_timedreceive`, whose answer is a count of bytes.
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 fn unsupported_size() -> libc::ssize_t {
     libc::ssize_t::try_from(unsupported()).unwrap_or(-1)
 }
@@ -324,6 +334,7 @@ unsafe fn relative_wait(
 /// # Safety
 /// `req` must be null or valid for reads of a `timespec`, and `rem` null or valid for writes of
 /// one.
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 #[inline]
 pub(crate) unsafe fn clock_nanosleep(
     clock: libc::clockid_t,
@@ -443,6 +454,7 @@ pub(crate) unsafe fn poll(
 /// # Safety
 /// `fds` must be valid for `nfds` `pollfd`s, `timeout` null or valid for reads of a `timespec`,
 /// and `sigmask` null or valid for reads of a `sigset_t`.
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 #[inline]
 pub(crate) unsafe fn ppoll(
     fds: *mut libc::pollfd,
@@ -569,13 +581,13 @@ pub(crate) unsafe fn epoll_pwait2(
         .unwrap_or_else(unsupported)
 }
 
-/// FreeBSD's own wait on a set of events, whose timeout is a relative `timespec` the kernel
+/// The BSDs' own wait on a set of events, whose timeout is a relative `timespec` the kernel
 /// measures against the monotonic clock.
 ///
 /// # Safety
 /// `changelist` must be valid for reads of `nchanges` `kevent`s, `eventlist` valid for writes of
 /// `nevents` of them, and `timeout` null or valid for reads of a `timespec`.
-#[cfg(target_os = "freebsd")]
+#[cfg(any(target_os = "freebsd", target_os = "macos"))]
 #[inline]
 pub(crate) unsafe fn kevent(
     kq: libc::c_int,
@@ -593,11 +605,75 @@ pub(crate) unsafe fn kevent(
         .unwrap_or_else(unsupported)
 }
 
+/// The same wait over the wider event macOS added beside it, whose timeout is the same relative
+/// `timespec` on the same clock. `flags` chooses between waiting and polling and names no duration.
+///
+/// # Safety
+/// `changelist` must be valid for reads of `nchanges` `kevent64_s`, `eventlist` valid for writes
+/// of `nevents` of them, and `timeout` null or valid for reads of a `timespec`.
+#[cfg(target_os = "macos")]
+#[inline]
+pub(crate) unsafe fn kevent64(
+    kq: libc::c_int,
+    changelist: *const libc::kevent64_s,
+    nchanges: libc::c_int,
+    eventlist: *mut libc::kevent64_s,
+    nevents: libc::c_int,
+    flags: libc::c_uint,
+    timeout: *const libc::timespec,
+) -> libc::c_int {
+    // Safety: `timeout` is the caller's, read only where it is non-null.
+    let converted = unsafe { relative_timeout(Func::Kevent64, monotonic_timebase(), timeout) };
+    let timeout = converted.as_ref().map_or(timeout, ptr::from_ref);
+    // Safety: every other argument is the caller's, passed on unchanged.
+    unsafe { genuine::kevent64(kq, changelist, nchanges, eventlist, nevents, flags, timeout) }
+        .unwrap_or_else(unsupported)
+}
+
+/// The form that carries a quality-of-service class, which converts nothing: it takes no
+/// deadline at all.
+///
+/// A caller that wants one arms an `EVFILT_TIMER` in the change list instead, and a change list is
+/// the program's own array of a length we do not know, which nothing on this path may copy. So the
+/// row exists to catch the call rather than to alter it, and the timers a caller arms through it,
+/// libdispatch's among them, run on genuine time.
+///
+/// # Safety
+/// Every argument must satisfy the contract libSystem gives this function.
+#[cfg(darwin_kevent_qos)]
+#[inline]
+pub(crate) unsafe fn kevent_qos(
+    kq: libc::c_int,
+    changelist: *const std::ffi::c_void,
+    nchanges: libc::c_int,
+    eventlist: *mut std::ffi::c_void,
+    nevents: libc::c_int,
+    data_out: *mut std::ffi::c_void,
+    data_available: *mut libc::size_t,
+    flags: libc::c_uint,
+) -> libc::c_int {
+    // Safety: every argument is the caller's, passed on unchanged.
+    unsafe {
+        genuine::kevent_qos(
+            kq,
+            changelist,
+            nchanges,
+            eventlist,
+            nevents,
+            data_out,
+            data_available,
+            flags,
+        )
+    }
+    .unwrap_or_else(unsupported)
+}
+
 /// Learns which clock this condition variable will read its deadlines on, and reads no time.
 ///
 /// # Safety
 /// `cond` must be valid for writes of a `pthread_cond_t`, and `attr` null or valid for reads of a
 /// `pthread_condattr_t`.
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 #[inline]
 pub(crate) unsafe fn pthread_cond_init(
     cond: *mut libc::pthread_cond_t,
@@ -618,6 +694,7 @@ pub(crate) unsafe fn pthread_cond_init(
 ///
 /// # Safety
 /// `attr` must be null or valid for reads of a `pthread_condattr_t`.
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 #[inline]
 unsafe fn attribute_clock(attr: *const libc::pthread_condattr_t) -> libc::clockid_t {
     if attr.is_null() {
@@ -648,6 +725,7 @@ unsafe extern "C" {
 ///
 /// # Safety
 /// `cond` must be valid for writes of a `pthread_cond_t`.
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 #[inline]
 pub(crate) unsafe fn pthread_cond_destroy(cond: *mut libc::pthread_cond_t) -> libc::c_int {
     cond::forget(cond);
@@ -664,7 +742,12 @@ pub(crate) unsafe fn pthread_cond_timedwait(
     mutex: *mut libc::pthread_mutex_t,
     abstime: *const libc::timespec,
 ) -> libc::c_int {
+    // The clock the variable was built with where one could be chosen, and the wall clock where
+    // the platform reads every such deadline on it and has no attribute to say otherwise.
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     let on = cond::clock_of(cond);
+    #[cfg(target_os = "macos")]
+    let on = clock::REALTIME;
     // Safety: `abstime` is the caller's, read only where it is non-null.
     let converted = unsafe { absolute_deadline(Func::PthreadCondTimedwait, on, abstime) };
     let abstime = converted.as_ref().map_or(abstime, ptr::from_ref);
@@ -691,6 +774,7 @@ pub(crate) unsafe fn pthread_cond_clockwait(
 
 /// # Safety
 /// The mutex must be the caller's live one, and `abstime` null or valid for reads of a `timespec`.
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 #[inline]
 pub(crate) unsafe fn pthread_mutex_timedlock(
     mutex: *mut libc::pthread_mutex_t,
@@ -706,6 +790,7 @@ pub(crate) unsafe fn pthread_mutex_timedlock(
 
 /// # Safety
 /// The lock must be the caller's live one, and `abstime` null or valid for reads of a `timespec`.
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 #[inline]
 pub(crate) unsafe fn pthread_rwlock_timedrdlock(
     rwlock: *mut libc::pthread_rwlock_t,
@@ -721,6 +806,7 @@ pub(crate) unsafe fn pthread_rwlock_timedrdlock(
 
 /// # Safety
 /// As [`pthread_rwlock_timedrdlock`].
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 #[inline]
 pub(crate) unsafe fn pthread_rwlock_timedwrlock(
     rwlock: *mut libc::pthread_rwlock_t,
@@ -737,6 +823,7 @@ pub(crate) unsafe fn pthread_rwlock_timedwrlock(
 /// # Safety
 /// `retval` must be null or valid for writes of a pointer, and `abstime` null or valid for reads
 /// of a `timespec`.
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 #[inline]
 pub(crate) unsafe fn pthread_timedjoin_np(
     thread: libc::pthread_t,
@@ -754,6 +841,7 @@ pub(crate) unsafe fn pthread_timedjoin_np(
 /// # Safety
 /// The semaphore must be the caller's live one, and `abstime` null or valid for reads of a
 /// `timespec`.
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 #[inline]
 pub(crate) unsafe fn sem_timedwait(
     sem: *mut libc::sem_t,
@@ -785,6 +873,7 @@ pub(crate) unsafe fn sem_clockwait(
 /// # Safety
 /// `set` must be valid for reads of a `sigset_t`, `info` null or valid for writes of a
 /// `siginfo_t`, and `timeout` null or valid for reads of a `timespec`.
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 #[inline]
 pub(crate) unsafe fn sigtimedwait(
     set: *const libc::sigset_t,
@@ -884,6 +973,7 @@ pub(crate) unsafe fn mtx_timedlock(
 /// # Safety
 /// `msg` must be valid for reads of `len` bytes, and `abstime` null or valid for reads of a
 /// `timespec`.
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 #[inline]
 pub(crate) unsafe fn mq_timedsend(
     mqdes: libc::mqd_t,
@@ -902,6 +992,7 @@ pub(crate) unsafe fn mq_timedsend(
 /// # Safety
 /// `msg` must be valid for writes of `len` bytes, `priority` null or valid for writes of an
 /// unsigned, and `abstime` null or valid for reads of a `timespec`.
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 #[inline]
 pub(crate) unsafe fn mq_timedreceive(
     mqdes: libc::mqd_t,

@@ -1,6 +1,5 @@
 //! `curl` and `git` see genuine time inside a faked tree: a command on the skip list, or off the
 //! only list, runs untouched, and its own children still attach to the session as usual.
-#![cfg(any(target_os = "linux", target_os = "freebsd"))]
 #![expect(
     clippy::unwrap_used,
     clippy::expect_used,

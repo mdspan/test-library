@@ -1,4 +1,4 @@
-//! File timestamps: the bodies behind the names the Linux and FreeBSD arms export.
+//! File timestamps: the bodies behind the names every platform arm exports.
 //!
 //! A timestamp has to agree with the clock, so a file written just now shows a modification time
 //! of about now whatever the wall clock has been set to. A read carries the genuine timestamp
@@ -16,9 +16,10 @@
 //! name no instant, so there is nothing in them to convert.
 //!
 //! `statx`, the `64` names and the `__xstat` family are Linux's alone, and the birth time inside a
-//! `stat` buffer is FreeBSD's, so each carries a `cfg` of its own. So does `utime`: FreeBSD's libc
+//! `stat` buffer is the BSDs', so each carries a `cfg` of its own. So does `utime`: FreeBSD's libc
 //! builds it out of one call to `utimes`, which we already take over, and the arm there leaves the
-//! set to that call rather than converting it twice.
+//! set to that call rather than converting it twice. macOS keeps `utime` as a call of its own
+//! reached by its own name, so that arm has one to catch.
 
 #[cfg(target_os = "linux")]
 use std::ffi::c_uint;
@@ -77,9 +78,9 @@ fn stored(func: Func, stamp: Nanos) -> Option<Nanos> {
 
 /// How many timestamps one `stat` buffer carries: the three POSIX names everywhere, and the
 /// birth time besides on a platform whose buffer has room for it.
-#[cfg(target_os = "freebsd")]
+#[cfg(any(target_os = "freebsd", target_os = "macos"))]
 const STAMPS: usize = 4;
-#[cfg(not(target_os = "freebsd"))]
+#[cfg(not(any(target_os = "freebsd", target_os = "macos")))]
 const STAMPS: usize = 3;
 
 /// A filled `stat` buffer, whichever of the shapes a libc has: the timestamps it carries, to
@@ -95,7 +96,7 @@ impl Stamped for libc::stat {
             (&mut self.st_atime, &mut self.st_atime_nsec),
             (&mut self.st_mtime, &mut self.st_mtime_nsec),
             (&mut self.st_ctime, &mut self.st_ctime_nsec),
-            #[cfg(target_os = "freebsd")]
+            #[cfg(any(target_os = "freebsd", target_os = "macos"))]
             (&mut self.st_birthtime, &mut self.st_birthtime_nsec),
         ]
     }
@@ -598,7 +599,7 @@ unsafe fn stored_timevals(func: Func, times: *const libc::timeval) -> Option<[li
 ///
 /// # Safety
 /// `times` must be null or valid for reads of a `utimbuf`.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[inline]
 unsafe fn stored_utimbuf(times: *const libc::utimbuf) -> Option<libc::utimbuf> {
     if times.is_null() {
@@ -619,7 +620,7 @@ unsafe fn stored_utimbuf(times: *const libc::utimbuf) -> Option<libc::utimbuf> {
 
 /// # Safety
 /// `path` must be a valid NUL-terminated path, and `times` null or valid for reads of a `utimbuf`.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[inline]
 pub(crate) unsafe fn utime(path: *const c_char, times: *const libc::utimbuf) -> c_int {
     // Safety: `times` is the caller's, read under the contract it came with.

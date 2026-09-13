@@ -8,25 +8,20 @@
 //! exported symbols of the image, and what puts those in front of a program there is the
 //! interpose table rather than the name.
 
+mod genuine;
 mod interpose;
 mod platform;
 mod setter;
+mod stamp;
 mod state;
+mod timer;
+mod wait;
 
-// The waits, the timers and the file timestamps are shared between the two arms that have them:
-// Linux and FreeBSD spell most of a wait the same way, and the handful each has to itself sits
-// behind a `cfg` inside. macOS answers a wait with `mach_wait_until` and reads a clock through
-// Mach besides, so its arm brings its own. The synthetic vDSO is Linux's own mechanism; FreeBSD
-// catches the same targets with a page of numbers instead.
-cfg_if::cfg_if! {
-    if #[cfg(any(target_os = "linux", target_os = "freebsd"))] {
-        mod clocks;
-        mod genuine;
-        mod stamp;
-        mod timer;
-        mod wait;
-    }
-}
+// Which clock an object of the program's was built with, for the calls that name none. macOS needs
+// no such table: a condition variable there always reads the wall clock, and there are no POSIX
+// timers and no timerfd to create.
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+mod clocks;
 
 // Posing as what a target reads the clock from without libc: the vDSO on Linux, the timekeep page
 // on FreeBSD. macOS hands Go libSystem, which interposition already reaches.
@@ -128,10 +123,9 @@ fn constructor() {
     }
     // The genuine side of every wait, found before the program can call one. A lookup takes the
     // loader's own lock, and this is the one moment where nothing of the program's is holding it.
-    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     genuine::prime();
-    // The same on macOS, where the genuine side of every row of the interpose table comes from
-    // libSystem by name rather than from a system call number.
+    // The same for the clock group on macOS, whose genuine side comes from libSystem by name
+    // rather than from a system call number.
     #[cfg(target_os = "macos")]
     common::platform::prime_genuine();
     // The auxiliary vector, before the environment it sits behind can be moved: `publish` below

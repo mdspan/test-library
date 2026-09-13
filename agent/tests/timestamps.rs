@@ -6,8 +6,9 @@
 //! with the clock without knowing what the clock was set to.
 //!
 //! The lists below are this platform's own: the `64` spellings and `statx` are Linux's, and the
-//! birth time is inside the `stat` buffer wherever there is room for it.
-#![cfg(any(target_os = "linux", target_os = "freebsd"))]
+//! birth time is inside the `stat` buffer wherever there is room for it. On macOS every reader
+//! the target calls is compiled to the `$INODE64` spelling of its name where the architecture has
+//! one, and that spelling is the row.
 #![expect(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -49,15 +50,16 @@ const READERS: &[&str] = &[
     "fstatat64",
 ];
 
-/// The same for FreeBSD, whose libc has no `64` spellings: its `off_t` has always been 64 bits.
-#[cfg(target_os = "freebsd")]
+/// The same for the BSDs, whose libc has no `64` spellings: their `off_t` has always been 64 bits.
+#[cfg(not(target_os = "linux"))]
 const READERS: &[&str] = &["stat", "fstat", "lstat", "fstatat"];
 
 /// The three timestamps every `stat` buffer carries.
 const STAMPS: &[&str] = &["atime", "mtime", "ctime"];
 
-/// Every setter of the group, by the key the target reports it under. `utime` is among them on both
-/// platforms: FreeBSD reaches the conversion through the `utimes` its own libc calls.
+/// Every setter of the group, by the key the target reports it under. `utime` is among them
+/// everywhere: FreeBSD reaches the conversion through the `utimes` its own libc calls, and the
+/// other two catch it under its own name.
 const SETTERS: &[&str] = &[
     "utime",
     "utimes",
@@ -183,7 +185,7 @@ fn statx_carries_a_birth_time_faked_with_the_rest() {
 
 /// The same where the birth time sits in the `stat` buffer itself, so every reader carries one and
 /// there is no `statx` to ask.
-#[cfg(target_os = "freebsd")]
+#[cfg(not(target_os = "linux"))]
 #[test]
 fn a_stat_buffer_carries_a_birth_time_faked_with_the_rest() {
     let dir = tempfile::tempdir().unwrap();
@@ -353,10 +355,14 @@ fn both_instant_kinds_reach_the_hook_with_their_own_func() {
         ("futimens", 410, 2),
     ];
     if cfg!(target_os = "linux") {
-        // Linux alone carries a birth time in a buffer of its own, and its libc reaches `utime`
-        // over an internal name; FreeBSD's builds it out of the `utimes` above.
+        // Linux alone carries a birth time in a buffer of its own.
         assert_eq!(report.nanos("statx.available"), 1);
-        expected.extend([("statx", 404, 1), ("utime", 405, 2)]);
+        expected.push(("statx", 404, 1));
+    }
+    // FreeBSD's libc builds `utime` out of the `utimes` above, so there the call arrives under that
+    // name; the other two keep one of their own and catch it.
+    if !cfg!(target_os = "freebsd") {
+        expected.push(("utime", 405, 2));
     }
     for (what, func, kind) in expected {
         assert!(

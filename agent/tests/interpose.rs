@@ -20,17 +20,70 @@ mod harness;
 use std::collections::BTreeMap;
 
 /// Every replacement the library carries, by the private name it exports and the libc name that
-/// name stands in for. The clock group; the other groups land with the rest of the platform.
+/// name stands in for. Every group but the Mach clocks, which read a counter rather than a clock.
+///
+/// The libc name is the one the library must never export, so a spelling that varies by
+/// architecture is written here as the plain one: we export neither.
 const REPLACEMENTS: &[(&str, &str)] = &[
+    ("libtimewarp_adjtime", "adjtime"),
+    ("libtimewarp_aio_suspend", "aio_suspend"),
+    ("libtimewarp_alarm", "alarm"),
     ("libtimewarp_clock", "clock"),
     ("libtimewarp_clock_gettime", "clock_gettime"),
+    ("libtimewarp_clock_settime", "clock_settime"),
+    ("libtimewarp_fstat", "fstat"),
+    ("libtimewarp_fstatat", "fstatat"),
     ("libtimewarp_ftime", "ftime"),
+    ("libtimewarp_futimens", "futimens"),
+    ("libtimewarp_futimes", "futimes"),
+    ("libtimewarp_getitimer", "getitimer"),
     ("libtimewarp_getrusage", "getrusage"),
     ("libtimewarp_gettimeofday", "gettimeofday"),
+    ("libtimewarp_kevent", "kevent"),
+    ("libtimewarp_kevent64", "kevent64"),
+    ("libtimewarp_lstat", "lstat"),
+    ("libtimewarp_lutimes", "lutimes"),
+    ("libtimewarp_nanosleep", "nanosleep"),
+    ("libtimewarp_poll", "poll"),
+    ("libtimewarp_pselect", "pselect"),
+    (
+        "libtimewarp_pthread_cond_timedwait",
+        "pthread_cond_timedwait",
+    ),
+    ("libtimewarp_select", "select"),
+    ("libtimewarp_setitimer", "setitimer"),
+    ("libtimewarp_settimeofday", "settimeofday"),
+    ("libtimewarp_sleep", "sleep"),
+    ("libtimewarp_stat", "stat"),
     ("libtimewarp_time", "time"),
     ("libtimewarp_times", "times"),
     ("libtimewarp_timespec_get", "timespec_get"),
+    ("libtimewarp_usleep", "usleep"),
+    ("libtimewarp_utime", "utime"),
+    ("libtimewarp_utimensat", "utimensat"),
+    ("libtimewarp_utimes", "utimes"),
 ];
+
+/// The rows a build has only where libSystem has the name behind them: the suffixed spellings of
+/// `select` and `pselect` that `x86_64` keeps, and the private form of `kevent`. `build.rs` asks
+/// the linker for each, and sets the `cfg` this reads.
+const VARIANTS: &[(&str, &str)] = &[
+    #[cfg(darwin_select_1050)]
+    ("libtimewarp_select_1050", "select$1050"),
+    #[cfg(darwin_select_extsn)]
+    ("libtimewarp_select_extsn", "select$DARWIN_EXTSN"),
+    #[cfg(darwin_pselect_extsn)]
+    ("libtimewarp_pselect_extsn", "pselect$DARWIN_EXTSN"),
+    #[cfg(darwin_kevent_qos)]
+    ("libtimewarp_kevent_qos", "kevent_qos"),
+];
+
+/// Every replacement of this build: the ones every macOS has, and the ones this one found.
+fn replacements() -> Vec<(&'static str, &'static str)> {
+    let mut every = REPLACEMENTS.to_vec();
+    every.extend_from_slice(VARIANTS);
+    every
+}
 
 /// The one exported name that replaces nothing: what a hook or a controller loaded into a faked
 /// process calls to reach the genuine clock.
@@ -152,19 +205,20 @@ fn every_replacement_has_a_row_in_the_interpose_table() {
         0,
         "the table is {size} bytes, which is no whole number of rows"
     );
+    let wanted = replacements();
     assert_eq!(
         size / ROW,
-        REPLACEMENTS.len(),
+        wanted.len(),
         "the table has {} rows for {} replacements",
         size / ROW,
-        REPLACEMENTS.len()
+        wanted.len()
     );
 
     let defined = symbols(&image);
     let rows: Vec<u64> = (0..size / ROW)
         .map(|row| word64(&image, at + row * ROW))
         .collect();
-    for (name, _) in REPLACEMENTS {
+    for (name, _) in &wanted {
         let address = *defined
             .get(&format!("_{name}"))
             .unwrap_or_else(|| panic!("{name} is not in the library's symbol table"));
@@ -194,7 +248,8 @@ fn the_library_exports_private_names_and_never_a_libc_one() {
         .collect();
     exported.sort();
 
-    let mut wanted: Vec<String> = REPLACEMENTS
+    let every = replacements();
+    let mut wanted: Vec<String> = every
         .iter()
         .map(|(name, _)| (*name).to_owned())
         .chain([GENUINE_CLOCK.to_owned()])
@@ -204,7 +259,7 @@ fn the_library_exports_private_names_and_never_a_libc_one() {
 
     // And no libc name at all. Exporting one would make its row self-referential: the replacee
     // would resolve to us, and the replacement would call itself.
-    for (_, libc_name) in REPLACEMENTS {
+    for (_, libc_name) in &every {
         assert!(
             !exported.iter().any(|name| name == libc_name),
             "{libc_name} is exported, which would make its own row point back at us"

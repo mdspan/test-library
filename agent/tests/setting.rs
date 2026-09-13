@@ -1,9 +1,6 @@
 //! A target that sets the time: the clock moves for every process of the session, and a program
 //! that probes for privilege by calling a setter sees exactly what it would have seen without us.
 //!
-//! `LD_PRELOAD` needs a platform arm that exports the interposed names, and creating a session
-//! needs one that can read a genuine clock, so these cases only apply where both exist.
-#![cfg(any(target_os = "linux", target_os = "freebsd"))]
 #![expect(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -87,13 +84,28 @@ fn capability_or_note(what: &str) -> Vec<String> {
     })
 }
 
+/// Whether a run that reaches the platform's own setters may pass a null pointer to them.
+///
+/// Linux and FreeBSD make each of these a call into the kernel, which answers `EFAULT` for a
+/// pointer it cannot read and takes a null delta as the question it is. macOS builds
+/// `clock_settime` out of `settimeofday` inside libc and reads the pointer on the way, so a
+/// genuine run there would fault where the other two are refused. Under the library the answer is
+/// ours on all three, so every faked run makes them.
+const GENUINE_NULLS: bool = !cfg!(target_os = "macos");
+
 /// One run of the program that tries every setter, under whatever wrapper and environment a case
-/// wants.
+/// wants. The library answers the calls that pass a null pointer, so a faked run makes them.
 fn setters(dir: &Path, wrapper: &[String], env: &[(&str, &str)]) -> Report {
+    run_setters(dir, wrapper, env, true)
+}
+
+/// The run itself, which decides whether the calls that pass a null pointer are made at all.
+fn run_setters(dir: &Path, wrapper: &[String], env: &[(&str, &str)], nulls: bool) -> Report {
     let mut run = Run::prog("setters")
         .session_dir(dir)
         .through(wrapper)
-        .arg(TARGET.to_string());
+        .arg(TARGET.to_string())
+        .arg(if nulls { "nulls" } else { "nonulls" });
     for (name, value) in env {
         run = run.env(name, value);
     }
@@ -168,16 +180,23 @@ fn assert_the_malformed_calls_are_refused(report: &Report) {
     for tag in ["bad_nanos", "before_epoch", "bad_micros", "bad_delta"] {
         assert_refused(report, tag, libc::EINVAL);
     }
-    // A pointer the call cannot read, after the clock it names has been found good.
-    assert_refused(report, "null_realtime", libc::EFAULT);
-    assert_refused(report, "null_monotonic", libc::EINVAL);
+    // A pointer the call cannot read, after the clock it names has been found good, and the
+    // question a null delta asks, which needs no privilege: an adjustment here lands at once rather
+    // than slewed, so there is never one still under way to report.
+    if report.nanos("nulls.available") == 1 {
+        assert_refused(report, "null_realtime", libc::EFAULT);
+        assert_refused(report, "null_monotonic", libc::EINVAL);
+        assert_succeeded(report, "no_delta");
+    }
 }
 
 /// Every clock the target named that the kernel will not set, by the tag it reports it under.
 fn settable_refusals(report: &Report) -> Vec<&'static str> {
-    let mut tags = vec!["monotonic", "boottime", "coarse", "bogus"];
-    if report.nanos("tai.available") == 1 {
-        tags.push("tai");
+    let mut tags = vec!["monotonic", "boottime", "bogus"];
+    for (name, tag) in [("coarse.available", "coarse"), ("tai.available", "tai")] {
+        if report.nanos(name) == 1 {
+            tags.push(tag);
+        }
     }
     tags
 }
@@ -188,8 +207,6 @@ fn a_clock_the_kernel_cannot_set_is_refused_the_way_the_kernel_refuses_it() {
     let report = setters(dir.path(), &[], &[]);
 
     assert_the_malformed_calls_are_refused(&report);
-    // Asking what the pending adjustment is, rather than making one, needs no privilege at all.
-    assert_succeeded(&report, "no_delta");
 }
 
 #[test]
@@ -204,10 +221,11 @@ fn an_excluded_command_reaches_the_genuine_setters() {
     let dir = tempfile::tempdir().unwrap();
     // A command on the skip list never touches a session, so every setter it makes is the
     // platform's own and answers exactly what it would have without us.
-    let report = setters(
+    let report = run_setters(
         dir.path(),
         &[],
         &[("LIBTIMEWARP_SKIP_CMDS", "setters,curl")],
+        GENUINE_NULLS,
     );
 
     assert!(
@@ -215,7 +233,6 @@ fn an_excluded_command_reaches_the_genuine_setters() {
         "an excluded command attached to something"
     );
     assert_the_malformed_calls_are_refused(&report);
-    assert_succeeded(&report, "no_delta");
     for tag in ["clock_settime", "adjtime", "settimeofday", "probe"] {
         assert_refused(&report, tag, libc::EPERM);
     }

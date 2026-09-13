@@ -1,9 +1,6 @@
 //! The C header over the crate, driven from C: the reads, the transaction calls, and the error
 //! codes, through the shared object a program links against.
 //!
-//! Creating a session reads a genuine clock and the system's randomness, so these cases need a
-//! filled-in platform arm.
-#![cfg(any(target_os = "linux", target_os = "freebsd"))]
 #![expect(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -21,7 +18,7 @@ use common::platform::default_timebase;
 use common::session::layout::Keeper;
 use common::time::{Family, Nanos};
 
-use fixture::{Fixture, library, one_at_a_time, repository, target_dir};
+use fixture::{Fixture, library, one_at_a_time, repository};
 
 const HOUR: i64 = 3_600 * Nanos::SECOND;
 
@@ -35,26 +32,14 @@ const UNSUPPORTED_FOR_KEEPER: i64 = 5;
 /// Compiles `tests/c/surface.c` against the shipped header and the shared object beside it.
 fn program() -> PathBuf {
     let library = library();
-    let out = target_dir().join("timewarp-capi-tests");
-    std::fs::create_dir_all(&out).unwrap();
-    let binary = out.join("surface");
-    let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/c/surface.c");
-    let status = Command::new(std::env::var("CC").as_deref().unwrap_or("cc"))
-        .arg("-O0")
-        .args(["-Wall", "-Wextra", "-Werror"])
-        .arg(format!("-I{}", repository().join("include").display()))
-        .arg("-o")
-        .arg(&binary)
-        .arg(&source)
-        .arg(&library)
-        .arg(format!(
-            "-Wl,-rpath,{}",
-            library.parent().unwrap().display()
-        ))
-        .status()
-        .expect("a C compiler");
-    assert!(status.success(), "compiling {}", source.display());
-    binary
+    fixture::compile(
+        "surface",
+        &[
+            format!("-I{}", repository().join("include").display()),
+            library.to_string_lossy().into_owned(),
+            format!("-Wl,-rpath,{}", library.parent().unwrap().display()),
+        ],
+    )
 }
 
 /// What the C program printed, as the `key=value` lines it prints them in.

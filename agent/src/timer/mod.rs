@@ -1,4 +1,4 @@
-//! Timers: the bodies behind the names the Linux and FreeBSD arms export.
+//! Timers: the bodies behind the names every platform arm exports.
 //!
 //! A timer makes the same promise a wait makes, and it makes it once, when it is armed: fire when
 //! the clock has advanced this far. So an arm converts by the rules [`crate::wait`] converts by. A
@@ -11,7 +11,9 @@
 //! Realtime for `ITIMER_REAL` and Cpu for the two that count consumption; `timer_settime` and
 //! `timerfd_settime` follow the clock the timer was created on, which [`owner`] remembers; `alarm`
 //! follows Realtime, being one `ITIMER_REAL` timer under another name. The timerfd is Linux's
-//! alone, so it carries a `cfg` of its own; everything else is shared.
+//! alone and the POSIX timers are Linux's and FreeBSD's, so each carries a `cfg` of its own; the
+//! three interval timers are every platform's. macOS has those three and nothing else, so nothing
+//! there has a clock to remember.
 //!
 //! A query is the other direction, and the fourth conversion the hook sees: the kernel counts a
 //! timer down in genuine time, and `getitimer`, `timer_gettime` and `timerfd_gettime` owe the
@@ -22,6 +24,9 @@
 //! stops it repeating, so neither is scaled; a frozen family must not turn a disarm into the
 //! longest duration there is, and a query must not turn a disarmed timer into an armed one.
 
+// Which clock a POSIX timer or a timerfd was created on, which is a question only where there
+// are such timers to create.
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 pub(crate) mod owner;
 
 use std::ptr;
@@ -31,7 +36,9 @@ use common::platform::clock;
 use common::session::timer_remaining;
 use common::time::Nanos;
 
-use crate::wait::{self, MICROS_PER_SECOND, duration_of, unsupported};
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+use crate::wait::duration_of;
+use crate::wait::{self, MICROS_PER_SECOND, unsupported};
 use crate::{genuine, state};
 
 /// The clock of the family an interval timer follows, or `None` for a `which` the genuine call
@@ -263,6 +270,7 @@ pub(crate) fn alarm(seconds: libc::c_uint) -> libc::c_uint {
 /// # Safety
 /// `sevp` must be null or valid for reads of a `sigevent`, and `timerid` valid for writes of a
 /// `timer_t`.
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 #[inline]
 pub(crate) unsafe fn timer_create(
     clock: libc::clockid_t,
@@ -285,6 +293,7 @@ pub(crate) unsafe fn timer_create(
 ///
 /// # Safety
 /// `new_value` must be null or valid for reads of an `itimerspec`.
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 #[inline]
 unsafe fn armed_itimerspec(
     func: Func,
@@ -312,6 +321,7 @@ unsafe fn armed_itimerspec(
 ///
 /// # Safety
 /// `value` must be null or valid for reads and writes of an `itimerspec`.
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 #[inline]
 unsafe fn report_itimerspec(func: Func, clock: libc::clockid_t, value: *mut libc::itimerspec) {
     if value.is_null() {
@@ -330,6 +340,7 @@ unsafe fn report_itimerspec(func: Func, clock: libc::clockid_t, value: *mut libc
 /// # Safety
 /// `new_value` must be null or valid for reads of an `itimerspec`, and `old_value` null or valid
 /// for reads and writes of one.
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 #[inline]
 pub(crate) unsafe fn timer_settime(
     timerid: libc::timer_t,
@@ -356,6 +367,7 @@ pub(crate) unsafe fn timer_settime(
 
 /// # Safety
 /// `curr_value` must be null or valid for reads and writes of an `itimerspec`.
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 #[inline]
 pub(crate) unsafe fn timer_gettime(
     timerid: libc::timer_t,

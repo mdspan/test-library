@@ -202,6 +202,8 @@ funcs! {
     MqTimedsend = 221, "LIBTIMEWARP_FUNC_MQ_TIMEDSEND";
     /// `mq_timedreceive`.
     MqTimedreceive = 222, "LIBTIMEWARP_FUNC_MQ_TIMEDRECEIVE";
+    /// macOS `kevent64`.
+    Kevent64 = 223, "LIBTIMEWARP_FUNC_KEVENT64";
 
     /// `setitimer`.
     Setitimer = 300, "LIBTIMEWARP_FUNC_SETITIMER";

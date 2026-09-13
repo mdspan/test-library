@@ -79,9 +79,9 @@ jobs:
         shell: bash
         run: .github/report-failure.sh "$PLATFORM" "$RUNNER_TEMP/test.log"
 
-  # Builds the library and runs the part of the suite that already applies here: the platform seam,
-  # the session with its locks, the seqlock, the hook's dispatch, and the clock group a program
-  # reaches through the interpose table. It grows as the rest of the macOS port lands.
+  # The same suite the Linux job runs, on the architecture the hosted runners give us. The cases
+  # for functions this platform does not have are left out by the lists inside the suite, each
+  # named against the platform it belongs to; the Mach clocks are the one group still to land.
   macos:
     name: macos aarch64
     runs-on: macos-15
@@ -101,6 +101,14 @@ jobs:
 
       - name: Clippy
         run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+
+      # The suffixed spellings of `select`, `pselect` and the four `stat` names are x86_64's, and
+      # the runner above is not. Building the library for that architecture links every one of
+      # those rows against the SDK, which is what says the names are the ones libSystem has.
+      - name: The rows the other architecture carries
+        run: |
+          rustup target add x86_64-apple-darwin
+          cargo build --locked --target x86_64-apple-darwin -p agent
 
       # A replacement with no row in `__DATA,__interpose` is never called, so the table is read back
       # out of the library that was just built before anything is run against it. This is the one
@@ -186,8 +194,9 @@ jobs:
         shell: bash
         run: .github/report-failure.sh "$PLATFORM" test.log
 
-  # One check to point branch protection at. Only the Linux jobs are required, because macOS and
-  # FreeBSD still run a fraction of the suite.
+  # One check to point branch protection at. Only the Linux jobs are required: they are the pair
+  # that covers both architectures we support, and neither a hosted macOS runner nor a FreeBSD VM
+  # is something a merge should wait on.
   gate:
     name: gate
     needs: [linux]

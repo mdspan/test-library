@@ -1,9 +1,6 @@
 //! The Python tool over the C library: finding a session, reading it, changing it, and the freeze
 //! it remembers a rate for, which is the tool's job rather than the library's.
 //!
-//! Creating a session reads a genuine clock and the system's randomness, so these cases need a
-//! filled-in platform arm.
-#![cfg(any(target_os = "linux", target_os = "freebsd"))]
 #![expect(
     clippy::expect_used,
     clippy::panic,
@@ -132,8 +129,7 @@ struct Member(Child);
 impl Member {
     fn of(path: &Path) -> Self {
         Self(
-            Command::new("sleep")
-                .arg("30")
+            Command::new(fixture::compile("member", &[]))
                 .env("LIBTIMEWARP__SHARED_FILE", path)
                 .stdout(Stdio::null())
                 .spawn()

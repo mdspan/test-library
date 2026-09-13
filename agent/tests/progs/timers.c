@@ -1,8 +1,9 @@
 /* Every timer the library takes over, each armed for one fake duration and each measured against
    the genuine time it actually took to fire, plus what a query reports while it is armed.
 
-   The timerfd is Linux's alone, so a platform without one reports none of its keys and the suite's
-   own list for that platform does not name them.
+   The timerfd is Linux's alone and the POSIX timers are Linux's and FreeBSD's, so a platform
+   without them reports none of their keys and the suite's own list for that platform does not name
+   them. macOS has the three interval timers and nothing else.
 
    Linked against the library rather than preloading it, so the genuine clock comes from the
    library's own symbol and the measurement is not the one under test.
@@ -119,13 +120,21 @@ static void skipped(const char *key) {
 }
 
 /* Waits for one of the timer signals, which main blocks so that it is caught here rather than
-   killing the process. */
+   killing the process. macOS has no `sigwaitinfo`, and `sigwait` answers the same question. */
 static void wait_for(int signo) {
     sigset_t set;
     sigemptyset(&set);
     sigaddset(&set, signo);
+#ifdef __APPLE__
+    {
+        int caught = 0;
+        while (sigwait(&set, &caught) != 0 && errno == EINTR) {
+        }
+    }
+#else
     while (sigwaitinfo(&set, NULL) < 0 && errno == EINTR) {
     }
+#endif
 }
 
 /* ---- the interval timers ---- */
@@ -222,8 +231,9 @@ static void alarms(void) {
     done("alarm", NS_PER_S, 0);
 }
 
-/* ---- the POSIX timers ---- */
+/* ---- the POSIX timers, which macOS does not have ---- */
 
+#ifndef __APPLE__
 static void posix_timers(void) {
     struct sigevent event;
     struct itimerspec new_value, current;
@@ -273,6 +283,7 @@ static void posix_timers(void) {
     done("timer_realtime", base_ns, 0);
     timer_delete(wall);
 }
+#endif
 
 /* ---- the timerfds, which only Linux has ---- */
 
@@ -348,7 +359,20 @@ static void timerfds(void) {
 static void sleep_and_timer(void) {
     struct timespec request = spec_of(base_ns);
     long long start, woke, fired;
-#ifdef __linux__
+#if defined(__APPLE__)
+    /* The one timer this platform has: the wall-clock interval timer, firing a signal. */
+    struct itimerval new_value;
+
+    memset(&new_value, 0, sizeof new_value);
+    new_value.it_value = val_of(base_ns);
+
+    start = genuine_mono();
+    setitimer(ITIMER_REAL, &new_value, NULL);
+    nanosleep(&request, NULL);
+    woke = genuine_mono() - start;
+    wait_for(SIGALRM);
+    fired = genuine_mono() - start;
+#elif defined(__linux__)
     struct itimerspec new_value;
     int fd = timerfd_create(CLOCK_MONOTONIC, 0);
 
@@ -421,7 +445,9 @@ int main(int argc, char **argv) {
 
     interval_timers();
     alarms();
+#ifndef __APPLE__
     posix_timers();
+#endif
 #ifdef __linux__
     timerfds();
 #endif

@@ -12,16 +12,6 @@
 //! see. A process with no session has nothing of ours to move, so there the genuine function is
 //! the whole of the answer.
 
-// The macOS arm does not export these yet, so there nothing calls them.
-#![cfg_attr(
-    not(any(target_os = "linux", target_os = "freebsd")),
-    allow(
-        dead_code,
-        reason = "reached only through a platform arm, and the macOS arm names none of these so \
-                  far"
-    )
-)]
-
 use common::hook::{Func, Status};
 use common::platform::{self, clock};
 use common::session::clock_now;

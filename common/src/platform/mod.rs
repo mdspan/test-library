@@ -32,7 +32,9 @@
 //! `genuine_nanosleep`, which the timekeep page and its updater need and no other platform has.
 //! macOS supplies `prime_genuine`, which finds libSystem's own definition of every function the
 //! interpose table stands in front of, once, at load; a lookup there takes the loader's lock, and
-//! the constructor is the one moment where nothing of the program's is holding it.
+//! the constructor is the one moment where nothing of the program's is holding it, and
+//! `libsystem_symbol`, which is that lookup for one name, since on that platform the way past a
+//! replacement of ours is the image rather than the next definition along.
 
 use std::ffi::{c_char, c_void};
 use std::ptr::NonNull;

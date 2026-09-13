@@ -2,8 +2,10 @@
    each measured against the genuine clock it actually blocked in.
 
    The groups differ by platform: `epoll` and the two `clockwait` calls are Linux's, `kevent` is
-   FreeBSD's, and a call by number is Linux's way of asking for one. A wait a platform does not
-   have is not reported at all, and the suite's own list for that platform does not name it.
+   the BSDs' and its wider form macOS's, and a call by number is Linux's way of asking for one.
+   macOS has none of the timed locks, timed semaphores, message queues or C11 threads calls, and no
+   way to build a condition variable on a clock other than the wall clock. A wait a platform does
+   not have is not reported at all, and the suite's own list for that platform does not name it.
 
    Linked against the library rather than preloading it, so the genuine clock comes from the
    library's own symbol and the measurement is not the one under test.
@@ -18,10 +20,8 @@
 #include <aio.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <mqueue.h>
 #include <poll.h>
 #include <pthread.h>
-#include <semaphore.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -36,9 +36,17 @@
 #ifdef __FreeBSD__
 /* `pthread_timedjoin_np` is a non-portable extension here, and lives in a header of its own. */
 #include <pthread_np.h>
+#endif
+#if defined(__FreeBSD__) || defined(__APPLE__)
 #include <sys/event.h>
 #endif
+#ifndef __APPLE__
+/* The timed semaphores, the message queues and the C11 threads calls, none of which this platform
+   has. */
+#include <mqueue.h>
+#include <semaphore.h>
 #include <threads.h>
+#endif
 #include <time.h>
 #include <unistd.h>
 
@@ -114,12 +122,16 @@ static void burn(long long ns) {
 /* ---- the sleeps ---- */
 
 static void sleeps(void) {
-    struct timespec request, remaining;
+    struct timespec request;
+#ifndef __APPLE__
+    struct timespec remaining;
+#endif
 
     request = spec_of(base_ns);
     begin();
     done("nanosleep", base_ns, nanosleep(&request, NULL));
 
+#ifndef __APPLE__
     request = spec_of(base_ns);
     begin();
     done("clock_nanosleep_relative", base_ns,
@@ -134,6 +146,7 @@ static void sleeps(void) {
     begin();
     done("clock_nanosleep_wall", base_ns,
          clock_nanosleep(CLOCK_REALTIME, TIMER_ABSTIME, &remaining, NULL));
+#endif
 
 #ifdef __linux__
     request = spec_of(base_ns);
@@ -153,9 +166,11 @@ static void sleeps(void) {
     begin();
     done("usleep", base_ns, usleep((useconds_t)(base_ns / 1000)));
 
+#ifndef __APPLE__
     request = spec_of(base_ns);
     begin();
     done("thrd_sleep", base_ns, thrd_sleep(&request, NULL));
+#endif
 }
 
 /* ---- a sleep cut short, whose remainder must come back in faketime ---- */
@@ -201,14 +216,18 @@ static void interrupted_sleep(void) {
 static void relative_timeouts(void) {
     struct timespec timeout;
     struct timeval tv;
+#ifndef __APPLE__
     sigset_t waited;
+#endif
 
     begin();
     done("poll", base_ns, poll(NULL, 0, (int)(base_ns / 1000000)));
 
+#ifndef __APPLE__
     timeout = spec_of(base_ns);
     begin();
     done("ppoll", base_ns, ppoll(NULL, 0, &timeout, NULL));
+#endif
 
     tv.tv_sec = (time_t)(base_ns / NS_PER_S);
     tv.tv_usec = (suseconds_t)((base_ns % NS_PER_S) / 1000);
@@ -250,23 +269,35 @@ static void relative_timeouts(void) {
         }
     }
 #endif
-#ifdef __FreeBSD__
+#if defined(__FreeBSD__) || defined(__APPLE__)
     /* The platform's own wait on a set of events, which nothing ever posts to here, so it runs its
-       timeout out. */
+       timeout out. macOS carries a wider event beside it, which is a function of its own. */
     {
         struct kevent event;
         int kq = kqueue();
         if (kq < 0) {
             skipped("kevent");
+#ifdef __APPLE__
+            skipped("kevent64");
+#endif
         } else {
             timeout = spec_of(base_ns);
             begin();
             done("kevent", base_ns, kevent(kq, NULL, 0, &event, 1, &timeout));
+#ifdef __APPLE__
+            {
+                struct kevent64_s wide;
+                timeout = spec_of(base_ns);
+                begin();
+                done("kevent64", base_ns, kevent64(kq, NULL, 0, &wide, 1, 0, &timeout));
+            }
+#endif
             close(kq);
         }
     }
 #endif
 
+#ifndef __APPLE__
     /* A signal that is blocked and never sent, so the wait runs its timeout out. */
     sigemptyset(&waited);
     sigaddset(&waited, SIGUSR2);
@@ -274,6 +305,7 @@ static void relative_timeouts(void) {
     timeout = spec_of(base_ns);
     begin();
     done("sigtimedwait", base_ns, sigtimedwait(&waited, NULL, &timeout));
+#endif
 }
 
 /* ---- a timeout over an asynchronous read that never completes ---- */
@@ -325,6 +357,7 @@ static void *pacer(void *arg) {
 }
 #endif
 
+#ifndef __APPLE__
 static void recvmmsg_timeout(void) {
 #ifdef __linux__
     enum { SLOTS = 2048 };
@@ -388,9 +421,11 @@ static void recvmmsg_timeout(void) {
     close(pair[1]);
 #endif
 }
+#endif
 
 /* ---- the timeouts that name an absolute deadline ---- */
 
+#ifndef __APPLE__
 static pthread_mutex_t held_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_rwlock_t held_rwlock = PTHREAD_RWLOCK_INITIALIZER;
 static mtx_t held_c11;
@@ -486,21 +521,28 @@ static void timed_semaphores(void) {
 #endif
     sem_destroy(&empty);
 }
+#endif
 
 static void condition_variables(void) {
     pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
     pthread_cond_t wall = PTHREAD_COND_INITIALIZER;
+    struct timespec deadline;
+#ifndef __APPLE__
     pthread_cond_t steady;
     pthread_condattr_t attr;
-    struct timespec deadline;
     cnd_t c11_cond;
     mtx_t c11_mutex;
+#endif
 
-    /* Built with the default clock, so its deadline is read on the wall clock. */
+    /* Built with the default clock, so its deadline is read on the wall clock. This is the whole
+       of the group on a platform with no attribute to name another one. */
     pthread_mutex_lock(&mutex);
     deadline = deadline_on(CLOCK_REALTIME);
     begin();
     done("pthread_cond_timedwait", base_ns, pthread_cond_timedwait(&wall, &mutex, &deadline));
+    pthread_mutex_unlock(&mutex);
+#ifndef __APPLE__
+    pthread_mutex_lock(&mutex);
 
     /* Built with a clock of its own, which is what `pthread_cond_init` is interposed to learn. */
     pthread_condattr_init(&attr);
@@ -554,8 +596,10 @@ static void condition_variables(void) {
     begin();
     done("cnd_timedwait", base_ns, cnd_timedwait(&c11_cond, &c11_mutex, &deadline));
     mtx_unlock(&c11_mutex);
+#endif
 }
 
+#ifndef __APPLE__
 static void message_queues(void) {
     struct mq_attr attributes;
     struct timespec deadline;
@@ -589,6 +633,7 @@ static void message_queues(void) {
     mq_close(queue);
     mq_unlink(name);
 }
+#endif
 
 int main(int argc, char **argv) {
     const char *shared;
@@ -602,11 +647,13 @@ int main(int argc, char **argv) {
     interrupted_sleep();
     relative_timeouts();
     aio_timeout();
+    condition_variables();
+#ifndef __APPLE__
     recvmmsg_timeout();
     timed_locks();
     timed_semaphores();
-    condition_variables();
     message_queues();
+#endif
 
     shared = getenv("LIBTIMEWARP__SHARED_FILE");
     printf("shared=%s\n", shared ? shared : "");

@@ -162,15 +162,17 @@ fn image() -> *mut c_void {
     handle
 }
 
-/// libSystem's definition of `name`, remembered after the first lookup.
+/// libSystem's own definition of `name`, or `None` when it has none.
 ///
-/// Relaxed for the reason [`image`] is, and reaching the code through the pointer is an address
-/// dependency.
-fn found(slot: &AtomicPtr<c_void>, name: &[u8]) -> Option<NonNull<c_void>> {
-    if let Some(known) = NonNull::new(slot.load(Ordering::Relaxed)) {
-        return Some(known);
-    }
-    // Safety: the name is NUL-terminated by construction, and the handle is the loader's own.
+/// The way past every replacement of ours: there is no definition of ours to reach past, so the
+/// image is asked by name instead of the loader being asked for the next one along. Every caller
+/// remembers the answer, which never moves.
+///
+/// # Safety
+/// `name` must be NUL-terminated.
+#[must_use]
+pub unsafe fn libsystem_symbol(name: &[u8]) -> Option<NonNull<c_void>> {
+    // Safety: the caller guarantees the name, and the handle is the loader's own.
     let found = unsafe { libc::dlsym(image(), name.as_ptr().cast::<c_char>()) };
     if found.is_null() {
         // `dlerror` reports and clears, so leaving ours set would hand the program our message the
@@ -179,8 +181,21 @@ fn found(slot: &AtomicPtr<c_void>, name: &[u8]) -> Option<NonNull<c_void>> {
         let _reported = unsafe { libc::dlerror() };
         return None;
     }
-    slot.store(found, Ordering::Relaxed);
     NonNull::new(found)
+}
+
+/// libSystem's definition of `name`, remembered after the first lookup.
+///
+/// Relaxed for the reason [`image`] is, and reaching the code through the pointer is an address
+/// dependency.
+fn found(slot: &AtomicPtr<c_void>, name: &[u8]) -> Option<NonNull<c_void>> {
+    if let Some(known) = NonNull::new(slot.load(Ordering::Relaxed)) {
+        return Some(known);
+    }
+    // Safety: the name is NUL-terminated by construction.
+    let found = unsafe { libsystem_symbol(name) }?;
+    slot.store(found.as_ptr(), Ordering::Relaxed);
+    Some(found)
 }
 
 /// Declares a genuine function: a slot for libSystem's own definition, the lookup that fills it,

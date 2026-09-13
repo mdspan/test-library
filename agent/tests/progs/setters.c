@@ -1,14 +1,19 @@
 /* Every way a program can set the wall clock, and what each one answered.
 
-   argv[1] is the instant to ask for, in nanoseconds. The calls with null pointers mean this must
-   run under the library: without us libc dereferences them where the kernel would answer EFAULT.
+   argv[1] is the instant to ask for, in nanoseconds. argv[2] is `nulls` to make the calls that
+   pass a null pointer as well, and anything else to leave them out; `nulls.available` says which.
+   Those calls are the library's to answer: it refuses them the way the kernel would, and a run
+   that reaches the platform's own calls instead gets whatever that platform makes of a null, which
+   on macOS is libc reading the pointer before the kernel ever sees it.
 
    `tai.available` says whether this platform has a TAI clock to name at all; FreeBSD grew one at
-   15.0 and has none below that. */
+   15.0 and has none below that. `coarse.available` says the same for the cheap wall clock, which
+   macOS does not have. */
 #define _GNU_SOURCE
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/time.h>
 #include <time.h>
 
@@ -72,19 +77,30 @@ int main(int argc, char **argv) {
     long long target = argc > 1 ? atoll(argv[1]) : 0;
     time_t seconds = (time_t)(target / NS_PER_S);
     const struct timespec *nowhere = NULL;
+    int nulls = argc > 2 && strcmp(argv[2], "nulls") == 0;
 
     say("target", target);
 
     /* Clocks the kernel will not set, however privileged the caller is. */
     set_clock("monotonic", CLOCK_MONOTONIC, seconds, 0);
+#ifdef CLOCK_BOOTTIME
     set_clock("boottime", CLOCK_BOOTTIME, seconds, 0);
+#else
+    /* The name this platform gives the clock that counts while the machine is asleep. */
+    set_clock("boottime", CLOCK_UPTIME_RAW, seconds, 0);
+#endif
 #ifdef CLOCK_TAI
     printf("tai.available=1\n");
     set_clock("tai", CLOCK_TAI, seconds, 0);
 #else
     printf("tai.available=0\n");
 #endif
+#ifdef CLOCK_REALTIME_COARSE
+    printf("coarse.available=1\n");
     set_clock("coarse", CLOCK_REALTIME_COARSE, seconds, 0);
+#else
+    printf("coarse.available=0\n");
+#endif
     set_clock("bogus", (clockid_t)4242, seconds, 0);
 
     /* Fields outside what the call may carry. */
@@ -93,18 +109,22 @@ int main(int argc, char **argv) {
     set_day("bad_micros", seconds, 1000000);
     adjust("bad_delta", (time_t)BAD_DELTA_S, 0);
 
-    /* Pointers the call cannot read. A clock that cannot be set is found first. The null goes
-       through a variable so the compiler leaves a call it has been told takes no null alone. */
-    errno = 0;
-    answered("null_realtime", clock_settime(CLOCK_REALTIME, nowhere));
-    errno = 0;
-    answered("null_monotonic", clock_settime(CLOCK_MONOTONIC, nowhere));
+    /* Pointers the call cannot read, and the question a null delta asks. A clock that cannot be
+       set is found before the pointer is. The null goes through a variable so the compiler leaves a
+       call it has been told takes no null alone. */
+    printf("nulls.available=%d\n", nulls);
+    if (nulls) {
+        errno = 0;
+        answered("null_realtime", clock_settime(CLOCK_REALTIME, nowhere));
+        errno = 0;
+        answered("null_monotonic", clock_settime(CLOCK_MONOTONIC, nowhere));
+        errno = 0;
+        answered("no_delta", adjtime(NULL, NULL));
+    }
 
     /* A question rather than a set: whether this process may set the clock at all. */
     errno = 0;
     answered("probe", settimeofday(NULL, NULL));
-    errno = 0;
-    answered("no_delta", adjtime(NULL, NULL));
 
     /* And the three that move the clock, each read back afterwards. */
     say("before", wall_clock());

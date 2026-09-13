@@ -1,6 +1,5 @@
 //! A user's own library in front of the keeper: what it answers, what it declines, what it reads
 //! from the arena, and what happens when it will not load.
-#![cfg(any(target_os = "linux", target_os = "freebsd"))]
 #![expect(
     clippy::unwrap_used,
     clippy::expect_used,

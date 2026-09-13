@@ -2,8 +2,12 @@
    took, so a suite case can change the session while the timer is already armed, or hold it under
    a frozen clock and see that nothing releases it.
 
-   A timerfd where the platform has one, and a POSIX timer where it does not; either way the timer
-   is created on the monotonic clock and armed with a relative duration.
+   A timerfd where the platform has one, a POSIX timer on the monotonic clock where it does not,
+   and the wall-clock interval timer on macOS, which has neither. Either way the timer is armed
+   with a relative duration, and the suite sets the rate of whichever family it follows.
+
+   The three are reached through one interface in nanoseconds, because `struct itimerspec` is a
+   POSIX timers type and a platform without those timers does not declare it.
 
    Linked against the library rather than preloading it, so the genuine clock comes from the
    library's own symbol. argv[1] is the fake duration in milliseconds. `disarmed=` goes out first,
@@ -16,6 +20,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/time.h>
 #include <time.h>
 #include <unistd.h>
 #ifdef __linux__
@@ -38,14 +43,16 @@ static long long genuine_mono(void) {
     return nanos(&ts);
 }
 
+#ifndef __APPLE__
 static struct timespec spec_of(long long ns) {
     struct timespec ts;
     ts.tv_sec = (time_t)(ns / NS_PER_S);
     ts.tv_nsec = (long)(ns % NS_PER_S);
     return ts;
 }
+#endif
 
-#ifdef __linux__
+#if defined(__linux__)
 /* One timerfd on the monotonic clock, which the three calls below arm, query and wait on. */
 static int timer;
 
@@ -54,17 +61,69 @@ static int make_timer(void) {
     return timer >= 0 ? 0 : -1;
 }
 
-static void arm(const struct itimerspec *value) { timerfd_settime(timer, 0, value, NULL); }
+static void arm(long long ns) {
+    struct itimerspec value;
+    memset(&value, 0, sizeof value);
+    value.it_value = spec_of(ns);
+    timerfd_settime(timer, 0, &value, NULL);
+}
 
-static void query(struct itimerspec *value) { timerfd_gettime(timer, value); }
+static long long left(void) {
+    struct itimerspec value;
+    memset(&value, 0, sizeof value);
+    timerfd_gettime(timer, &value);
+    return nanos(&value.it_value);
+}
 
 /* Blocks until it fires, which is a read of the count of expiries. */
 static int await(void) {
     uint64_t ticks = 0;
     return read(timer, &ticks, sizeof ticks) == (ssize_t)sizeof ticks ? 0 : -1;
 }
+#elif defined(__APPLE__)
+/* The wall-clock interval timer, firing a signal this process blocks and waits for. It is the one
+   timer this platform has, so the family it follows is Realtime rather than an elapsed one. */
+static int make_timer(void) {
+    sigset_t blocked;
+    sigemptyset(&blocked);
+    sigaddset(&blocked, SIGALRM);
+    sigprocmask(SIG_BLOCK, &blocked, NULL);
+    return 0;
+}
+
+static struct timeval val_of(long long ns) {
+    struct timeval tv;
+    tv.tv_sec = (time_t)(ns / NS_PER_S);
+    tv.tv_usec = (suseconds_t)((ns % NS_PER_S) / 1000);
+    return tv;
+}
+
+static void arm(long long ns) {
+    struct itimerval value;
+    memset(&value, 0, sizeof value);
+    value.it_value = val_of(ns);
+    setitimer(ITIMER_REAL, &value, NULL);
+}
+
+static long long left(void) {
+    struct itimerval value;
+    memset(&value, 0, sizeof value);
+    getitimer(ITIMER_REAL, &value);
+    return (long long)value.it_value.tv_sec * NS_PER_S
+           + (long long)value.it_value.tv_usec * 1000LL;
+}
+
+static int await(void) {
+    sigset_t set;
+    int caught = 0;
+    sigemptyset(&set);
+    sigaddset(&set, SIGALRM);
+    while (sigwait(&set, &caught) != 0 && errno == EINTR) {
+    }
+    return 0;
+}
 #else
-/* The same, as a POSIX timer firing a signal this process blocks and waits for. */
+/* The same, as a POSIX timer on the monotonic clock firing a signal this process waits for. */
 static timer_t timer;
 
 static int make_timer(void) {
@@ -81,9 +140,19 @@ static int make_timer(void) {
     return timer_create(CLOCK_MONOTONIC, &event, &timer);
 }
 
-static void arm(const struct itimerspec *value) { timer_settime(timer, 0, value, NULL); }
+static void arm(long long ns) {
+    struct itimerspec value;
+    memset(&value, 0, sizeof value);
+    value.it_value = spec_of(ns);
+    timer_settime(timer, 0, &value, NULL);
+}
 
-static void query(struct itimerspec *value) { timer_gettime(timer, value); }
+static long long left(void) {
+    struct itimerspec value;
+    memset(&value, 0, sizeof value);
+    timer_gettime(timer, &value);
+    return nanos(&value.it_value);
+}
 
 static int await(void) {
     sigset_t set;
@@ -96,7 +165,6 @@ static int await(void) {
 #endif
 
 int main(int argc, char **argv) {
-    struct itimerspec new_value, current;
     long long fake, started;
 
     if (argc < 2) {
@@ -110,19 +178,12 @@ int main(int argc, char **argv) {
 
     /* Armed and then disarmed: a timer with nothing left reports nothing left, whatever the rate,
        so a freeze cannot turn a disarm into the longest duration there is. */
-    memset(&new_value, 0, sizeof new_value);
-    new_value.it_value = spec_of(fake);
-    arm(&new_value);
-    memset(&new_value, 0, sizeof new_value);
-    arm(&new_value);
-    memset(&current, 0, sizeof current);
-    query(&current);
-    printf("disarmed=%lld\n", nanos(&current.it_value));
+    arm(fake);
+    arm(0);
+    printf("disarmed=%lld\n", left());
 
-    memset(&new_value, 0, sizeof new_value);
-    new_value.it_value = spec_of(fake);
     printf("fake=%lld\n", fake);
-    arm(&new_value);
+    arm(fake);
     printf("armed=1\n");
     fflush(stdout);
 

@@ -9,7 +9,8 @@
    to. Each reader reports `<key>.atime`, `<key>.mtime` and `<key>.ctime` in nanoseconds. The birth
    time comes from `statx` where that is the only buffer with room for it, and from every `stat`
    buffer where the platform keeps one there; `birth.in_stat` says which. The `64` spellings are
-   reported only where the libc has them.
+   reported only where the libc has them, and on x86_64 macOS every reader here is compiled to the
+   `$INODE64` spelling of its own name, which fills the buffer this file declares.
 
    Each setter then asks for `argv[2]` on both the access and the modification time and the file is
    read back with `stat`, so `<key>.mtime` is the round trip through both conversions and
@@ -32,12 +33,26 @@
 
 #define NS_PER_S 1000000000LL
 
-/* Whether a `stat` buffer here has room for the birth time, which FreeBSD's has and Linux's does
+/* Whether a `stat` buffer here has room for the birth time, which the BSDs' has and Linux's does
    not: there it takes `statx` to read one. */
-#ifdef __FreeBSD__
+#if defined(__FreeBSD__) || defined(__APPLE__)
 #define BIRTH_IN_STAT 1
 #else
 #define BIRTH_IN_STAT 0
+#endif
+
+/* Where each timestamp sits in the buffer. macOS spells the four as `st_*timespec` and defines no
+   POSIX `st_*tim` beside them. */
+#ifdef __APPLE__
+#define ATIME_OF(st) ((st)->st_atimespec)
+#define MTIME_OF(st) ((st)->st_mtimespec)
+#define CTIME_OF(st) ((st)->st_ctimespec)
+#define BTIME_OF(st) ((st)->st_birthtimespec)
+#else
+#define ATIME_OF(st) ((st)->st_atim)
+#define MTIME_OF(st) ((st)->st_mtim)
+#define CTIME_OF(st) ((st)->st_ctim)
+#define BTIME_OF(st) ((st)->st_birthtim)
 #endif
 
 /* The file every reader and every setter works on. */
@@ -59,11 +74,11 @@ static long long fake_now(void) {
 }
 
 static void report_stat(const char *key, const struct stat *st) {
-    printf("%s.atime=%lld\n", key, nanos(st->st_atim.tv_sec, st->st_atim.tv_nsec));
-    printf("%s.mtime=%lld\n", key, nanos(st->st_mtim.tv_sec, st->st_mtim.tv_nsec));
-    printf("%s.ctime=%lld\n", key, nanos(st->st_ctim.tv_sec, st->st_ctim.tv_nsec));
-#ifdef __FreeBSD__
-    printf("%s.btime=%lld\n", key, nanos(st->st_birthtim.tv_sec, st->st_birthtim.tv_nsec));
+    printf("%s.atime=%lld\n", key, nanos(ATIME_OF(st).tv_sec, ATIME_OF(st).tv_nsec));
+    printf("%s.mtime=%lld\n", key, nanos(MTIME_OF(st).tv_sec, MTIME_OF(st).tv_nsec));
+    printf("%s.ctime=%lld\n", key, nanos(CTIME_OF(st).tv_sec, CTIME_OF(st).tv_nsec));
+#if BIRTH_IN_STAT
+    printf("%s.btime=%lld\n", key, nanos(BTIME_OF(st).tv_sec, BTIME_OF(st).tv_nsec));
 #endif
 }
 

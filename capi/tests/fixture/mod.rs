@@ -70,6 +70,28 @@ pub(crate) fn library() -> PathBuf {
         .clone()
 }
 
+/// Compiles `tests/c/<name>.c` into a program of the suite's own, with `extra` on the command line
+/// beyond the source and the output.
+pub(crate) fn compile(name: &str, extra: &[String]) -> PathBuf {
+    let out = target_dir().join("timewarp-capi-tests");
+    std::fs::create_dir_all(&out).expect("a directory for the programs under test");
+    let binary = out.join(name);
+    let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/c")
+        .join(format!("{name}.c"));
+    let status = Command::new(std::env::var("CC").as_deref().unwrap_or("cc"))
+        .arg("-O0")
+        .args(["-Wall", "-Wextra", "-Werror"])
+        .arg("-o")
+        .arg(&binary)
+        .arg(&source)
+        .args(extra)
+        .status()
+        .expect("a C compiler");
+    assert!(status.success(), "compiling {}", source.display());
+    binary
+}
+
 /// A directory of our own with one session in it, kept mapped so the file stays whole.
 pub(crate) struct Fixture {
     pub(crate) dir: tempfile::TempDir,

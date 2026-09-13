@@ -7,7 +7,6 @@
 //!
 //! The target is linked against the library rather than preloading it, which is how it reaches the
 //! genuine-clock symbol and measures itself without the clock under test.
-#![cfg(any(target_os = "linux", target_os = "freebsd"))]
 #![expect(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -87,8 +86,24 @@ const MONOTONIC_WAITS: &[&str] = &[
     "pthread_cond_timedwait_monotonic",
 ];
 
+/// The same for macOS, which has none of `clock_nanosleep`, `ppoll`, `thrd_sleep`, `sigtimedwait`
+/// or `recvmmsg` either, and carries a wider form of `kevent` beside the plain one.
+#[cfg(target_os = "macos")]
+const MONOTONIC_WAITS: &[&str] = &[
+    "nanosleep",
+    "sleep",
+    "usleep",
+    "poll",
+    "select",
+    "pselect",
+    "kevent",
+    "kevent64",
+    "aio_suspend",
+];
+
 /// Every wait measured against the Realtime family: an absolute deadline on the wall clock,
 /// whether the call names that clock itself or takes it as the only one it has.
+#[cfg(not(target_os = "macos"))]
 const REALTIME_WAITS: &[&str] = &[
     "clock_nanosleep_wall",
     "pthread_mutex_timedlock",
@@ -104,6 +119,11 @@ const REALTIME_WAITS: &[&str] = &[
     "mq_timedsend",
 ];
 
+/// The same for macOS, whose one wait with a wall-clock deadline is the condition variable: it has
+/// no timed lock, no timed semaphore, no message queue and no `clock_nanosleep`.
+#[cfg(target_os = "macos")]
+const REALTIME_WAITS: &[&str] = &["pthread_cond_timedwait"];
+
 /// The libraries the target needs beyond libc: the timed message queues and the asynchronous reads
 /// live in `librt` on a system that has not folded them into libc, and FreeBSD keeps the C11
 /// threads calls in a library of their own.
@@ -111,6 +131,9 @@ const REALTIME_WAITS: &[&str] = &[
 const EXTRA_LIBRARIES: &[&str] = &["-pthread", "-lrt"];
 #[cfg(target_os = "freebsd")]
 const EXTRA_LIBRARIES: &[&str] = &["-pthread", "-lrt", "-lstdthreads"];
+/// macOS has neither `librt` nor a C11 threads library, and its threads are in libSystem.
+#[cfg(target_os = "macos")]
+const EXTRA_LIBRARIES: &[&str] = &["-pthread"];
 
 /// The program that asks every wait for one fake duration and reports the genuine time each
 /// blocked.
@@ -155,12 +178,16 @@ fn assert_blocked(report: &Report, key: &str, expected: i64) -> bool {
     true
 }
 
-/// How many of the waits above a run may find missing: three either way.
+/// How many of the waits above a run may find missing.
 ///
 /// On Linux `epoll_pwait2`, `sem_clockwait` and `pthread_cond_clockwait`, each on a kernel or a
 /// libc older than the suite runs on. On FreeBSD the two timed message queues, which need the
-/// `mqueuefs` module loaded, and the asynchronous read, which a kernel may have turned off.
+/// `mqueuefs` module loaded, and the asynchronous read, which a kernel may have turned off. On
+/// macOS the asynchronous read alone, for the same reason.
+#[cfg(not(target_os = "macos"))]
 const MAY_BE_MISSING: usize = 3;
+#[cfg(target_os = "macos")]
+const MAY_BE_MISSING: usize = 1;
 
 /// The genuine duration a fake one comes to at a rate of `numerator / denominator`.
 fn owed(report: &Report, key: &str, numerator: i64, denominator: i64) -> i64 {
@@ -390,12 +417,13 @@ fn a_frozen_clock_holds_a_sleeper_and_thawing_does_not_release_it() {
     drop(child.wait());
 }
 
-/// Every function of the sleeps and timeouts rows both platforms have, the number the ABI gives it,
-/// and the clock of the family it follows.
+/// Every function of the sleeps and timeouts rows Linux and FreeBSD both have, the number the ABI
+/// gives it, and the clock of the family it follows.
 ///
 /// A wait the kernel measures against its own elapsed clock carries the clock the Monotonic family
 /// tracks here; a wait handed a clock of its own carries the one the program named. The two are
 /// `CLOCK_MONOTONIC` alike on Linux, and part on FreeBSD from 15.0.
+#[cfg(not(target_os = "macos"))]
 fn shared_wait_funcs() -> Vec<(&'static str, i64, i64)> {
     let elapsed = i64::from(common::platform::monotonic_timebase());
     let named = i64::from(libc::CLOCK_MONOTONIC);
@@ -418,6 +446,23 @@ fn shared_wait_funcs() -> Vec<(&'static str, i64, i64)> {
         ("pthread_timedjoin_np", 213, realtime),
         ("sem_timedwait", 214, realtime),
         ("sigtimedwait", 216, elapsed),
+    ]
+}
+
+/// The few of that set macOS has. It has no `clock_nanosleep`, no timed lock, no timed semaphore
+/// and no message queue, and its condition variable reads every deadline on the wall clock.
+#[cfg(target_os = "macos")]
+fn shared_wait_funcs() -> Vec<(&'static str, i64, i64)> {
+    let elapsed = i64::from(common::platform::monotonic_timebase());
+    let realtime = i64::from(libc::CLOCK_REALTIME);
+    vec![
+        ("nanosleep", 100, elapsed),
+        ("sleep", 101, elapsed),
+        ("usleep", 102, elapsed),
+        ("poll", 200, elapsed),
+        ("select", 202, elapsed),
+        ("pselect", 203, elapsed),
+        ("pthread_cond_timedwait", 208, realtime),
     ]
 }
 
@@ -453,6 +498,14 @@ fn own_wait_funcs() -> Vec<(&'static str, i64, i64)> {
     )]
 }
 
+/// The two only macOS has: the same wait on a set of events, and the wider form beside it. Its
+/// `kevent_qos` names no deadline, so nothing of it ever reaches the hook.
+#[cfg(target_os = "macos")]
+fn own_wait_funcs() -> Vec<(&'static str, i64, i64)> {
+    let elapsed = i64::from(common::platform::monotonic_timebase());
+    vec![("kevent", 207, elapsed), ("kevent64", 223, elapsed)]
+}
+
 /// Every function of the two rows this platform has.
 fn wait_funcs() -> Vec<(&'static str, i64, i64)> {
     let mut funcs = shared_wait_funcs();
@@ -486,6 +539,17 @@ fn optional_wait_funcs() -> Vec<(&'static str, i64, i64)> {
         ("mq_timedsend", 221, realtime),
         ("mq_timedreceive", 222, realtime),
     ]
+}
+
+/// The asynchronous read alone here, which this kernel may refuse on the descriptor the target
+/// opens.
+#[cfg(target_os = "macos")]
+fn optional_wait_funcs() -> Vec<(&'static str, i64, i64)> {
+    vec![(
+        "aio_suspend",
+        217,
+        i64::from(common::platform::monotonic_timebase()),
+    )]
 }
 
 #[test]

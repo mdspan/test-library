@@ -13,15 +13,37 @@
 //! we support, and the buffer libc fills is libc's own shape rather than the kernel's, so the
 //! honest way past ours is the definition the loader would have bound.
 //!
-//! One list for Linux and FreeBSD, which take over nearly the same set. The few names only one of
-//! them has carry a `#[cfg]` of their own: a name this libc never defined would be a lookup that
-//! can only fail, and a type it never declared would not compile.
+//! One list for all three platforms. The names only some of them have carry a `#[cfg]` of their
+//! own: a name this libc never defined would be a lookup that can only fail, and a type it never
+//! declared would not compile.
+//!
+//! macOS asks libSystem rather than the loader, because there is no definition of ours for the
+//! loader to be asked past: dyld binds two-level, and what puts us in front of the program is the
+//! interpose table. It also keeps more than one spelling of some functions on `x86_64`, the suffix
+//! naming the ABI a program was compiled against, and the genuine side has to be the spelling the
+//! row replaces rather than a neighbour of it. Which of those the image actually exports is a
+//! question for the build rather than an assumption; `build.rs` asks the linker.
 
 use std::ffi::c_void;
 use std::ptr::{self, NonNull};
 use std::sync::atomic::{AtomicPtr, Ordering};
 
-use common::platform::genuine_symbol;
+#[cfg(not(target_os = "macos"))]
+use common::platform::genuine_symbol as definition;
+#[cfg(target_os = "macos")]
+use common::platform::libsystem_symbol as definition;
+
+/// The name the loader is asked for: the function's own, or the constant written beside it where
+/// the image spells it another way. The constant is this module's, reached from inside the one the
+/// slot lives in.
+macro_rules! symbol {
+    ($name:ident) => {
+        concat!(stringify!($name), "\0").as_bytes()
+    };
+    ($name:ident, $spelling:ident) => {
+        super::$spelling
+    };
+}
 
 /// Declares the genuine side of an interposed function: a slot for the loader's answer, and a
 /// wrapper that calls it.
@@ -33,7 +55,7 @@ macro_rules! genuine {
     ($(
         $(#[doc = $doc:expr])*
         $(#[cfg($on:meta)])?
-        fn $name:ident($($arg:ident: $ty:ty),* $(,)?) -> $ret:ty;
+        fn $name:ident($($arg:ident: $ty:ty),* $(,)?) -> $ret:ty $(= $spelling:ident)?;
     )*) => {
         $(
             $(#[cfg($on)])?
@@ -46,8 +68,7 @@ macro_rules! genuine {
                 pub(super) static FOUND: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
 
                 /// The name the loader is asked for.
-                pub(super) const SYMBOL: &[u8] =
-                    concat!(stringify!($name), "\0").as_bytes();
+                pub(super) const SYMBOL: &[u8] = symbol!($name $(, $spelling)?);
 
                 /// Looks the name up now, so no later call has to.
                 pub(super) fn prime() {
@@ -97,16 +118,65 @@ fn resolve(slot: &AtomicPtr<c_void>, name: &[u8]) -> Option<NonNull<c_void>> {
         return Some(found);
     }
     // Safety: the name is NUL-terminated by construction.
-    let found = unsafe { genuine_symbol(name) }?;
+    let found = unsafe { definition(name) }?;
     slot.store(found.as_ptr(), Ordering::Relaxed);
     Some(found)
 }
+
+/// The name libSystem knows `select` by: the widest spelling this build found. macOS on `x86_64`
+/// keeps three, and a call the program wrote in any of them is answered here by the one that
+/// refuses the fewest descriptor sets, which is what leaves a caller no worse off than without us.
+/// Every other platform has the one name.
+const SELECT: &[u8] = if cfg!(darwin_select_extsn) {
+    b"select$DARWIN_EXTSN\0"
+} else if cfg!(darwin_select_1050) {
+    b"select$1050\0"
+} else {
+    b"select\0"
+};
+
+/// The same for `pselect`, which has two spellings there rather than three.
+const PSELECT: &[u8] = if cfg!(darwin_pselect_extsn) {
+    b"pselect$DARWIN_EXTSN\0"
+} else {
+    b"pselect\0"
+};
+
+/// The same for `stat` and its three neighbours: macOS on `x86_64` spells the buffer this libc
+/// declares under a suffix, and the unsuffixed name there fills a narrower buffer of another shape.
+const STAT: &[u8] = if cfg!(darwin_inode64) {
+    b"stat$INODE64\0"
+} else {
+    b"stat\0"
+};
+
+/// The `fstat` of that set.
+const FSTAT: &[u8] = if cfg!(darwin_inode64) {
+    b"fstat$INODE64\0"
+} else {
+    b"fstat\0"
+};
+
+/// The `lstat` of that set.
+const LSTAT: &[u8] = if cfg!(darwin_inode64) {
+    b"lstat$INODE64\0"
+} else {
+    b"lstat\0"
+};
+
+/// The `fstatat` of that set.
+const FSTATAT: &[u8] = if cfg!(darwin_inode64) {
+    b"fstatat$INODE64\0"
+} else {
+    b"fstatat\0"
+};
 
 genuine! {
     /// The genuine `nanosleep`, which every relative sleep of ours blocks in.
     fn nanosleep(req: *const libc::timespec, rem: *mut libc::timespec) -> libc::c_int;
 
     /// The genuine `clock_nanosleep`, relative or absolute as the flags say.
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     fn clock_nanosleep(
         clock: libc::clockid_t,
         flags: libc::c_int,
@@ -129,6 +199,7 @@ genuine! {
     fn poll(fds: *mut libc::pollfd, nfds: libc::nfds_t, timeout: libc::c_int) -> libc::c_int;
 
     /// The genuine `ppoll`.
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     fn ppoll(
         fds: *mut libc::pollfd,
         nfds: libc::nfds_t,
@@ -143,7 +214,7 @@ genuine! {
         writefds: *mut libc::fd_set,
         exceptfds: *mut libc::fd_set,
         timeout: *mut libc::timeval,
-    ) -> libc::c_int;
+    ) -> libc::c_int = SELECT;
 
     /// The genuine `pselect`.
     fn pselect(
@@ -153,7 +224,7 @@ genuine! {
         exceptfds: *mut libc::fd_set,
         timeout: *const libc::timespec,
         sigmask: *const libc::sigset_t,
-    ) -> libc::c_int;
+    ) -> libc::c_int = PSELECT;
 
     /// The genuine `epoll_wait`.
     #[cfg(target_os = "linux")]
@@ -185,12 +256,14 @@ genuine! {
     ) -> libc::c_int;
 
     /// The genuine `pthread_cond_init`, which learns a condition variable's clock on the way past.
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     fn pthread_cond_init(
         cond: *mut libc::pthread_cond_t,
         attr: *const libc::pthread_condattr_t,
     ) -> libc::c_int;
 
     /// The genuine `pthread_cond_destroy`.
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     fn pthread_cond_destroy(cond: *mut libc::pthread_cond_t) -> libc::c_int;
 
     /// The genuine `pthread_cond_timedwait`.
@@ -210,24 +283,28 @@ genuine! {
     ) -> libc::c_int;
 
     /// The genuine `pthread_mutex_timedlock`.
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     fn pthread_mutex_timedlock(
         mutex: *mut libc::pthread_mutex_t,
         abstime: *const libc::timespec,
     ) -> libc::c_int;
 
     /// The genuine `pthread_rwlock_timedrdlock`.
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     fn pthread_rwlock_timedrdlock(
         rwlock: *mut libc::pthread_rwlock_t,
         abstime: *const libc::timespec,
     ) -> libc::c_int;
 
     /// The genuine `pthread_rwlock_timedwrlock`.
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     fn pthread_rwlock_timedwrlock(
         rwlock: *mut libc::pthread_rwlock_t,
         abstime: *const libc::timespec,
     ) -> libc::c_int;
 
     /// The genuine `pthread_timedjoin_np`.
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     fn pthread_timedjoin_np(
         thread: libc::pthread_t,
         retval: *mut *mut c_void,
@@ -235,6 +312,7 @@ genuine! {
     ) -> libc::c_int;
 
     /// The genuine `sem_timedwait`.
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     fn sem_timedwait(sem: *mut libc::sem_t, abstime: *const libc::timespec) -> libc::c_int;
 
     /// The genuine `sem_clockwait`, which libc has only from glibc 2.30.
@@ -246,6 +324,7 @@ genuine! {
     ) -> libc::c_int;
 
     /// The genuine `sigtimedwait`.
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     fn sigtimedwait(
         set: *const libc::sigset_t,
         info: *mut libc::siginfo_t,
@@ -259,8 +338,8 @@ genuine! {
         timeout: *const libc::timespec,
     ) -> libc::c_int;
 
-    /// The genuine `kevent`, FreeBSD's own way of waiting on a set of events with a deadline.
-    #[cfg(target_os = "freebsd")]
+    /// The genuine `kevent`, the BSDs' own way of waiting on a set of events with a deadline.
+    #[cfg(any(target_os = "freebsd", target_os = "macos"))]
     fn kevent(
         kq: libc::c_int,
         changelist: *const libc::kevent,
@@ -268,6 +347,32 @@ genuine! {
         eventlist: *mut libc::kevent,
         nevents: libc::c_int,
         timeout: *const libc::timespec,
+    ) -> libc::c_int;
+
+    /// The genuine `kevent64`, the same wait over the wider event this platform added beside it.
+    #[cfg(target_os = "macos")]
+    fn kevent64(
+        kq: libc::c_int,
+        changelist: *const libc::kevent64_s,
+        nchanges: libc::c_int,
+        eventlist: *mut libc::kevent64_s,
+        nevents: libc::c_int,
+        flags: libc::c_uint,
+        timeout: *const libc::timespec,
+    ) -> libc::c_int;
+
+    /// The genuine `kevent_qos`, whose events travel as the blocks of bytes they are: nothing here
+    /// reads one, because the call names no deadline for us to convert.
+    #[cfg(darwin_kevent_qos)]
+    fn kevent_qos(
+        kq: libc::c_int,
+        changelist: *const c_void,
+        nchanges: libc::c_int,
+        eventlist: *mut c_void,
+        nevents: libc::c_int,
+        data_out: *mut c_void,
+        data_available: *mut libc::size_t,
+        flags: libc::c_uint,
     ) -> libc::c_int;
 
     /// The genuine `recvmmsg`. Linux's alone, for the reason `thrd_sleep` is: FreeBSD builds the
@@ -299,6 +404,7 @@ genuine! {
     fn mtx_timedlock(mutex: *mut c_void, deadline: *const libc::timespec) -> libc::c_int;
 
     /// The genuine `mq_timedsend`.
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     fn mq_timedsend(
         mqdes: libc::mqd_t,
         msg: *const libc::c_char,
@@ -308,6 +414,7 @@ genuine! {
     ) -> libc::c_int;
 
     /// The genuine `mq_timedreceive`.
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     fn mq_timedreceive(
         mqdes: libc::mqd_t,
         msg: *mut libc::c_char,
@@ -329,6 +436,7 @@ genuine! {
 
     /// The genuine `timer_create`, which reads no time and hands back the id we record a clock
     /// against.
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     fn timer_create(
         clock: libc::clockid_t,
         sevp: *mut libc::sigevent,
@@ -336,6 +444,7 @@ genuine! {
     ) -> libc::c_int;
 
     /// The genuine `timer_settime`.
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     fn timer_settime(
         timerid: libc::timer_t,
         flags: libc::c_int,
@@ -344,6 +453,7 @@ genuine! {
     ) -> libc::c_int;
 
     /// The genuine `timer_gettime`.
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     fn timer_gettime(timerid: libc::timer_t, curr_value: *mut libc::itimerspec) -> libc::c_int;
 
     /// The genuine `timerfd_create`, which reads no time either.
@@ -363,23 +473,23 @@ genuine! {
     #[cfg(target_os = "linux")]
     fn timerfd_gettime(fd: libc::c_int, curr_value: *mut libc::itimerspec) -> libc::c_int;
 
-    /// The genuine `stat`, which glibc exports under this name only from 2.33 and FreeBSD's
-    /// libc has always exported.
-    fn stat(path: *const libc::c_char, buf: *mut libc::stat) -> libc::c_int;
+    /// The genuine `stat`, which glibc exports under this name only from 2.33 and the BSDs' libc
+    /// has always exported.
+    fn stat(path: *const libc::c_char, buf: *mut libc::stat) -> libc::c_int = STAT;
 
     /// The genuine `stat64`.
     #[cfg(target_os = "linux")]
     fn stat64(path: *const libc::c_char, buf: *mut libc::stat64) -> libc::c_int;
 
     /// The genuine `fstat`.
-    fn fstat(fd: libc::c_int, buf: *mut libc::stat) -> libc::c_int;
+    fn fstat(fd: libc::c_int, buf: *mut libc::stat) -> libc::c_int = FSTAT;
 
     /// The genuine `fstat64`.
     #[cfg(target_os = "linux")]
     fn fstat64(fd: libc::c_int, buf: *mut libc::stat64) -> libc::c_int;
 
     /// The genuine `lstat`.
-    fn lstat(path: *const libc::c_char, buf: *mut libc::stat) -> libc::c_int;
+    fn lstat(path: *const libc::c_char, buf: *mut libc::stat) -> libc::c_int = LSTAT;
 
     /// The genuine `lstat64`.
     #[cfg(target_os = "linux")]
@@ -391,7 +501,7 @@ genuine! {
         path: *const libc::c_char,
         buf: *mut libc::stat,
         flags: libc::c_int,
-    ) -> libc::c_int;
+    ) -> libc::c_int = FSTATAT;
 
     /// The genuine `fstatat64`.
     #[cfg(target_os = "linux")]
@@ -475,9 +585,9 @@ genuine! {
         flags: libc::c_int,
     ) -> libc::c_int;
 
-    /// The genuine `utime`. Linux's alone, for the reason `thrd_sleep` is: FreeBSD builds the call
-    /// out of the public `utimes`.
-    #[cfg(target_os = "linux")]
+    /// The genuine `utime`. Not FreeBSD's, for the reason `thrd_sleep` is: that libc builds the
+    /// call out of the public `utimes`, which we take over instead.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn utime(path: *const libc::c_char, times: *const libc::utimbuf) -> libc::c_int;
 
     /// The genuine `utimes`.

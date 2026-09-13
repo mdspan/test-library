@@ -130,23 +130,31 @@ pub(crate) fn copy_named(source: &Path, name: &str) -> PathBuf {
 
 /// Compiles `agent/tests/hooks/<name>.c` into a shared library a session can load, against the
 /// header the library ships for hook authors.
+///
+/// A hook may call the library's genuine-clock symbol, which is the agent's and not there at link
+/// time. A loader that binds lazily leaves such a name to the process it lands in; dyld wants to be
+/// told, which is what the last flag does.
 pub(crate) fn hook_library(name: &str) -> PathBuf {
     let source = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/hooks")
         .join(format!("{name}.c"));
+    let mut flags = vec![
+        "-shared".to_owned(),
+        "-fPIC".to_owned(),
+        "-Wall".to_owned(),
+        "-Wextra".to_owned(),
+        "-Werror".to_owned(),
+        format!("-I{}", include_dir().display()),
+    ];
+    if cfg!(target_os = "macos") {
+        flags.push("-Wl,-U,_libtimewarp_genuine_clock_gettime".to_owned());
+    }
     build(
         &source,
         &target_dir()
             .join("timewarp-tests")
             .join(format!("{name}.so")),
-        &[
-            "-shared".to_owned(),
-            "-fPIC".to_owned(),
-            "-Wall".to_owned(),
-            "-Wextra".to_owned(),
-            "-Werror".to_owned(),
-            format!("-I{}", include_dir().display()),
-        ],
+        &flags,
     )
 }
 

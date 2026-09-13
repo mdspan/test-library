@@ -13,5 +13,8 @@ avoid-breaking-exported-api = false
 # Doc lints on private helpers would only invite comment for its own sake.
 check-private-items = false
 cognitive-complexity-threshold = 15
+# Eight, because a call that passes a system function's arguments straight through is as wide as
+# that function, and `kevent_qos` takes eight of them.
+too-many-arguments-threshold = 8
 excessive-nesting-threshold = 5
 too-many-lines-threshold = 80

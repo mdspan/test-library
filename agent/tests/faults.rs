@@ -1,6 +1,5 @@
 //! What a target does when the library cannot set up what the environment asked for: genuine time
 //! on the null keeper, a fault a controller can read, or an exit.
-#![cfg(any(target_os = "linux", target_os = "freebsd"))]
 #![expect(
     clippy::unwrap_used,
     clippy::expect_used,
