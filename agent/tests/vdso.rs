@@ -85,12 +85,12 @@ fn the_auxiliary_vector_points_at_the_object_we_built() {
     let faked = Run::prog("vdso").session_dir(dir.path()).run();
 
     assert_eq!(
-        genuine.get("vdso.kernel_names"),
+        genuine.get("vdso.kernels_own"),
         "1",
-        "the kernel's own object defines the bare names beside the versioned ones",
+        "the vector points at the kernel's own object when nothing has moved it",
     );
     assert_eq!(
-        faked.get("vdso.kernel_names"),
+        faked.get("vdso.kernels_own"),
         "0",
         "the vector still points at the kernel's object",
     );
@@ -109,7 +109,11 @@ fn the_entries_that_pass_through_answer_what_the_kernel_answers() {
         assert_eq!(faked.get(key), genuine.get(key), "{key}");
     }
     assert_eq!(faked.get("vdso.getres"), genuine.get("vdso.getres"));
-    assert_eq!(faked.get("vdso.getcpu"), "0", "getcpu refused");
+    // aarch64's kernel vDSO has no `getcpu`, so ours has none to forward and there is no answer
+    // either object gives; the pair above is what says so.
+    if faked.get("vdso.getcpu.found") == "1" {
+        assert_eq!(faked.get("vdso.getcpu"), "0", "getcpu refused");
+    }
 }
 
 #[test]
@@ -125,7 +129,7 @@ fn turning_the_variable_off_leaves_the_kernel_object_in_place() {
     report.assert_wall_clock("libc", -2 * HOUR);
     // And the vDSO reader has the kernel's own object, so it reads genuine time.
     report.assert_wall_clock("vdso", 0);
-    assert_eq!(report.get("vdso.kernel_names"), "1");
+    assert_eq!(report.get("vdso.kernels_own"), "1");
 }
 
 #[test]
@@ -240,7 +244,7 @@ fn a_build_without_the_feature_says_so_and_fakes_everything_else() {
     // The hook answers the clock, which is the whole of what such a build promises: everything but
     // the vDSO works as it always does.
     assert_eq!(report.nanos("libc.time"), 1_577_836_800);
-    assert_eq!(report.get("vdso.kernel_names"), "1");
+    assert_eq!(report.get("vdso.kernels_own"), "1");
     // And the target still reads genuine time through the object the kernel left it.
     report.assert_wall_clock("vdso", 0);
 

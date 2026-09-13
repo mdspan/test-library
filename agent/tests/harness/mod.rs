@@ -523,20 +523,34 @@ impl Report {
             .unwrap_or_else(|_| panic!("`{key}` is not a number: {}", self.get(key)))
     }
 
+    /// Whether the target reported `key` at all.
+    pub(crate) fn has(&self, key: &str) -> bool {
+        self.facts.contains_key(key)
+    }
+
     /// Asserts that every wall-clock reading under `tag` is the genuine clock plus `shift`.
     ///
     /// The bound is the run's own genuine window widened by a second, which is what lets the same
     /// assertion serve a shift of hours and a shift of nothing.
+    ///
+    /// A reader the object under test has no entry for reports nothing, and what was never read
+    /// is not a reading that disagrees: aarch64's kernel vDSO has no `time`, so a target reading
+    /// through that object offers two of the three. Something has to have been read all the same.
     pub(crate) fn assert_wall_clock(&self, tag: &str, shift_nanos: i64) {
         const SLACK: i64 = 1_000_000_000;
         let low = self.before + shift_nanos - SLACK;
         let high = self.after + shift_nanos + SLACK;
 
+        let mut read = 0;
         for (key, scale) in [
             (format!("{tag}.clock_gettime"), 1),
             (format!("{tag}.gettimeofday"), 1),
             (format!("{tag}.time"), 1_000_000_000),
         ] {
+            if !self.has(&key) {
+                continue;
+            }
+            read += 1;
             let value = self.nanos(&key) * scale;
             assert!(
                 (low..=high).contains(&value),
@@ -544,6 +558,7 @@ impl Report {
                 (value - low).min(high - value) / 1_000_000_000,
             );
         }
+        assert!(read > 0, "{tag} read the wall clock no way at all");
     }
 }
 

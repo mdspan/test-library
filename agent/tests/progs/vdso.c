@@ -30,6 +30,10 @@
 #define VDSO_TIME "__vdso_time"
 #define VDSO_CLOCK_GETRES "__vdso_clock_getres"
 #define VDSO_GETCPU "__vdso_getcpu"
+/* A name the kernel's own object carries and ours does not, which is what says which of the two
+   the auxiliary vector points at. Here the kernel defines the whole group twice, versioned and
+   bare, and ours defines the versioned names alone. */
+#define VDSO_KERNELS_OWN "clock_gettime"
 #elif defined(__aarch64__)
 #define VDSO_VERSION "LINUX_2.6.39"
 #define VDSO_CLOCK_GETTIME "__kernel_clock_gettime"
@@ -37,6 +41,11 @@
 #define VDSO_TIME "__kernel_time"
 #define VDSO_CLOCK_GETRES "__kernel_clock_getres"
 #define VDSO_GETCPU "__kernel_getcpu"
+/* The same, where the kernel defines no bare name to ask for: it hides everything but the four
+   `__kernel_` names, and the signal trampoline among them is the one no synthetic object has a
+   reason to carry. It is `SYM_CODE_START` in the kernel, so it carries no function type, which is
+   why the probe below asks for a name rather than for an entry to call. */
+#define VDSO_KERNELS_OWN "__kernel_rt_sigreturn"
 #else
 #error "this program supports x86_64 and aarch64"
 #endif
@@ -140,8 +149,9 @@ static int vdso_version(const struct vdso *v, const char *want) {
 }
 
 /* Walks the hash chain for `name`. A `version` below zero asks for the name under any version,
-   which is how the aliases are found. */
-static void *lookup(const struct vdso *v, const char *name, int version) {
+   which is how the aliases are found, and a `callable` of zero takes a name of any type, which is
+   how a name that is there to be found rather than called is. */
+static void *lookup(const struct vdso *v, const char *name, int version, int callable) {
     unsigned nbucket, *bucket, *chain, index;
 
     nbucket = v->hash[0];
@@ -149,7 +159,10 @@ static void *lookup(const struct vdso *v, const char *name, int version) {
     chain = bucket + nbucket;
     for (index = bucket[elf_hash(name) % nbucket]; index; index = chain[index]) {
         Elf64_Sym *s = &v->sym[index];
-        if (ELF64_ST_TYPE(s->st_info) != STT_FUNC || s->st_shndx == SHN_UNDEF || !s->st_value) {
+        if (s->st_shndx == SHN_UNDEF || !s->st_value) {
+            continue;
+        }
+        if (callable && ELF64_ST_TYPE(s->st_info) != STT_FUNC) {
             continue;
         }
         if (strcmp(v->str + s->st_name, name) != 0) {
@@ -167,14 +180,12 @@ static void *lookup(const struct vdso *v, const char *name, int version) {
 static void *vdso_sym(const struct vdso *v, const char *name) {
     int version = vdso_version(v, VDSO_VERSION);
 
-    return version < 0 ? 0 : lookup(v, name, version);
+    return version < 0 ? 0 : lookup(v, name, version, 1);
 }
 
-/* Whether the object also defines the group under the bare names. The kernel's own does, once
-   versioned and once bare; ours defines the versioned names alone, so this says which of the two
-   the auxiliary vector points at. */
-static int has_bare_names(const struct vdso *v) {
-    return lookup(v, "clock_gettime", -1) != 0;
+/* Whether the object is the kernel's own rather than ours, by a name only the kernel's carries. */
+static int is_kernels_own(const struct vdso *v) {
+    return lookup(v, VDSO_KERNELS_OWN, -1, 0) != 0;
 }
 
 static long long nanos(const struct timespec *ts) {
@@ -203,7 +214,7 @@ static void report_vdso(const struct vdso *v) {
     time_t seconds;
 
     printf("vdso.base=%llu\n", (unsigned long long)v->addr);
-    printf("vdso.kernel_names=%d\n", has_bare_names(v));
+    printf("vdso.kernels_own=%d\n", is_kernels_own(v));
     printf("vdso.entries=%d\n", read_clock && read_day && read_seconds ? 1 : 0);
     if (read_clock && read_clock(CLOCK_REALTIME, &ts) == 0) {
         printf("vdso.clock_gettime=%lld\n", nanos(&ts));
