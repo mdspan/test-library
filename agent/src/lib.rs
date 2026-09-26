@@ -130,8 +130,9 @@ fn constructor() {
     // The genuine side of every wait, found before the program can call one. A lookup takes the
     // loader's own lock, and this is the one moment where nothing of the program's is holding it.
     genuine::prime();
-    // The same for the genuine clock, before `vdso::install` can point the auxiliary vector away
-    // from what the kernel mapped: its vDSO on Linux, and on FreeBSD the timekeep page libc reads.
+    // The same for the genuine clock. On Linux and FreeBSD this also has to come before
+    // `vdso::install` points the auxiliary vector away from what the kernel mapped: its vDSO on
+    // Linux, and on FreeBSD the timekeep page libc reads.
     common::platform::prime_genuine();
     // And the ratio the Mach counter runs at, which every reading of it converts through.
     #[cfg(target_os = "macos")]

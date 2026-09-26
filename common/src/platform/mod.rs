@@ -133,9 +133,9 @@ pub(crate) const RTLD_NEXT: *mut c_void = std::ptr::without_provenance_mut(usize
 /// The definition of `name` past ours: the one the loader would have bound the program to had we
 /// never been loaded.
 ///
-/// The clock group reaches the kernel by number, because those calls have one. The waits do not:
-/// most of them are libc's own constructions over futexes, so the genuine function comes from the
-/// loader instead. The answer never moves, so a caller looks it up once and remembers it.
+/// The waits need it: most of them are libc's own constructions over futexes, which leave no
+/// system call to make in their place, so the genuine function comes from the loader. The answer
+/// never moves, so a caller looks it up once and remembers it.
 ///
 /// # Safety
 /// `name` must be NUL-terminated.

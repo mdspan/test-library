@@ -1,10 +1,10 @@
 //! The functions past ours: what the loader would have bound the program to had we never loaded.
 //!
-//! The clock group reaches the kernel by number, because those calls have one. A wait does not:
-//! `pthread_cond_timedwait` and its neighbours are libc's own constructions over futexes, so the
-//! genuine side comes from the loader, by name. A timer is the same: `timer_create` and its
-//! neighbours carry libc state of their own. Every name below is one we export ourselves, which is
-//! why calling it directly would come straight back to us.
+//! The clock group's genuine side is the platform seam's, which each platform reaches its own way.
+//! A wait has no such side: `pthread_cond_timedwait` and its neighbours are libc's own
+//! constructions over futexes, so the genuine side comes from the loader, by name. A timer is the
+//! same: `timer_create` and its neighbours carry libc state of their own. Every name below is one
+//! we export ourselves, which is why calling it directly would come straight back to us.
 //!
 //! Adding a function is one entry in [`genuine!`]: the slot, the lookup, and the wrapper all come
 //! from there, and [`prime`] finds it with the rest at load.
