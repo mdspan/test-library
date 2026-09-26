@@ -10,14 +10,14 @@
 //! own code wherever the genuine one has them: the cheapest forwarding there is, and it leaves them
 //! answering exactly what they answered before.
 
-use common::session::layout::round_up;
-
-use super::elf::{
+use common::elf::{
     self, CLASS_64, DATA_LSB, DT_HASH, DT_NULL, DT_SONAME, DT_STRSZ, DT_STRTAB, DT_SYMENT,
     DT_SYMTAB, DT_VERDEF, DT_VERDEFNUM, DT_VERSYM, Dyn, Ehdr, GLOBAL_FUNC, Genuine, MACHINE, MAGIC,
     PF_R, PT_DYNAMIC, PT_LOAD, Phdr, SHN_DEFINED, Sym, TYPE_DYN, VER_FLG_BASE, VERSION, Verdaux,
     Verdef,
 };
+use common::session::layout::round_up;
+
 use super::entries;
 
 /// The name the object gives itself, which is the name the kernel's vDSO gives itself too.
@@ -647,6 +647,24 @@ mod tests {
             image.address_of(names::CLOCK_GETTIME),
             Some((clock_gettime as *const ()).expose_provenance())
         );
+    }
+
+    #[test]
+    fn a_lookup_for_the_kernel_own_code_refuses_every_entry_of_ours() {
+        let (_, image) = built();
+        for name in [
+            names::CLOCK_GETTIME,
+            names::GETTIMEOFDAY,
+            names::TIME,
+            names::CLOCK_GETRES,
+        ] {
+            assert_eq!(
+                image.own_address_of(name),
+                None,
+                "{} is taken for the kernel's",
+                String::from_utf8_lossy(name)
+            );
+        }
     }
 
     #[test]

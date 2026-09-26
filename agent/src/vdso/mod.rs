@@ -24,8 +24,6 @@ use common::session::layout::Header;
 mod auxv;
 
 #[cfg(all(feature = "vdso", target_os = "linux"))]
-mod elf;
-#[cfg(all(feature = "vdso", target_os = "linux"))]
 mod entries;
 #[cfg(all(feature = "vdso", target_os = "linux"))]
 mod image;

@@ -23,10 +23,10 @@ unsafe extern "C" {
     static mut environ: *mut *mut c_char;
 }
 
-/// The entry this platform names the clock's source in: the vDSO on Linux, which the libc crate
-/// spells for Android alone, and the timekeep page on FreeBSD.
+/// The entry this platform names the clock's source in: the vDSO on Linux, and the timekeep page
+/// on FreeBSD.
 #[cfg(target_os = "linux")]
-const TAG: libc::c_ulong = 33;
+const TAG: libc::c_ulong = common::platform::AT_SYSINFO_EHDR;
 #[cfg(target_os = "freebsd")]
 const TAG: libc::c_ulong = common::platform::AT_TIMEKEEP as libc::c_ulong;
 

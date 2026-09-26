@@ -9,6 +9,7 @@
 //! | `clock` | The clock ids of the families, the names a user writes for them, which family each id belongs to, and which id carries the TAI offset. |
 //! | `default_timebase` | The first clock in a family's column of the family table. FreeBSD answers from the running kernel, because the names crossed over at 15.0. |
 //! | `genuine_clock_gettime` | Reads a genuine clock into the caller's `timespec`, libc's convention. Async-signal-safe, and never routed through a symbol we interpose. |
+//! | `prime_genuine` | Settles, from the constructor, how `genuine_clock_gettime` reads: the kernel's vDSO on Linux, libc on FreeBSD, libSystem on macOS. |
 //! | `genuine_times` | Reads the genuine `tms` and the elapsed ticks `times` answers, libc's convention. Never routed through a symbol we interpose. |
 //! | `genuine_getrusage` | Reads the genuine `rusage` of a target, libc's convention. Never routed through a symbol we interpose. |
 //! | `genuine_settimeofday`, `genuine_clock_settime`, `genuine_adjtime` | Set the genuine clock, libc's convention, for a process this library is not faking. |
@@ -26,15 +27,16 @@
 //! the functions in the table above, because there it is the one image that can answer.
 //!
 //! An arm may hold more than the table: Linux also supplies `genuine_syscall`, because `syscall()`
-//! is one of the calls we take over there, and only that arm's interposers name it, and
+//! is one of the calls we take over there, and only that arm's interposers name it,
 //! `kernel_clock_gettime` with `kernel_gettimeofday`, which answer in the convention a vDSO entry
-//! owes its caller in place of libc's. FreeBSD supplies `AT_TIMEKEEP`, `any_process_maps` and
-//! `genuine_nanosleep`, which the timekeep page and its updater need and no other platform has.
-//! macOS supplies `prime_genuine`, which finds libSystem's own definition of every function the
-//! interpose table stands in front of, once, at load; a lookup there takes the loader's lock, and
-//! the constructor is the one moment where nothing of the program's is holding it, and
-//! `libsystem_symbol`, which is that lookup for one name, since on that platform the way past a
-//! replacement of ours is the image rather than the next definition along.
+//! owes its caller in place of libc's, and `AT_SYSINFO_EHDR`, the entry naming the vDSO. FreeBSD
+//! supplies `AT_TIMEKEEP`, `any_process_maps` and `genuine_nanosleep`, which the timekeep page and
+//! its updater need and no other platform has. macOS's `prime_genuine` finds libSystem's own
+//! definition of every function the interpose table stands in front of, once, at load; a lookup
+//! there takes the loader's lock, and the constructor is the one moment where nothing of the
+//! program's is holding it. macOS also supplies `libsystem_symbol`, which is that lookup for one
+//! name, since on that platform the way past a replacement of ours is the image rather than the
+//! next definition along.
 
 use std::ffi::{c_char, c_void};
 use std::ptr::NonNull;

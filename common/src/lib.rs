@@ -2,6 +2,9 @@
 //! inside it, and how a genuine reading becomes a fake one.
 
 pub mod config;
+// The kernel's vDSO, which the genuine clock reads through and the agent's synthetic one imitates.
+#[cfg(target_os = "linux")]
+pub mod elf;
 pub mod hook;
 pub mod log;
 pub mod platform;

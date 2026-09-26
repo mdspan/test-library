@@ -1,185 +1,201 @@
-//! The ELF the synthetic vDSO is written in, and the reader that finds a function in the genuine
-//! one.
+//! The ELF a vDSO is written in: what the agent writes its synthetic one in, and the reader that
+//! finds a function in the kernel's.
 //!
 //! A vDSO is a shared object the kernel maps into every process, and a target that skips libc
 //! parses it by hand: the program headers for the load segment and the dynamic array, the dynamic
 //! array for the symbol table, the strings, and the hash table, then the symbol by name and
 //! version. Everything below is what such a parse walks, on both architectures we support, which
 //! are 64-bit and little-endian alike.
+//!
+//! The genuine clock reads through the kernel's vDSO as well, which is why this lives here rather
+//! than beside the synthetic object alone.
 
 /// The first four bytes of every ELF file.
-pub(super) const MAGIC: [u8; 4] = [0x7f, b'E', b'L', b'F'];
+pub const MAGIC: [u8; 4] = [0x7f, b'E', b'L', b'F'];
 
 /// 64-bit objects, the only width either architecture we support has a vDSO in.
-pub(super) const CLASS_64: u8 = 2;
+pub const CLASS_64: u8 = 2;
 
 /// Two's-complement little-endian data, which both architectures are.
-pub(super) const DATA_LSB: u8 = 1;
+pub const DATA_LSB: u8 = 1;
 
 /// The one ELF version there has ever been.
-pub(super) const VERSION: u8 = 1;
+pub const VERSION: u8 = 1;
 
 /// A shared object, which is what a vDSO is.
-pub(super) const TYPE_DYN: u16 = 3;
+pub const TYPE_DYN: u16 = 3;
 
 /// The machine this build runs on, as the ELF header spells it.
-pub(super) const MACHINE: u16 = if cfg!(target_arch = "x86_64") {
+pub const MACHINE: u16 = if cfg!(target_arch = "x86_64") {
     62
 } else {
     183
 };
 
 /// A loadable segment.
-pub(super) const PT_LOAD: u32 = 1;
+pub const PT_LOAD: u32 = 1;
 
 /// The segment holding the dynamic array.
-pub(super) const PT_DYNAMIC: u32 = 2;
+pub const PT_DYNAMIC: u32 = 2;
 
 /// A segment the program may read.
-pub(super) const PF_R: u32 = 4;
+pub const PF_R: u32 = 4;
 
-/// The dynamic tags we write and read. The three above `DT_LOOS` are the versioning ones, which
-/// carry the version a symbol is defined under.
-pub(super) const DT_NULL: i64 = 0;
-pub(super) const DT_HASH: i64 = 4;
-pub(super) const DT_STRTAB: i64 = 5;
-pub(super) const DT_SYMTAB: i64 = 6;
-pub(super) const DT_STRSZ: i64 = 10;
-pub(super) const DT_SYMENT: i64 = 11;
-pub(super) const DT_SONAME: i64 = 14;
-pub(super) const DT_VERSYM: i64 = 0x6fff_fff0;
-pub(super) const DT_VERDEF: i64 = 0x6fff_fffc;
-pub(super) const DT_VERDEFNUM: i64 = 0x6fff_fffd;
+// The dynamic tags we write and read. The three above `DT_LOOS` are the versioning ones, which
+// carry the version a symbol is defined under.
+
+/// The entry that ends the dynamic array.
+pub const DT_NULL: i64 = 0;
+/// The hash table.
+pub const DT_HASH: i64 = 4;
+/// The string table.
+pub const DT_STRTAB: i64 = 5;
+/// The symbol table.
+pub const DT_SYMTAB: i64 = 6;
+/// How long the string table is.
+pub const DT_STRSZ: i64 = 10;
+/// How long one symbol is.
+pub const DT_SYMENT: i64 = 11;
+/// The object's own name, in the string table.
+pub const DT_SONAME: i64 = 14;
+/// A version index per symbol.
+pub const DT_VERSYM: i64 = 0x6fff_fff0;
+/// The version definitions.
+pub const DT_VERDEF: i64 = 0x6fff_fffc;
+/// How many version definitions there are.
+pub const DT_VERDEFNUM: i64 = 0x6fff_fffd;
 
 /// A global binding and a function type, which is what a reader demands of a symbol it will call.
-pub(super) const GLOBAL_FUNC: u8 = 0x12;
+pub const GLOBAL_FUNC: u8 = 0x12;
 
-/// The section index of a symbol that is defined here. Any index but `SHN_UNDEF` says the symbol
-/// has a definition; the sections themselves are never looked at, because a vDSO carries no
-/// section headers a reader could reach.
-pub(super) const SHN_DEFINED: u16 = 1;
+/// The section index of a symbol that is defined here.
+///
+/// Any index but `SHN_UNDEF` says the symbol has a definition; the sections themselves are never
+/// looked at, because a vDSO carries no section headers a reader could reach.
+pub const SHN_DEFINED: u16 = 1;
 
 /// The flag on the version definition that names the object itself rather than one of its
 /// versions.
-pub(super) const VER_FLG_BASE: u16 = 1;
+pub const VER_FLG_BASE: u16 = 1;
 
 /// The ELF header, at the address the auxiliary vector carries.
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
-pub(super) struct Ehdr {
+pub struct Ehdr {
     /// The magic, the class, the byte order, and the version.
-    pub(super) ident: [u8; 16],
+    pub ident: [u8; 16],
     /// [`TYPE_DYN`] for a vDSO.
-    pub(super) kind: u16,
+    pub kind: u16,
     /// The architecture.
-    pub(super) machine: u16,
+    pub machine: u16,
     /// [`VERSION`], widened.
-    pub(super) version: u32,
+    pub version: u32,
     /// Where execution would start, which a vDSO has no use for.
-    pub(super) entry: u64,
+    pub entry: u64,
     /// Where the program headers sit, counted from this header.
-    pub(super) phoff: u64,
+    pub phoff: u64,
     /// Where the section headers sit. A vDSO publishes none.
-    pub(super) shoff: u64,
+    pub shoff: u64,
     /// Architecture flags, none of which either of ours sets.
-    pub(super) flags: u32,
+    pub flags: u32,
     /// How long this header is.
-    pub(super) ehsize: u16,
+    pub ehsize: u16,
     /// How long one program header is.
-    pub(super) phentsize: u16,
+    pub phentsize: u16,
     /// How many program headers there are.
-    pub(super) phnum: u16,
+    pub phnum: u16,
     /// How long one section header would be.
-    pub(super) shentsize: u16,
+    pub shentsize: u16,
     /// How many section headers there are.
-    pub(super) shnum: u16,
+    pub shnum: u16,
     /// Which section holds the section names.
-    pub(super) shstrndx: u16,
+    pub shstrndx: u16,
 }
 
 /// One program header: a piece of the object, and where it lands.
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
-pub(super) struct Phdr {
+pub struct Phdr {
     /// [`PT_LOAD`], [`PT_DYNAMIC`], or something we walk past.
-    pub(super) kind: u32,
+    pub kind: u32,
     /// What the program may do with it.
-    pub(super) flags: u32,
+    pub flags: u32,
     /// Where the piece starts, counted from the ELF header.
-    pub(super) offset: u64,
+    pub offset: u64,
     /// The address the piece was written for.
-    pub(super) vaddr: u64,
+    pub vaddr: u64,
     /// The same, for a loader that cares about physical addresses. Nothing here does.
-    pub(super) paddr: u64,
+    pub paddr: u64,
     /// How long the piece is in the file.
-    pub(super) filesz: u64,
+    pub filesz: u64,
     /// How long it is in memory.
-    pub(super) memsz: u64,
+    pub memsz: u64,
     /// What it is aligned to.
-    pub(super) align: u64,
+    pub align: u64,
 }
 
 /// One entry of the dynamic array: what it names, and where.
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
-pub(super) struct Dyn {
+pub struct Dyn {
     /// Which of the `DT_` tags this entry carries.
-    pub(super) tag: i64,
+    pub tag: i64,
     /// The address or the number that tag takes.
-    pub(super) value: u64,
+    pub value: u64,
 }
 
 /// One symbol.
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
-pub(super) struct Sym {
+pub struct Sym {
     /// Where the symbol's name starts in the string table.
-    pub(super) name: u32,
+    pub name: u32,
     /// The binding and the type, [`GLOBAL_FUNC`] for everything we export.
-    pub(super) info: u8,
+    pub info: u8,
     /// The visibility, default for everything we export.
-    pub(super) other: u8,
+    pub other: u8,
     /// The section the symbol is defined in, [`SHN_DEFINED`] for everything we export.
-    pub(super) shndx: u16,
+    pub shndx: u16,
     /// The address, once the load bias is added.
-    pub(super) value: u64,
+    pub value: u64,
     /// How long the symbol is, which no reader of a vDSO asks.
-    pub(super) size: u64,
+    pub size: u64,
 }
 
 /// One version definition: the object's own name, or a version symbols are defined under.
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
-pub(super) struct Verdef {
+pub struct Verdef {
     /// One, the only revision there is.
-    pub(super) version: u16,
+    pub version: u16,
     /// [`VER_FLG_BASE`] on the definition that names the object itself.
-    pub(super) flags: u16,
+    pub flags: u16,
     /// The index a symbol's version word carries to refer to this definition.
-    pub(super) ndx: u16,
+    pub ndx: u16,
     /// How many names follow, which is one for each of ours.
-    pub(super) cnt: u16,
+    pub cnt: u16,
     /// [`hash`] of the name, which is what a reader matches on first.
-    pub(super) hash: u32,
+    pub hash: u32,
     /// Where the first name sits, counted from this definition.
-    pub(super) aux: u32,
+    pub aux: u32,
     /// Where the next definition sits, or zero at the end of the chain.
-    pub(super) next: u32,
+    pub next: u32,
 }
 
 /// One name of a version definition.
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
-pub(super) struct Verdaux {
+pub struct Verdaux {
     /// Where the name starts in the string table.
-    pub(super) name: u32,
+    pub name: u32,
     /// Where the next name sits, or zero at the end.
-    pub(super) next: u32,
+    pub next: u32,
 }
 
 /// The hash ELF has had since the beginning, which is the one a version definition carries and the
 /// one a lookup through `DT_HASH` buckets by.
-pub(super) fn hash(name: &[u8]) -> u32 {
+#[must_use]
+pub fn hash(name: &[u8]) -> u32 {
     let mut value: u32 = 0;
     for &byte in name {
         value = (value << 4).wrapping_add(u32::from(byte));
@@ -206,9 +222,11 @@ const unsafe fn read<T>(at: usize) -> T {
 /// The same walk a target that skips libc makes, which is what makes it the right one: a function
 /// this finds is a function such a target would have called.
 #[derive(Debug)]
-pub(super) struct Genuine {
+pub struct Genuine {
     /// What a symbol's value is counted from.
     bias: usize,
+    /// Where the load segment sits in memory, which is where the object's own code is.
+    load: std::ops::Range<usize>,
     /// Where the symbol table starts.
     symbols: usize,
     /// Where the string table starts.
@@ -222,7 +240,8 @@ impl Genuine {
     ///
     /// # Safety
     /// `base` must be the address the auxiliary vector carries for the vDSO.
-    pub(super) unsafe fn parse(base: usize) -> Option<Self> {
+    #[must_use]
+    pub unsafe fn parse(base: usize) -> Option<Self> {
         // Safety: the caller guarantees the address, and the header is the first thing at it.
         let header: Ehdr = unsafe { read(base) };
         if header.ident.get(..4)? != MAGIC || header.ident.get(4) != Some(&CLASS_64) {
@@ -230,6 +249,7 @@ impl Genuine {
         }
 
         let mut bias = None;
+        let mut load = None;
         let mut dynamic = None;
         for index in 0..usize::from(header.phnum) {
             let at = base
@@ -240,17 +260,16 @@ impl Genuine {
             let offset = usize::try_from(phdr.offset).ok()?;
             match phdr.kind {
                 PT_LOAD if bias.is_none() => {
-                    bias = Some(
-                        base.wrapping_add(offset)
-                            .wrapping_sub(usize::try_from(phdr.vaddr).ok()?),
-                    );
+                    let start = base.checked_add(offset)?;
+                    bias = Some(start.wrapping_sub(usize::try_from(phdr.vaddr).ok()?));
+                    load = Some(start..start.checked_add(usize::try_from(phdr.memsz).ok()?)?);
                 }
                 PT_DYNAMIC => dynamic = Some(base.checked_add(offset)?),
                 _ => {}
             }
         }
 
-        let (bias, dynamic) = (bias?, dynamic?);
+        let (bias, load, dynamic) = (bias?, load?, dynamic?);
         let (mut symbols, mut strings, mut count) = (None, None, None);
         for index in 0..MAX_DYNAMIC {
             let at = dynamic.checked_add(index.checked_mul(size_of::<Dyn>())?)?;
@@ -274,6 +293,7 @@ impl Genuine {
 
         Some(Self {
             bias,
+            load,
             symbols: symbols?,
             strings: strings?,
             count: count?,
@@ -281,7 +301,8 @@ impl Genuine {
     }
 
     /// The address of the function `name` names, or `None` when this vDSO has no such function.
-    pub(super) fn address_of(&self, name: &[u8]) -> Option<usize> {
+    #[must_use]
+    pub fn address_of(&self, name: &[u8]) -> Option<usize> {
         for index in 0..self.count {
             let at = self
                 .symbols
@@ -300,6 +321,17 @@ impl Genuine {
             }
         }
         None
+    }
+
+    /// The address of the function `name` names, when the function is this object's own code.
+    ///
+    /// The kernel's vDSO carries its functions inside its own load segment. A synthetic one, ours
+    /// among them, points its symbols at code in a library outside it, so this refuses such an
+    /// object's functions and keeps the kernel's.
+    #[must_use]
+    pub fn own_address_of(&self, name: &[u8]) -> Option<usize> {
+        self.address_of(name)
+            .filter(|address| self.load.contains(address))
     }
 }
 
@@ -340,6 +372,24 @@ mod tests {
         assert_eq!(hash(b"__vdso_clock_gettime"), 0x0d35_ec75);
         assert_eq!(hash(b"__vdso_gettimeofday"), 0x0315_ca59);
         assert_eq!(hash(b""), 0);
+    }
+
+    #[test]
+    fn the_kernel_vdso_clock_is_its_own_code() {
+        // Safety: `getauxval` takes a tag and answers a number.
+        let base = unsafe { libc::getauxval(crate::platform::AT_SYSINFO_EHDR) };
+        let base = usize::try_from(base).unwrap();
+        assert_ne!(base, 0, "the kernel mapped no vDSO into this process");
+        // Safety: the address is the one the auxiliary vector carries for the vDSO.
+        let kernel = unsafe { Genuine::parse(base) }.unwrap();
+        let name: &[u8] = if cfg!(target_arch = "x86_64") {
+            b"__vdso_clock_gettime"
+        } else {
+            b"__kernel_clock_gettime"
+        };
+        let found = kernel.own_address_of(name);
+        assert!(found.is_some());
+        assert_eq!(found, kernel.address_of(name));
     }
 
     #[test]

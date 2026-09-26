@@ -1,7 +1,7 @@
 //! FreeBSD.
 
 use std::io;
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicPtr, Ordering};
 
 use crate::time::Family;
 
@@ -273,10 +273,8 @@ struct Answer {
 /// Makes a system call, returning exactly what the kernel returned.
 ///
 /// The instruction rather than libc's, because the agent exports these names too: a call through
-/// libc from inside the library would come back to our own interposer. It also keeps the reading
-/// genuine where libc's own would not, since libc computes the time from the timekeep page and a
-/// session may have substituted that page. It takes no lock, allocates nothing, and touches no
-/// shared state, so it is async-signal-safe wherever the program is.
+/// libc from inside the library would come back to our own interposer. It takes no lock, allocates
+/// nothing, and touches no shared state, so it is async-signal-safe wherever the program is.
 ///
 /// # Safety
 /// The number and the arguments must be a call the kernel will accept, with every pointer among
@@ -356,7 +354,49 @@ unsafe fn genuine_syscall(
     answered.value
 }
 
-/// Reads a genuine clock through the raw system call. libc's convention.
+/// libc's `clock_gettime`, the definition past ours, or null until [`prime_genuine`] has found it.
+static LIBC_CLOCK: AtomicPtr<libc::c_void> = AtomicPtr::new(std::ptr::null_mut());
+
+/// What libc's `clock_gettime` is called through.
+type LibcClockGettime = unsafe extern "C" fn(libc::clockid_t, *mut libc::timespec) -> libc::c_int;
+
+/// Finds libc's `clock_gettime`, and ties it to the kernel's own timekeep page before the agent can
+/// substitute one of its own.
+///
+/// libc computes the time from the page the auxiliary vector names, taking its copy of that entry
+/// the first time anybody asks and keeping the page it found for good. The read below is that
+/// first time wherever nothing earlier was, so a session that rewrites the entry afterwards leaves
+/// libc on the kernel's page. Until this has run, and in a process that never runs it, the clock
+/// is read through the system call.
+///
+/// A lookup takes the loader's lock, which is why this belongs to the constructor rather than to
+/// the first read.
+pub fn prime_genuine() {
+    // Safety: the name is NUL-terminated.
+    let Some(found) = (unsafe { super::genuine_symbol(b"clock_gettime\0") }) else {
+        return;
+    };
+    // Safety: libc declares this name with this signature.
+    let read =
+        unsafe { std::mem::transmute::<*mut libc::c_void, LibcClockGettime>(found.as_ptr()) };
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // Safety: `ts` is a live, correctly typed buffer.
+    let _read = unsafe { read(clock::REALTIME, &raw mut ts) };
+    LIBC_CLOCK.store(found.as_ptr(), Ordering::Relaxed);
+}
+
+/// Reads a genuine clock, libc's convention.
+///
+/// Through libc once [`prime_genuine`] has found it, which reads the kernel's timekeep page without
+/// entering the kernel and makes the system call itself where the page cannot answer. Through the
+/// system call before then, and for a null `ts`, which the system call refuses with `EFAULT` where
+/// libc would write through it.
+///
+/// Relaxed, for the reason a genuine function's slot is: the answer names a function in a library
+/// mapped before this process ran a line, and reaching its code is an address dependency.
 ///
 /// # Safety
 /// `ts` must be null or valid for writes of a `timespec`.
@@ -365,6 +405,13 @@ pub unsafe fn genuine_clock_gettime(
     clock: libc::clockid_t,
     ts: *mut libc::timespec,
 ) -> libc::c_int {
+    let found = LIBC_CLOCK.load(Ordering::Relaxed);
+    if !ts.is_null() && !found.is_null() {
+        // Safety: the slot only ever holds libc's `clock_gettime`, which has this signature.
+        let read = unsafe { std::mem::transmute::<*mut libc::c_void, LibcClockGettime>(found) };
+        // Safety: the caller guarantees `ts`, and libc takes the clock id as it comes.
+        return unsafe { read(clock, ts) };
+    }
     // Safety: the caller guarantees `ts`, and the kernel takes the clock id as it comes.
     let result = unsafe {
         genuine_syscall(
@@ -395,8 +442,8 @@ fn ticks_of(time: &libc::timeval) -> libc::clock_t {
 /// or -1 when the kernel refused. libc's convention, and `buf` may be null.
 ///
 /// FreeBSD has no `times` system call. libc builds the function out of two `getrusage` calls and
-/// one clock read, and so does this, through the raw calls for the reason
-/// [`genuine_clock_gettime`] uses them: the agent exports `getrusage`.
+/// one clock read, and so does this, with `getrusage` through the raw call because the agent
+/// exports that name.
 ///
 /// # Safety
 /// `buf` must be null or valid for writes of a `tms`.
@@ -442,8 +489,7 @@ pub unsafe fn genuine_times(buf: *mut libc::tms) -> libc::clock_t {
 
 /// Reads the genuine resource usage of `who` into `usage`. libc's convention.
 ///
-/// Through the raw system call for the reason [`genuine_clock_gettime`] uses one: the agent
-/// exports `getrusage`.
+/// Through the raw system call, because the agent exports `getrusage`.
 ///
 /// # Safety
 /// `usage` must be valid for writes of a `rusage`.
@@ -723,6 +769,7 @@ pub fn random_bytes(buf: &mut [u8]) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::time::Nanos;
 
     /// The two columns of the family table, as the kernel's era picks between them.
     fn column(counting: bool) -> Vec<(libc::clockid_t, Family)> {
@@ -877,6 +924,59 @@ mod tests {
             let read = unsafe { genuine_clock_gettime(id, &raw mut ts) };
             assert_eq!(read, 0, "{name}");
         }
+    }
+
+    /// The monotonic clock through the system call, which is what libc's reading is held against.
+    fn monotonic_by_number() -> Nanos {
+        let mut ts = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        // Safety: `ts` is a live, correctly typed buffer.
+        let read = unsafe {
+            genuine_syscall(
+                sys::CLOCK_GETTIME,
+                [
+                    libc::c_long::from(clock::MONOTONIC),
+                    as_arg(&raw mut ts),
+                    0,
+                    0,
+                    0,
+                    0,
+                ],
+            )
+        };
+        assert_eq!(read, 0);
+        Nanos::from_timespec(&ts)
+    }
+
+    #[test]
+    fn once_primed_the_genuine_clock_reads_through_libc() {
+        prime_genuine();
+        assert!(!LIBC_CLOCK.load(Ordering::Relaxed).is_null());
+
+        let before = monotonic_by_number();
+        let mut ts = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        // Safety: `ts` is a live, correctly typed buffer.
+        let answered = unsafe { genuine_clock_gettime(clock::MONOTONIC, &raw mut ts) };
+        let after = monotonic_by_number();
+        assert_eq!(answered, 0);
+        let read = Nanos::from_timespec(&ts);
+        assert!(
+            before <= read && read <= after,
+            "libc read {read:?}, outside the system calls around it at {before:?} and {after:?}"
+        );
+
+        // Safety: as above; an unknown clock id is refused before anything is written.
+        let refused = unsafe { genuine_clock_gettime(0x7fff_ffff, &raw mut ts) };
+        assert_eq!(refused, -1);
+        assert_eq!(
+            io::Error::last_os_error().raw_os_error(),
+            Some(libc::EINVAL)
+        );
     }
 
     #[test]

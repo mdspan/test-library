@@ -1,7 +1,9 @@
 //! Linux.
 
 use std::io;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
+use crate::elf::Genuine;
 use crate::time::Family;
 
 /// What the header's platform field carries for Linux.
@@ -178,12 +180,17 @@ pub unsafe fn genuine_syscall(
     args: [libc::c_long; SYSCALL_ARGS],
 ) -> libc::c_long {
     // Safety: the caller guarantees the call.
-    let result = unsafe { raw_syscall(number, args) };
-    if (ERRNO_CEILING..0).contains(&result) {
-        set_errno(libc::c_int::try_from(-result).unwrap_or(libc::EINVAL));
+    in_libc_convention(unsafe { raw_syscall(number, args) })
+}
+
+/// The kernel's answer in libc's convention: a value as it stands, and a refusal as -1 with `errno`
+/// set to it.
+fn in_libc_convention(answered: libc::c_long) -> libc::c_long {
+    if (ERRNO_CEILING..0).contains(&answered) {
+        set_errno(libc::c_int::try_from(-answered).unwrap_or(libc::EINVAL));
         return -1;
     }
-    result
+    answered
 }
 
 /// The id the kernel gives this thread.
@@ -208,11 +215,80 @@ pub fn set_errno(value: libc::c_int) {
     unsafe { *location = value };
 }
 
-/// Reads a genuine clock through the raw syscall.
+/// The auxiliary vector entry naming where the kernel mapped the vDSO, which the libc crate spells
+/// for Android alone.
+pub const AT_SYSINFO_EHDR: libc::c_ulong = 33;
+
+/// What the kernel's vDSO calls its `clock_gettime` on this architecture.
+const VDSO_CLOCK_GETTIME: &[u8] = if cfg!(target_arch = "x86_64") {
+    b"__vdso_clock_gettime"
+} else {
+    b"__kernel_clock_gettime"
+};
+
+/// Where the kernel's vDSO keeps its `clock_gettime`: [`UNSOUGHT`] before a lookup, [`ABSENT`]
+/// after one that found nothing, and the function's address otherwise.
+static VDSO_CLOCK: AtomicUsize = AtomicUsize::new(UNSOUGHT);
+
+/// [`VDSO_CLOCK`] before anybody has looked.
+const UNSOUGHT: usize = 0;
+
+/// [`VDSO_CLOCK`] once a lookup found no function to call. No function sits at address one.
+const ABSENT: usize = 1;
+
+/// What the vDSO's `clock_gettime` is called through. It answers an `int`, which leaves the upper
+/// half of the return register the callee's to leave as it likes.
+type VdsoClockGettime = unsafe extern "C" fn(libc::clockid_t, *mut libc::timespec) -> libc::c_int;
+
+/// Finds the kernel's vDSO clock now, while the auxiliary vector still names the kernel's object.
 ///
-/// Not through libc: the agent exports `clock_gettime`, so calling it under `LD_PRELOAD` would
-/// resolve back to our own interposer and recurse until the stack ran out. The genuine vDSO goes in
-/// front of this later, for speed.
+/// The agent points that entry at a synthetic vDSO of its own once a session is installed. A lookup
+/// made after that refuses the synthetic object's entries, which call back into us, and settles on
+/// the system call for good, so the constructor looks first.
+pub fn prime_genuine() {
+    let _found = vdso_clock_gettime();
+}
+
+/// The kernel's vDSO `clock_gettime`, or `None` when this process has none to call.
+///
+/// Relaxed both ways, for the reason a genuine function's slot is: the vDSO was mapped before this
+/// process ran a line, and two threads racing here find the same answer and store it twice. The
+/// lookup reads memory alone, so it is async-signal-safe like the call it stands in front of.
+fn vdso_clock_gettime() -> Option<VdsoClockGettime> {
+    let mut address = VDSO_CLOCK.load(Ordering::Relaxed);
+    if address == UNSOUGHT {
+        address = find_vdso_clock_gettime().unwrap_or(ABSENT);
+        VDSO_CLOCK.store(address, Ordering::Relaxed);
+    }
+    if address == ABSENT {
+        return None;
+    }
+    // Safety: the address is a function the kernel's vDSO defines under this name, with this
+    // signature, and the vDSO stays mapped for the life of the process.
+    Some(unsafe {
+        std::mem::transmute::<*const (), VdsoClockGettime>(std::ptr::with_exposed_provenance(
+            address,
+        ))
+    })
+}
+
+/// Looks the kernel's `clock_gettime` up in the object the auxiliary vector names.
+fn find_vdso_clock_gettime() -> Option<usize> {
+    // Safety: `getauxval` takes a tag and answers a number, touching nothing of ours.
+    let base = usize::try_from(unsafe { libc::getauxval(AT_SYSINFO_EHDR) }).ok()?;
+    if base == 0 {
+        return None;
+    }
+    // Safety: the address is the one the auxiliary vector carries for the vDSO.
+    let object = unsafe { Genuine::parse(base) }?;
+    object.own_address_of(VDSO_CLOCK_GETTIME)
+}
+
+/// Reads a genuine clock, libc's convention.
+///
+/// Through the kernel's vDSO, which answers without entering the kernel for every clock it keeps
+/// and makes the system call itself for the rest. Never through libc: the agent exports
+/// `clock_gettime`, so calling it under `LD_PRELOAD` would come back to our own interposer.
 ///
 /// # Safety
 /// `ts` must be valid for writes of a `timespec`.
@@ -221,15 +297,10 @@ pub unsafe fn genuine_clock_gettime(
     clock: libc::clockid_t,
     ts: *mut libc::timespec,
 ) -> libc::c_int {
-    // Safety: the caller guarantees `ts`, and the kernel takes the clock id as it comes.
-    let result = unsafe {
-        genuine_syscall(
-            libc::SYS_clock_gettime,
-            [libc::c_long::from(clock), as_arg(ts), 0, 0, 0, 0],
-        )
-    };
-    // The syscall answers 0 or -1, so the narrowing never changes what the caller sees.
-    libc::c_int::try_from(result).unwrap_or(-1)
+    // Safety: the caller guarantees `ts`.
+    let answered = in_libc_convention(unsafe { kernel_clock_gettime(clock, ts) });
+    // The kernel answers 0 or a refusal, so the narrowing never changes what the caller sees.
+    libc::c_int::try_from(answered).unwrap_or(-1)
 }
 
 /// Reads a genuine clock the way the kernel's own vDSO answers: zero, or the negative of what it
@@ -240,6 +311,9 @@ pub unsafe fn genuine_clock_gettime(
 /// the way libc expects, so an entry that can be reached from there reports the refusal in its
 /// answer instead of writing anywhere.
 ///
+/// The vDSO where there is one. A null `ts` goes to the system call, which refuses it with
+/// `EFAULT` where the vDSO would write through it.
+///
 /// # Safety
 /// `ts` must be null or valid for writes of a `timespec`.
 #[must_use]
@@ -248,6 +322,12 @@ pub unsafe fn kernel_clock_gettime(
     clock: libc::clockid_t,
     ts: *mut libc::timespec,
 ) -> libc::c_long {
+    if !ts.is_null()
+        && let Some(read) = vdso_clock_gettime()
+    {
+        // Safety: the caller guarantees `ts`, and the vDSO takes the clock id as it comes.
+        return libc::c_long::from(unsafe { read(clock, ts) });
+    }
     // Safety: the caller guarantees `ts`, and the kernel takes the clock id as it comes.
     unsafe {
         raw_syscall(
@@ -532,4 +612,84 @@ pub fn random_bytes(buf: &mut [u8]) -> io::Result<()> {
         filled += usize::try_from(got).unwrap_or(0);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::time::Nanos;
+
+    /// The monotonic clock through the system call, which is what the vDSO's reading is held
+    /// against.
+    fn monotonic_by_number() -> Nanos {
+        let mut ts = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        // Safety: `ts` is a live, correctly typed buffer.
+        let read = unsafe {
+            raw_syscall(
+                libc::SYS_clock_gettime,
+                [
+                    libc::c_long::from(clock::MONOTONIC),
+                    as_arg(&raw mut ts),
+                    0,
+                    0,
+                    0,
+                    0,
+                ],
+            )
+        };
+        assert_eq!(read, 0);
+        Nanos::from_timespec(&ts)
+    }
+
+    #[test]
+    fn the_genuine_clock_reads_through_the_kernel_vdso() {
+        prime_genuine();
+        assert!(
+            vdso_clock_gettime().is_some(),
+            "no vDSO clock was found, so every genuine read is a system call"
+        );
+
+        let before = monotonic_by_number();
+        let mut ts = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        // Safety: `ts` is a live, correctly typed buffer.
+        let answered = unsafe { genuine_clock_gettime(clock::MONOTONIC, &raw mut ts) };
+        let after = monotonic_by_number();
+        assert_eq!(answered, 0);
+        let read = Nanos::from_timespec(&ts);
+        assert!(
+            before <= read && read <= after,
+            "the vDSO read {read:?}, outside the system calls around it at {before:?} and {after:?}"
+        );
+    }
+
+    #[test]
+    fn a_refusal_through_the_vdso_answers_what_the_kernel_would() {
+        let mut ts = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        // Safety: `ts` is a live, correctly typed buffer, and an unknown clock id is refused.
+        let refused = unsafe { kernel_clock_gettime(0x7fff_ffff, &raw mut ts) };
+        assert_eq!(refused, -libc::c_long::from(libc::EINVAL));
+        // Safety: as above.
+        let refused = unsafe { genuine_clock_gettime(0x7fff_ffff, &raw mut ts) };
+        assert_eq!(refused, -1);
+        assert_eq!(
+            io::Error::last_os_error().raw_os_error(),
+            Some(libc::EINVAL)
+        );
+    }
+
+    #[test]
+    fn a_null_buffer_is_refused_rather_than_written_through() {
+        // Safety: a null buffer goes to the system call, which refuses it without writing.
+        let refused = unsafe { kernel_clock_gettime(clock::MONOTONIC, std::ptr::null_mut()) };
+        assert_eq!(refused, -libc::c_long::from(libc::EFAULT));
+    }
 }
