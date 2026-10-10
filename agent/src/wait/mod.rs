@@ -271,6 +271,57 @@ impl Unused {
     }
 }
 
+/// The genuine `nanosleep`. When a signal cuts it short, `rem` gets the genuine time it had left.
+///
+/// # Safety
+/// `req` must be null or valid for reads of a `timespec`, and `rem` null or valid for writes of
+/// one.
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+#[inline]
+unsafe fn genuine_nanosleep(
+    req: *const libc::timespec,
+    rem: *mut libc::timespec,
+) -> Option<libc::c_int> {
+    // Safety: the caller guarantees both, which pass on unchanged.
+    unsafe { genuine::nanosleep(req, rem) }
+}
+
+/// The same on macOS, built here. libSystem's own reads the time left on a Mach clock port, and on
+/// `x86_64` that read reaches our `clock_get_time` row and comes back faked. So the genuine call
+/// gets no buffer, and the time left is measured around it on `CLOCK_UPTIME_RAW`, the counter the
+/// kernel times the sleep on and the one libSystem's port reads.
+///
+/// # Safety
+/// `req` must be null or valid for reads of a `timespec`, and `rem` null or valid for writes of
+/// one.
+#[cfg(target_os = "macos")]
+#[inline]
+unsafe fn genuine_nanosleep(
+    req: *const libc::timespec,
+    rem: *mut libc::timespec,
+) -> Option<libc::c_int> {
+    // Safety: `req` is the caller's, read only where it is non-null.
+    let asked = (!req.is_null() && !rem.is_null()).then(|| duration_of(unsafe { &*req }));
+    let Some(Some(asked)) = asked else {
+        // No remainder to report, or a request libSystem refuses before it reads any clock.
+        // Safety: the caller guarantees both, which pass on unchanged.
+        return unsafe { genuine::nanosleep(req, rem) };
+    };
+    let started = platform::genuine_nanos(clock::MONOTONIC);
+    // Safety: `req` is the caller's, and no buffer goes with it.
+    let result = unsafe { genuine::nanosleep(req, ptr::null_mut()) }?;
+    if result != 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+        let left = started
+            .zip(platform::genuine_nanos(clock::MONOTONIC))
+            .map_or(Nanos::ZERO, |(started, now)| {
+                Nanos(started.saturating_add(asked).saturating_sub(now).0.max(0))
+            });
+        // Safety: `rem` is non-null, so the caller's guarantee makes it valid for this write.
+        unsafe { *rem = left.to_timespec() };
+    }
+    Some(result)
+}
+
 /// Blocks for a converted duration in the genuine `nanosleep`, and reports any remainder as the
 /// fake duration it stands for.
 ///
@@ -281,7 +332,7 @@ unsafe fn slept(wait: Wait, rem: *mut libc::timespec) -> libc::c_int {
     let request = wait.genuine.to_timespec();
     let mut unused = Unused::of(rem);
     // Safety: `request` is a live `timespec` and the slot is null or our own buffer.
-    let Some(result) = (unsafe { genuine::nanosleep(&raw const request, unused.slot()) }) else {
+    let Some(result) = (unsafe { genuine_nanosleep(&raw const request, unused.slot()) }) else {
         return unsupported();
     };
     if result != 0 {
@@ -303,7 +354,7 @@ pub(crate) unsafe fn nanosleep(
     let wait = unsafe { relative_wait(Func::Nanosleep, monotonic_timebase(), req) };
     let Some(wait) = wait else {
         // Safety: both pointers are the caller's, passed on unchanged.
-        return unsafe { genuine::nanosleep(req, rem) }.unwrap_or_else(unsupported);
+        return unsafe { genuine_nanosleep(req, rem) }.unwrap_or_else(unsupported);
     };
     // Safety: `rem` is the caller's, passed on unchanged.
     unsafe { slept(wait, rem) }

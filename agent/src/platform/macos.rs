@@ -60,10 +60,11 @@
 //! None of those misses costs a group anything. Every row answers from the session rather than by
 //! calling another row, and a genuine call of ours is a call through this library's own import of
 //! the name, which dyld binds past the table. Where libSystem builds a genuine function out of
-//! another name the table carries, `utime` out of `utimes` and the counter clocks out of the
-//! `mach_*_time` names among them, the genuine side is built here from the inner calls instead,
-//! since on `x86_64` libSystem's own inner call would come back through a row. So nothing here is
-//! converted twice or converted back.
+//! another name the table carries, `utime` out of `utimes`, the counter clocks out of the
+//! `mach_*_time` names, and the remainder of a cut-short `nanosleep` out of `clock_get_time` among
+//! them, the genuine side is built here through this library's own imports instead, since on
+//! `x86_64` libSystem's own inner call would come back through a row. So nothing here is converted
+//! twice or converted back.
 
 use std::ffi::{c_char, c_void};
 
