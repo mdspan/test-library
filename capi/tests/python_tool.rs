@@ -17,6 +17,7 @@ mod fixture;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::time::Instant;
 
 use common::platform;
 use common::session::layout::Keeper;
@@ -227,6 +228,7 @@ fn the_tool_reads_and_changes_a_session() {
     let session = Fixture::on(Keeper::Affine);
     let tool = tool(&session);
 
+    let started = Instant::now();
     let before = tool.run(&["get", "realtime"]);
     if before.skipped {
         return;
@@ -235,10 +237,12 @@ fn the_tool_reads_and_changes_a_session() {
 
     tool.run(&["shift", "realtime", "-2h"]).ok();
     let after = tool.run(&["get", "realtime"]).ok().number("realtime.ns");
+    // The wall clock runs on between the two reads, by no more than the three runs took.
+    let between = i64::try_from(started.elapsed().as_nanos()).unwrap();
+    let moved = before - after;
     assert!(
-        (before - after - 2 * HOUR).abs() < Nanos::SECOND,
-        "the shift moved the wall clock by {} rather than two hours back",
-        before - after,
+        (2 * HOUR - between - Nanos::SECOND..=2 * HOUR + Nanos::SECOND).contains(&moved),
+        "the shift moved the wall clock by {moved} in {between} ns rather than two hours back",
     );
 
     tool.run(&["set-rate", "monotonic", "4"]).ok();
