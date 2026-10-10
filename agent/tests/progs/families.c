@@ -20,10 +20,13 @@ static const struct {
     {"realtime_precise", CLOCK_REALTIME_PRECISE},
     {"realtime_fast", CLOCK_REALTIME_FAST},
     {"second", CLOCK_SECOND},
-    {"monotonic", CLOCK_MONOTONIC},
+    /* The first clock of each elapsed family goes by the family's name, as it does elsewhere. The
+       names crossed over at 15.0, where the headers began spelling CLOCK_BOOTTIME as
+       CLOCK_MONOTONIC rather than CLOCK_UPTIME, so the alias says which clock is which. */
+    {"monotonic", CLOCK_BOOTTIME == CLOCK_MONOTONIC ? CLOCK_UPTIME : CLOCK_MONOTONIC},
+    {"boottime", CLOCK_BOOTTIME},
     {"monotonic_precise", CLOCK_MONOTONIC_PRECISE},
     {"monotonic_fast", CLOCK_MONOTONIC_FAST},
-    {"uptime", CLOCK_UPTIME},
     {"uptime_precise", CLOCK_UPTIME_PRECISE},
     {"uptime_fast", CLOCK_UPTIME_FAST},
     {"process_cpu", CLOCK_PROCESS_CPUTIME_ID},
