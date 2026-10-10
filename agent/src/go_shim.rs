@@ -531,10 +531,7 @@ mod tests {
 
     /// The crafted-frame harness: enter the real shim the way a patched Go routine does, with the
     /// result slots just above the return address, and check what comes back.
-    #[cfg(all(
-        target_os = "linux",
-        any(target_arch = "x86_64", target_arch = "aarch64")
-    ))]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     mod frame {
         use std::sync::atomic::Ordering;
 
