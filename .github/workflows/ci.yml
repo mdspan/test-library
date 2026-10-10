@@ -282,6 +282,9 @@ jobs:
   # rows run them. Two further rows stress how the rewrite lands rather than which release runs
   # it: a kernel that forbids write-and-execute at once, and a target that samples itself through
   # SIGPROF.
+  #
+  # The aarch64 row runs 15.1 because its Rust comes from the package repository, whose FreeBSD 15
+  # packages are built on 15.1 and link against libc symbols that 15.0 lacks.
   freebsd:
     name: freebsd ${{ matrix.arch }} ${{ matrix.release }}
     runs-on: ubuntu-24.04
@@ -290,49 +293,60 @@ jobs:
     timeout-minutes: ${{ matrix.timeout }}
     strategy:
       fail-fast: false
+      # `go` is the release at the patch the Linux job cross-compiles, and `go_sha256` the digest
+      # go.dev publishes for its FreeBSD archive on the row's architecture.
       matrix:
         include:
           - release: "13.5"
             arch: x86_64
-            go: go121
+            go: go1.21.13
+            go_sha256: 56137d4a487b8fdd013c57b025079a4ec20bd19dd809035cc648887188523c64
             timeout: 60
           - release: "14.2"
             arch: x86_64
-            go: go122
+            go: go1.22.12
+            go_sha256: a8c77e76859db3e6f3322cbe11deea5faf779e374f45df7554d2cb484ffa492a
             timeout: 60
           - release: "14.5"
             arch: x86_64
-            go: go123
+            go: go1.23.12
+            go_sha256: c9d7029ae11a6680fba97ac63defa3d0d00220728d6c41186b2517da4b3cd0ea
             timeout: 60
           - release: "15.0"
             arch: x86_64
-            go: go124
+            go: go1.24.13
+            go_sha256: 96e3c439befbb365ecde3ae475f9319ef7693d5d66a05992e8f8d29c60a63761
             timeout: 60
           - release: "15.1"
             arch: x86_64
-            go: go125
+            go: go1.25.14
+            go_sha256: e85e6530832772dc5769b42e42cd5aa488dd20149a6792a4c0e87762164a60da
             timeout: 60
-          - release: "15.0"
+          - release: "15.1"
             arch: aarch64
-            go: go126
+            go: go1.26.9
+            go_sha256: df0323ac1b496464ff7ab32f3bd8206b189c167f3e1759005fc012df4a3051d2
             timeout: 150
           # The newest Go, and the two targets that stress how the rewrite lands.
           - release: "15.1"
             arch: x86_64
-            go: go127
+            go: go1.27.2
+            go_sha256: 3baf61eec549b0c3f638d82636388e36abf94aa14814a011f011d2648ad1eded
             timeout: 60
           # A kernel that refuses a page writable and executable at once, so the rewrite takes its
           # anonymous copy-patch-remap fallback rather than an in-place mprotect.
           - release: "15.1"
             arch: x86_64
-            go: go127
+            go: go1.27.2
+            go_sha256: 3baf61eec549b0c3f638d82636388e36abf94aa14814a011f011d2648ad1eded
             allow_wx: "0"
             timeout: 60
           # Every Go target samples itself through SIGPROF, so a read taken mid-read drives the
           # shim's reentrancy guard onto its in-assembly genuine path.
           - release: "15.1"
             arch: x86_64
-            go: go127
+            go: go1.27.2
+            go_sha256: 3baf61eec549b0c3f638d82636388e36abf94aa14814a011f011d2648ad1eded
             profiling: "1"
             timeout: 60
     env:
@@ -346,25 +360,51 @@ jobs:
           release: ${{ matrix.release }}
           arch: ${{ matrix.arch }}
           usesh: true
+          # Nothing the VM builds is read on the host. The one file that is, a failing run's
+          # test log, is read out of the VM by the last step.
+          copyback: false
           prepare: |
             # The base system carries no root certificates, so cargo cannot reach crates.io
             # until this package drops a bundle at /etc/ssl/cert.pem.
             # python3 is for the Python tool's own cases; procstat, which those cases use to
             # read another process's environment here, is in the base system.
-            pkg install -y ca_root_nss rustup-init python3
-            rustup-init -y --no-modify-path --default-toolchain none
+            pkg install -y ca_root_nss python3
+            if [ "${{ matrix.arch }}" = aarch64 ]; then
+              # aarch64 FreeBSD is a tier 3 Rust target, with no host toolchain for rustup to
+              # install, so this row builds with whatever Rust the package repository carries.
+              pkg install -y rust
+            else
+              # rustup's own build, pinned: this one links against no libc symbol that 13.5, the
+              # oldest release here, lacks. Self-update is off so that it stays this one.
+              fetch -o /tmp/rustup-init \
+                https://static.rust-lang.org/rustup/archive/1.29.1/x86_64-unknown-freebsd/rustup-init
+              sha256 -c af29791be32fd2f926865a983edc97f452078e6d1b4a6037d12ca2f8e67ffa3d \
+                /tmp/rustup-init
+              chmod +x /tmp/rustup-init
+              /tmp/rustup-init -y --no-modify-path --default-toolchain none
+              "$HOME/.cargo/bin/rustup" set auto-self-update disable
+            fi
             # The POSIX message queues live behind a module. Without it `mq_open` fails and the
             # two timed message queue waits report themselves unexercised instead of running.
             kldload mqueuefs || true
             # The pinned Go builds the program whose runtime reads the clock through the fallback
             # routines the library interposes. Installed on every arch, the emulated one included,
-            # since the aarch64 shim is built and run by nothing else.
-            pkg install -y ${{ matrix.go }}
+            # since the aarch64 shim is built and run by nothing else. `uname -m` names the
+            # architecture the way Go's archives do: amd64 or arm64.
+            fetch -o /tmp/go.tar.gz "https://go.dev/dl/${{ matrix.go }}.freebsd-$(uname -m).tar.gz"
+            sha256 -c ${{ matrix.go_sha256 }} /tmp/go.tar.gz
+            tar -C /usr/local -xzf /tmp/go.tar.gz
+            # Go links a cgo program on arm64 FreeBSD with ld.bfd, which binutils carries.
+            if [ "$(uname -m)" = arm64 ]; then
+              pkg install -y binutils
+            fi
           run: |
-            . "$HOME/.cargo/env"
-            rustup toolchain install
+            if [ "${{ matrix.arch }}" = x86_64 ]; then
+              . "$HOME/.cargo/env"
+              rustup toolchain install
+            fi
             # The pinned Go, named for the harness the way CC names the C compiler.
-            export GO=${{ matrix.go }}
+            export GO=/usr/local/go/bin/go
             # A hardened kernel refuses a page writable and executable at once, which sends the
             # rewrite down its anonymous-page fallback.
             if [ -n "${{ matrix.allow_wx }}" ]; then
@@ -375,24 +415,40 @@ jobs:
               export TIMEWARP_TEST_GO_PROFILE=${{ matrix.profiling }}
             fi
             cargo build --locked --workspace --all-targets --all-features
-            cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
-            # The build with no Go faking: --no-default-features drops the fallback
+            # Clippy's lints change from one Rust release to the next, so only the pinned
+            # toolchain is held to them; aarch64, which builds with another, compiles instead.
+            # --no-default-features is the build with no Go faking: it drops the fallback
             # interposition, which no other command here compiles.
-            cargo clippy --locked -p agent --no-default-features --all-targets -- -D warnings
-            cargo test --locked --workspace --all-features --no-fail-fast >test.log 2>&1
-            status=$?
-            cat test.log
+            if [ "${{ matrix.arch }}" = x86_64 ]; then
+              cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+              cargo clippy --locked -p agent --no-default-features --all-targets -- -D warnings
+            else
+              cargo check --locked -p agent --no-default-features --all-targets
+            fi
+            # The action runs this script under `set -e`, so a failing suite is caught with `||`,
+            # and the exit at the end reports it once the Python tool and the summary have run.
+            # Streamed, so a run that hangs still shows how far it got; pipefail carries cargo's
+            # status past tee.
+            set -o pipefail
+            status=0
+            cargo test --locked --workspace --all-features --no-fail-fast 2>&1 | tee test.log \
+              || status=1
             (cd python && PYTHONPATH=. python3 -m unittest discover -s tests -t .) || status=1
             if [ $status -ne 0 ]; then
               echo "=== freebsd failed ==="
-              grep -E '^test .+ \.\.\. FAILED$' test.log
+              grep -E '^test .+ \.\.\. FAILED$' test.log || true
             fi
             exit $status
 
+      # A failing run copies nothing back, but the VM is still up until the job ends, so the log
+      # is read out of it, where the workspace sits at the same path as on the host.
       - name: Name what failed
         if: failure()
         shell: bash
-        run: .github/report-failure.sh "$PLATFORM" test.log
+        timeout-minutes: 5
+        run: |
+          ssh freebsd cat "${{ github.workspace }}/test.log" >test.log || true
+          .github/report-failure.sh "$PLATFORM" test.log
 
   # The cases that can disagree with themselves between one run and the next: the seqlock the
   # readers and a writer share, and the clock group racing against a write. Running them many times
