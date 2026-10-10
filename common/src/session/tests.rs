@@ -96,7 +96,6 @@ fn a_directory_anyone_can_write_is_refused() {
 fn creation_leaves_one_whole_session_file_and_its_lock_and_no_temporary() {
     let tmp = tempfile::tempdir().unwrap();
     let mut setup = setup_in(tmp.path());
-    // The page off, so the write lock's file is the only one beside the session on every platform.
     setup.emulate_vdso = false;
     let session = create(&setup).unwrap();
 
@@ -1279,11 +1278,10 @@ fn an_arena_no_session_file_could_carry_is_refused_before_anything_is_written() 
 
 #[test]
 fn independent_family_rates_are_accepted() {
-    // The wall clock and the elapsed clock may run at rates of their own: no single-scale page
-    // ties them together on any platform now.
+    // The wall clock and the elapsed clock may run at rates of their own.
     let elapsed = page_elapsed_family().expect("CLOCK_MONOTONIC belongs to a family");
     let separated = [(ENV_REALTIME_RATE, "2"), (family_vars(elapsed).rate, "3")];
     assert!(setup_from(&separated).is_ok());
-    // A bare rate covers every family at once, the usual way of asking for a fast clock.
+    // A bare rate covers both, the usual way of asking for a fast clock.
     assert!(setup_from(&[(ENV_RATE, "10")]).is_ok());
 }

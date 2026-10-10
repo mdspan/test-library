@@ -262,8 +262,8 @@ static int tick(const struct vdso *v, long long deadline, long long budget) {
             fflush(stdout);
             return 0;
         }
-        /* Genuine time, since sleeps are not interposed here, so a faked rate cannot change the
-           cadence. */
+        /* A pause between readings, converted like any other sleep, so a fast clock only makes
+           the stream denser. */
         nanosleep(&pause, NULL);
     }
     fflush(stdout);

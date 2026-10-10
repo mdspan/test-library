@@ -44,7 +44,8 @@ const FAMILIES: [Family; 4] = Family::ALL;
 pub struct CInfo {
     /// The timekeeper, from the C `libtimewarp_keeper` enumeration.
     pub keeper: c_uint,
-    /// 1 when the session poses as the vDSO.
+    /// 1 when the session poses as the vDSO on Linux, or interposes the Go runtime's clock
+    /// fallback routines on FreeBSD.
     pub emulate_vdso: c_uint,
     /// 1 when a process that cannot set up what it was asked for exits rather than running genuine.
     pub fail_closed: c_uint,

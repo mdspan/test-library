@@ -148,8 +148,8 @@ unsafe fn stat_result<T: Stamped>(func: Func, result: Option<c_int>, buf: *mut T
 ///
 /// glibc exported these under their own names for the first time at 2.33, and kept the `__xstat`
 /// forms for the programs built against an older one. So the pair covers both eras from one build,
-/// whichever of the two names a program itself calls. FreeBSD's libc has only ever had the plain
-/// name, so there the fallback is left out and a missing name is a missing name.
+/// whichever of the two names a program itself calls. FreeBSD's and macOS's libcs have only ever
+/// had the plain name, so there the fallback is left out and a missing name is a missing name.
 macro_rules! genuine_stat {
     ($(
         $(#[$doc:meta])*

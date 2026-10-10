@@ -16,7 +16,7 @@ name: CI
 # the `ci:full` label to it; to run it now, use the Run workflow button.
 #
 # The FreeBSD VMs start for nothing on their own. A VM job is twenty-odd minutes and the sweep is
-# six of them, which is most of a month's allowance for a platform whose code changes rarely. What
+# nine of them, which is most of a month's allowance for a platform whose code changes rarely. What
 # still runs on every push is the cross-check below, which compiles and lints the FreeBSD arms on a
 # Linux runner; what it cannot catch is a link error or a wrong answer at run time. So ask for a VM
 # before merging anything that touches the FreeBSD code: the `ci:freebsd` label on a pull request
@@ -154,7 +154,8 @@ jobs:
   #
   # What it cannot catch is a link error or a wrong answer at run time, which is what the jobs on
   # real machines below are for. FreeBSD aarch64 is missing here too, since that target has no
-  # prebuilt standard library to check against; the emulated VM in the wide tier is its only cover.
+  # prebuilt standard library to check against; the emulated VM in the FreeBSD sweep is its only
+  # cover.
   cross:
     name: cross-check macos and freebsd
     runs-on: ubuntu-24.04
@@ -196,7 +197,7 @@ jobs:
             echo "::endgroup::"
           done
 
-  # One FreeBSD release, for a pull request that wants a VM without wanting six. Started by the
+  # One FreeBSD release, for a pull request that wants a VM without wanting nine. Started by the
   # `ci:freebsd` label alone: see the note at the top about what the VMs cost and what stands in
   # for them on a push.
   freebsd:
@@ -233,8 +234,8 @@ jobs:
             export GO=go
             cargo build --locked --workspace --all-targets --all-features
             cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
-            # The build with no Go faking: one mechanism and no page, so --no-default-features
-            # drops the fallback interposition, which no other command here compiles.
+            # The build with no Go faking: --no-default-features drops the fallback
+            # interposition, which no other command here compiles.
             cargo clippy --locked -p agent --no-default-features --all-targets -- -D warnings
             # /bin/sh has no PIPESTATUS, so the log is a file the exit status survives.
             cargo test --locked --workspace --all-features --no-fail-fast >test.log 2>&1
@@ -453,8 +454,8 @@ jobs:
             fi
             cargo build --locked --workspace --all-targets --all-features
             cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
-            # The build with no Go faking: one mechanism and no page, so --no-default-features
-            # drops the fallback interposition, which no other command here compiles.
+            # The build with no Go faking: --no-default-features drops the fallback
+            # interposition, which no other command here compiles.
             cargo clippy --locked -p agent --no-default-features --all-targets -- -D warnings
             cargo test --locked --workspace --all-features --no-fail-fast >test.log 2>&1
             status=$?

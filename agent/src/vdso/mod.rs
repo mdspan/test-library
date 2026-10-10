@@ -29,7 +29,7 @@ mod entries;
 #[cfg(all(feature = "vdso", target_os = "linux"))]
 mod image;
 
-/// Finds the auxiliary-vector entry the object will be built from, before the program can move it.
+/// Finds the auxiliary-vector entry `pose` rewrites, before the program can move it.
 ///
 /// Called from the constructor, ahead of everything that touches the environment: the auxiliary
 /// vector is reached through `environ`, and a process that has replaced that pointer has taken the
@@ -43,10 +43,11 @@ pub(crate) fn prime() {
 #[cfg(not(feature = "vdso"))]
 pub(crate) const fn prime() {}
 
-/// Points this process's auxiliary vector at something of ours, when the session says to.
+/// Puts something of ours where a target that skips libc reads the clock, when the session says
+/// to.
 ///
-/// Called once the session is installed, so a target that finds the entry and reads straight from
-/// it reads the session rather than genuine time.
+/// Called once the session is installed, so a target that reads the clock without libc reads the
+/// session rather than genuine time.
 #[cfg(feature = "vdso")]
 pub(crate) fn install(header: &Header) {
     if header.emulate_vdso != 1 {

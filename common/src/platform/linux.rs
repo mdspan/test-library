@@ -349,7 +349,8 @@ pub unsafe fn kernel_gettimeofday(tv: *mut libc::timeval, tz: *mut libc::c_void)
 /// Reads the genuine process times: the fields of `buf`, and the elapsed ticks `times(2)` answers,
 /// or -1 when the kernel refused. libc's convention, and `buf` may be null.
 ///
-/// Through the raw syscall for the reason [`genuine_clock_gettime`] is: the agent exports `times`.
+/// Through the raw syscall, avoiding libc for the reason [`genuine_clock_gettime`] does: the agent
+/// exports `times`.
 ///
 /// # Safety
 /// `buf` must be null or valid for writes of a `tms`.
@@ -362,8 +363,8 @@ pub unsafe fn genuine_times(buf: *mut libc::tms) -> libc::clock_t {
 
 /// Reads the genuine resource usage of `who` into `usage`. libc's convention.
 ///
-/// Through the raw syscall for the reason [`genuine_clock_gettime`] is: the agent exports
-/// `getrusage`.
+/// Through the raw syscall, avoiding libc for the reason [`genuine_clock_gettime`] does: the agent
+/// exports `getrusage`.
 ///
 /// # Safety
 /// `usage` must be valid for writes of a `rusage`.
@@ -402,8 +403,8 @@ pub unsafe fn genuine_settimeofday(
 
 /// Sets a genuine clock, libc's convention, for a process this library is not faking.
 ///
-/// Through the raw syscall for the reason [`genuine_clock_gettime`] is: the agent exports
-/// `clock_settime`.
+/// Through the raw syscall, avoiding libc for the reason [`genuine_clock_gettime`] does: the agent
+/// exports `clock_settime`.
 ///
 /// # Safety
 /// `tp` must be null or valid for reads of a `timespec`.

@@ -1,7 +1,7 @@
 //! The platform seam: how the portable bodies in [`crate::interpose`] reach a program.
 //!
 //! `LD_PRELOAD` makes an ordinary export the whole mechanism; dyld needs a `__DATA,__interpose`
-//! row per replacement and the libc name kept unexported. Only Linux is filled in.
+//! row per replacement and the libc name kept unexported.
 
 cfg_if::cfg_if! {
     if #[cfg(target_os = "linux")] {

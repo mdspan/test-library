@@ -126,7 +126,8 @@ pub const ENV_LOG_FD: &str = "LIBTIMEWARP_LOG_FD";
 /// How much of the log a destination keeps, by level name.
 pub const ENV_LOG_LEVEL: &str = "LIBTIMEWARP_LOG_LEVEL";
 
-/// Whether a target that reads the clock through the vDSO is caught. A flag.
+/// Whether a target that reads the clock without libc is caught: through the vDSO on Linux, and
+/// through the Go runtime's clock fallback routines on FreeBSD. A flag.
 pub const ENV_EMULATE_VDSO: &str = "LIBTIMEWARP_EMULATE_VDSO";
 
 /// Whether a target whose setup failed refuses to run rather than showing genuine time. A flag.

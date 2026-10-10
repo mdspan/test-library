@@ -5,7 +5,7 @@
 //! way the Go runtime does, so the mechanism can be checked step by step, and one in Go, so what a
 //! real runtime does with it is checked too.
 //!
-//! `LD_PRELOAD` and the auxiliary vector are Linux's, so these cases only apply there.
+//! The synthetic vDSO is Linux's, so these cases only apply there.
 #![cfg(target_os = "linux")]
 #![expect(
     clippy::unwrap_used,

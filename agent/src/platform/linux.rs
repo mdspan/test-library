@@ -1,8 +1,8 @@
 //! Linux: `LD_PRELOAD` puts us ahead of libc, so defining the name is the whole mechanism.
 //!
-//! Three of these names are glibc's own internal aliases, which a program reaches when libc was
+//! Four of these names are glibc's own internal aliases, which a program reaches when libc was
 //! built to call them, and one is `syscall()`, which is Linux's way of asking for a call by number.
-//! The synthetic vDSO that catches Go lands here later.
+//! A Go runtime that skips libc is caught by the synthetic vDSO in [`crate::vdso`].
 
 use std::ffi::c_char;
 

@@ -3,10 +3,11 @@
 //!
 //! One of those facts is where the kernel put the thing a target reads the clock from:
 //! `AT_SYSINFO_EHDR` for the Linux vDSO, and `AT_TIMEKEEP` for the FreeBSD timekeep page. A target
-//! that skips libc finds the clock by walking this list, so pointing the entry at something of ours
-//! is what puts us in front of such a target, whichever of the two mechanisms the platform has. The
-//! list is the process's own, on the initial stack, and it is written in place: there is nowhere
-//! else a program looks.
+//! that skips libc finds the clock by walking this list, so rewriting the entry is what puts us in
+//! front of such a target: on Linux it points at a vDSO of ours, and on FreeBSD it is zeroed, which
+//! sends the Go runtime to the fallback routines interposed in its own text. The list is the
+//! process's own, on the initial stack, and it is written in place: there is nowhere else a program
+//! looks.
 //!
 //! The vector sits just past the environment's terminator, which is the only way to its address.
 //! So it is found in the constructor, before anything of ours or of the program's can move

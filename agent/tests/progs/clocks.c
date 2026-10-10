@@ -6,10 +6,10 @@
    which has no such call to make, through the loader: the library exports private names there, so
    `RTLD_NEXT` finds libSystem's own definition and not ours.
 
-   What only Linux has is behind `__linux__`: glibc's internal aliases, `ftime`, the numbers a
-   program can ask `syscall()` for, dynamic clock ids, and `adjtimex`. What macOS has not is behind
-   `__APPLE__`: `ntp_adjtime`, the ids `clock_getcpuclockid` hands out, and a `getrusage` that can
-   be asked about one thread.
+   What only Linux has is behind `__linux__`: glibc's internal aliases, the numbers a program can
+   ask `syscall()` for, dynamic clock ids, and `adjtimex`. `ftime`, which FreeBSD has not, is behind
+   `__linux__` or `__APPLE__`. What macOS has not is behind `__APPLE__`: `ntp_adjtime`, the ids
+   `clock_getcpuclockid` hands out, and a `getrusage` that can be asked about one thread.
 
    argv[1], when given, names a file of two pages whose second page this maps through `syscall()`,
    so a system call using all six argument registers proves they are forwarded. */
@@ -200,7 +200,8 @@ static clock_t genuine_times(struct tms *out) {
 }
 
 /* `clock`, `times` and `getrusage`: consumption follows the Cpu family, and `times`' elapsed return
-   follows Monotonic. The genuine side of each comes from a pass-through system call. */
+   follows Monotonic. The genuine side of each comes from a pass-through system call, or on macOS
+   from the loader. */
 static void cpu_group(const char *tag) {
     struct tms faked_tms, real_tms;
     struct rusage faked_ru, real_ru, faked_thread, real_thread;

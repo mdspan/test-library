@@ -4,10 +4,9 @@
 //! With the timekeep auxiliary-vector entry withheld, `time.Now` and the monotonic clock
 //! `time.Since` subtracts fall through to `runtime.fallback_walltime`/`fallback_nanotime`, whose
 //! entries the library rewrites to jump into its own read path. So a Go target reads the faked clock
-//! the same seqlock read flow every interposed libc name runs: no page of ours, no updater keeping
-//! one fresh, no lease. These cases run a real Go runtime against that path, and prove the two
-//! constraints the old page forced are gone: Realtime and Monotonic may run at rates of their own,
-//! and a hook may run with the emulation on.
+//! the same seqlock read flow every interposed libc name runs, with no lease file and no helper
+//! process. These cases run a real Go runtime against that path, including with Realtime and
+//! Monotonic at rates of their own and with a hook and the emulation on.
 //!
 //! `AT_TIMEKEEP` and the fallback routines are FreeBSD's, so these cases only apply there. A machine
 //! with no Go toolchain builds no target and the cases say so rather than failing.
@@ -91,7 +90,7 @@ fn the_fallback_session_keeps_no_lease_and_starts_no_helper() {
     let now = report.nanos("go.now");
     assert!(now < report.before - HOUR, "the clock was not faked: {now}");
 
-    // No page of ours means no lease file, and nothing spawned to keep one fresh.
+    // The session leaves no lease file, and no helper process outlives the target.
     let session = only_session(dir.path());
     assert!(
         lease_files(dir.path()).is_empty(),
@@ -117,8 +116,8 @@ fn independent_realtime_and_monotonic_rates_reach_a_go_reader() {
         .env("LIBTIMEWARP_MONOTONIC_RATE", "1")
         .run();
 
-    // A rate for each family, not one rate for the pair: the page could carry only the latter, and
-    // the creator now publishes the former without a fault.
+    // A rate for each family, not one rate for the pair, and the creator publishes it without a
+    // fault.
     let session = only_session(dir.path());
     assert_eq!(session.header().keeper, Keeper::Affine as u32);
     assert_eq!(
@@ -152,8 +151,8 @@ fn a_hook_runs_with_the_emulation_on_under_a_go_reader() {
         .env("LIBTIMEWARP_EMULATE_VDSO", "1")
         .run();
 
-    // A hook with the fallback interposition on is no longer a bad value: the session carries the
-    // hook and records no fault.
+    // A hook with the fallback interposition on is not a bad value: the session carries the hook
+    // and records no fault.
     let session = only_session(dir.path());
     assert_eq!(
         session.header().fault(),
@@ -291,7 +290,7 @@ fn a_live_change_reaches_a_go_reader_and_a_libc_reader_together() {
         pairs.len()
     );
     // The two readers never disagree: both reach the one read path, so a change is published to
-    // both at once with no page to swap and no lag to drain.
+    // both at once.
     for &[through_fallback, through_libc] in &pairs {
         let gap = through_libc - through_fallback;
         assert!(
@@ -311,8 +310,7 @@ fn a_live_change_reaches_a_go_reader_and_a_libc_reader_together() {
     );
 }
 
-/// Every `.lease` file beside the sessions in `dir`. A page-on session used to leave one for its
-/// updater to hold; the new mechanism leaves none.
+/// Every `.lease` file beside the sessions in `dir`.
 fn lease_files(dir: &Path) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(dir.join("libtimewarp")) else {
         return Vec::new();
@@ -325,8 +323,7 @@ fn lease_files(dir: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-/// Whether any process still carries `session` on its command line, which is how the updater, now
-/// gone, named the session it was spawned to keep fresh.
+/// Whether any process still carries `session` on its command line.
 fn helper_process_for(session: &Path) -> bool {
     Command::new("pgrep")
         .arg("-f")

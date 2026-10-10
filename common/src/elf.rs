@@ -4,11 +4,12 @@
 //! A vDSO is a shared object the kernel maps into every process, and a target that skips libc
 //! parses it by hand: the program headers for the load segment and the dynamic array, the dynamic
 //! array for the symbol table, the strings, and the hash table, then the symbol by name and
-//! version. Everything below is what such a parse walks, on both architectures we support, which
-//! are 64-bit and little-endian alike.
+//! version. What is below is what such a parse walks, on both architectures we support, which are
+//! 64-bit and little-endian alike, and [`MainImage`], which finds the main program's own segments
+//! through the auxiliary vector.
 //!
-//! The genuine clock reads through the kernel's vDSO as well, which is why this lives here rather
-//! than beside the synthetic object alone.
+//! On Linux the genuine clock reads through the kernel's vDSO as well, which is why this lives here
+//! rather than beside the synthetic object alone.
 
 /// The first four bytes of every ELF file.
 pub const MAGIC: [u8; 4] = [0x7f, b'E', b'L', b'F'];

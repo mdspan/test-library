@@ -101,8 +101,7 @@ pub(crate) struct Fixture {
 impl Fixture {
     pub(crate) fn on(keeper: Keeper) -> Self {
         let dir = tempfile::tempdir().expect("a temporary directory");
-        // These cases give one family a rate of its own and are not about posing as the vDSO, so
-        // it is off.
+        // These cases are not about posing as the vDSO, so it is off.
         let session = session::create(&Setup {
             keeper,
             emulate_vdso: false,

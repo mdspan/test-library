@@ -53,8 +53,8 @@ enum libtimewarp_error {
     /* The file exists and is not a session this library can read. */
     LIBTIMEWARP_BAD_SESSION_FILE = 2,
     /* A value out of range: a negative rate, a rate above the ceiling, a
-       Realtime value outside its range, an unknown family, or an operation the
-       family has no meaning for. */
+       value outside the range an instant can hold, an unknown family, or an
+       operation the family has no meaning for. */
     LIBTIMEWARP_BAD_ARGUMENT = 3,
     /* A refused backwards move on Monotonic or Boottime. */
     LIBTIMEWARP_WOULD_GO_BACKWARDS = 4,
@@ -121,8 +121,8 @@ struct libtimewarp_transaction;
 struct libtimewarp_info {
     /* From enum libtimewarp_keeper. */
     uint32_t keeper;
-    /* 1 when the session poses as the vDSO on Linux, or substitutes the
-       timekeep page on FreeBSD. */
+    /* 1 when the session poses as the vDSO on Linux, or interposes the Go
+       runtime's clock fallback routines on FreeBSD. */
     uint32_t emulate_vdso;
     /* 1 when a process that cannot set up what it was asked for exits rather
        than running on genuine time. */

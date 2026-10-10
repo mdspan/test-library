@@ -86,7 +86,8 @@ int main(int argc, char **argv) {
 #ifdef CLOCK_BOOTTIME
     set_clock("boottime", CLOCK_BOOTTIME, seconds, 0);
 #else
-    /* The name this platform gives the clock that counts while the machine is asleep. */
+    /* No CLOCK_BOOTTIME here, and CLOCK_MONOTONIC already counts while the machine is asleep,
+       so the clock that stops stands in. */
     set_clock("boottime", CLOCK_UPTIME_RAW, seconds, 0);
 #endif
 #ifdef CLOCK_TAI

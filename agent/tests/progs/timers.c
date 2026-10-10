@@ -355,7 +355,8 @@ static void timerfds(void) {
 #endif
 
 /* A sleep and a timer armed for the same fake duration at the same moment, which the design says
-   must still fire together. A timerfd where there is one, and a POSIX timer where there is not. */
+   must still fire together. A timerfd where there is one, a POSIX timer where there is not, and
+   the wall-clock interval timer on macOS, which has neither. */
 static void sleep_and_timer(void) {
     struct timespec request = spec_of(base_ns);
     long long start, woke, fired;
@@ -434,7 +435,8 @@ int main(int argc, char **argv) {
     }
     base_ns = atoll(argv[1]) * 1000000LL;
 
-    /* Every signal a timer here fires with, caught by `sigwaitinfo` rather than a handler. */
+    /* Every signal a timer here fires with, blocked so it stays pending rather than reaching a
+       handler. */
     sigemptyset(&blocked);
     sigaddset(&blocked, SIGALRM);
     sigaddset(&blocked, SIGUSR1);

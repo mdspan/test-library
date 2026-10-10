@@ -287,7 +287,8 @@ fn scaled_ticks(ticks: libc::clock_t, per_second: i64) -> libc::clock_t {
 
 /// How many ticks a second holds, in the units `times` counts in.
 ///
-/// From the auxiliary vector by way of libc, which neither allocates nor locks to answer it.
+/// From libc, which neither allocates nor locks to answer it: glibc reads the auxiliary vector, and
+/// FreeBSD's libc and libSystem answer a constant.
 fn ticks_per_second() -> i64 {
     // Safety: `sysconf` takes a name and answers a number, touching nothing of ours.
     let ticks = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };

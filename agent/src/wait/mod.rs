@@ -499,8 +499,8 @@ pub(crate) unsafe fn select(
     let result = unsafe { genuine::select(nfds, readfds, writefds, exceptfds, &raw mut request) }
         .unwrap_or_else(unsupported);
     // Linux leaves the time not waited in the caller's own struct, and ours holds it in genuine
-    // time, so the program gets the fake duration that stands for. FreeBSD leaves the struct as it
-    // found it, so what goes back there is the duration the program itself wrote.
+    // time, so the program gets the fake duration that stands for. FreeBSD and macOS leave the
+    // struct as they found it, so what goes back there is the duration the program itself wrote.
     // Safety: `timeout` is non-null, so the caller's guarantee makes it valid for this write.
     unsafe { *timeout = wait.remaining(Nanos::from_timeval(&request)).to_timeval() };
     result

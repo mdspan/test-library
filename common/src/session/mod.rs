@@ -273,7 +273,8 @@ impl Setup {
     }
 }
 
-/// The family `CLOCK_MONOTONIC` belongs to: Monotonic through FreeBSD 14.x and Boottime from 15.0.
+/// The family `clock::MONOTONIC` belongs to: Monotonic, except from FreeBSD 15.0, where that clock
+/// counts suspended time and is Boottime's.
 ///
 /// `None` where that clock belongs to no family.
 #[must_use]

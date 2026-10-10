@@ -180,7 +180,7 @@ fn compile(name: &str, extra: &[String]) -> PathBuf {
 /// Compiles `agent/tests/progs/<name>.go` into a dynamically linked Go program, or `None` when
 /// this machine has no Go toolchain to build one with.
 ///
-/// A position-independent executable with cgo enabled, because that is the Go binary the library
+/// A dynamically linked executable with cgo enabled, because that is the Go binary the library
 /// can reach at all: it has an interpreter, so the loader runs and our constructor with it. The
 /// runtime inside still skips libc for every clock it reads, which is the point of running one.
 #[expect(
@@ -263,8 +263,8 @@ fn build(source: &Path, binary: &Path, extra: &[String]) -> PathBuf {
 
 /// What a case sets beside its own environment when it gives one family a rate of its own.
 ///
-/// Independent family rates are accepted on every platform now, so nothing extra is needed. Kept
-/// as a seam the cases that build their own command or reach for the controller still name.
+/// Nothing: independent family rates are accepted on every platform. The cases that build their
+/// own command or reach for the controller name it all the same.
 pub(crate) const fn separate_family_rates() -> &'static [(&'static str, &'static str)] {
     &[]
 }

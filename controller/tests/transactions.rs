@@ -603,8 +603,7 @@ fn a_move_of_the_value_bumps_the_epoch_and_a_change_of_speed_leaves_it() {
     let fixture = fixture();
     let started = fixture.live().epoch;
 
-    // A rate change leaves the line where it is, so the page's republisher has continuity to
-    // enforce rather than a step to follow.
+    // A rate change leaves the line where it is, and the epoch with it.
     let mut transaction = fixture.controller.begin().unwrap();
     transaction.set_rate(Family::Realtime, 2.0).unwrap();
     transaction.set_rate(Family::Monotonic, 2.0).unwrap();

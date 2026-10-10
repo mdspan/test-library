@@ -10,9 +10,7 @@ repository.workspace = true
 workspace = true
 
 [features]
-# The FreeBSD half of way #2: the timekeep page and the updater that keeps it fresh. Off here and
-# turned on by whichever crate above wants it, so a build made without it carries none of the code
-# that runs a process beside a session.
+# Gates nothing in this crate; the crates above pass their own `vdso` feature down to it.
 vdso = []
 
 [dependencies]
