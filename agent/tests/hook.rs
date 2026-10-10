@@ -42,6 +42,17 @@ fn hook_copy(name: &str, dir: &Path) -> PathBuf {
     copy
 }
 
+/// Genuine `CLOCK_MONOTONIC` in nanoseconds.
+fn genuine_monotonic() -> i64 {
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // Safety: `ts` is a live buffer, and this test process has no library preloaded.
+    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &raw mut ts) };
+    ts.tv_sec * 1_000_000_000 + ts.tv_nsec
+}
+
 fn assert_near(what: &str, value: i64, wanted: i64) {
     assert!(
         (value - wanted).abs() <= SLACK,
@@ -53,12 +64,14 @@ fn assert_near(what: &str, value: i64, wanted: i64) {
 #[test]
 fn the_hook_answers_the_wall_clock_from_the_arena_and_declines_the_rest() {
     let dir = tempfile::tempdir().unwrap();
+    let low = genuine_monotonic();
     let report = Run::prog("probe")
         .session_dir(dir.path())
         .env("LIBTIMEWARP_HOOK", hook_value("arena_clock", Some(4096)))
         // The keeper still has settings of its own, for every call the hook declines.
         .env("LIBTIMEWARP_SHIFT", "-2h")
         .run();
+    let high = genuine_monotonic();
 
     // Every way of asking the wall clock reaches the hook, whichever function the program called.
     assert_eq!(report.nanos("probe.clock_gettime"), START_NS);
@@ -66,7 +79,11 @@ fn the_hook_answers_the_wall_clock_from_the_arena_and_declines_the_rest() {
     assert_eq!(report.nanos("probe.time"), START_NS / 1_000_000_000);
     // The monotonic clock is declined, so the keeper answers it: genuine, since a bare shift moves
     // the wall clock alone.
-    assert!(report.nanos("probe.monotonic") < 10 * HOUR);
+    let monotonic = report.nanos("probe.monotonic");
+    assert!(
+        (low..=high).contains(&monotonic),
+        "probe.monotonic = {monotonic} is not in {low}..={high}"
+    );
 
     let session = only_session(dir.path());
     let header = session.header();
