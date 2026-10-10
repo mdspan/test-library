@@ -8,7 +8,7 @@
 //! | `clock` | The clock ids of the families, the names a user writes for them, which family each id belongs to, and which id carries the TAI offset. |
 //! | `default_timebase` | The first clock in a family's column of the family table. FreeBSD answers from the running kernel, because the names crossed over at 15.0. |
 //! | `genuine_clock_gettime` | Reads a genuine clock into the caller's `timespec`, libc's convention. Async-signal-safe, and never routed through a symbol we interpose. |
-//! | `prime_genuine` | Settles, from the constructor, how `genuine_clock_gettime` reads: the kernel's vDSO on Linux, libc on FreeBSD, libSystem on macOS. |
+//! | `prime_genuine` | Settles, from the constructor, how `genuine_clock_gettime` reads: the kernel's vDSO on Linux, libc on FreeBSD. Nothing on macOS, where dyld settles it at load. |
 //! | `genuine_times` | Reads the genuine `tms` and the elapsed ticks `times` answers, libc's convention. Never routed through a symbol we interpose. |
 //! | `genuine_getrusage` | Reads the genuine `rusage` of a target, libc's convention. Never routed through a symbol we interpose. |
 //! | `genuine_settimeofday`, `genuine_clock_settime`, `genuine_adjtime` | Set the genuine clock, libc's convention, for a process this library is not faking. |
@@ -20,21 +20,16 @@
 //! | `probe_write_lock` | Asks the kernel whether the write lock is held, taking nothing. |
 //! | `random_bytes` | Fills a buffer with randomness, for the session name. |
 //!
-//! [`genuine_symbol`] is the one way back to a genuine function that needs no arm of its own: the
-//! loader answers it the same way on all three platforms. macOS asks libSystem by name instead for
-//! the functions in the table above, because there it is the one image that can answer.
+//! [`genuine_symbol`] is the way back to a genuine function on Linux and FreeBSD, where the
+//! loader answers it the same way. macOS reaches the functions in the table above through this
+//! library's own imports of their names instead, which dyld binds past the interpose table.
 //!
 //! An arm may hold more than the table: Linux also supplies `genuine_syscall`, because `syscall()`
 //! is one of the calls we take over there, and only that arm's interposers name it,
 //! `kernel_clock_gettime` with `kernel_gettimeofday`, which answer in the convention a vDSO entry
 //! owes its caller in place of libc's, and `AT_SYSINFO_EHDR`, the entry naming the vDSO. FreeBSD
 //! supplies `AT_TIMEKEEP`, the entry naming the timekeep page, which the Go fallback interposition
-//! withholds and no other platform has. macOS's `prime_genuine` finds libSystem's own
-//! definition of every function the interpose table stands in front of, once, at load; a lookup
-//! there takes the loader's lock, and the constructor is the one moment where nothing of the
-//! program's is holding it. macOS also supplies `libsystem_symbol`, which is that lookup for one
-//! name, since on that platform the way past a replacement of ours is the image rather than the
-//! next definition along.
+//! withholds and no other platform has.
 
 use std::ffi::{c_char, c_void};
 use std::ptr::NonNull;

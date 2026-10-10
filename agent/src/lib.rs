@@ -80,6 +80,8 @@ pub unsafe extern "C" fn libtimewarp_genuine_clock_gettime(
 fn constructor() {
     // The genuine side of every wait, found before the program can call one. A lookup takes the
     // loader's own lock, and this is the one moment where nothing of the program's is holding it.
+    // macOS has nothing to find: dyld bound every genuine function there as an import at load.
+    #[cfg(not(target_os = "macos"))]
     genuine::prime();
     // The same for the genuine clock. On Linux and FreeBSD this also has to come before
     // `vdso::install` changes the auxiliary vector: on Linux it points `AT_SYSINFO_EHDR` away from

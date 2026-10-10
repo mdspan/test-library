@@ -22,40 +22,48 @@
 //! addresses. Whether the image has one at all is asked of the linker in `build.rs` rather than
 //! assumed, so a name that is not there costs a row rather than the build.
 //!
-//! What each row catches, which is a question of its own here because dyld rewrites bindings
-//! rather than code, and the shared cache was bound to itself when it was built. Every row catches
-//! the program's own call and any library outside the cache, so the column below says what more:
+//! What each row catches. Every row catches the program's own call and any library outside the
+//! shared cache. dyld rewrites pointers rather than code, so a call one library of the cache makes
+//! into another reaches a row when it goes through a pointer. On `x86_64` every such call does. On
+//! arm64 the cache builder turned them into direct branches, except for the names it keeps
+//! interposable, which among ours are `time`, `ftime`, `times`, `poll`, `pthread_cond_timedwait`,
+//! `setitimer`, `getitimer`, `stat`, `fstat` and `lstat`. A call inside one library is a direct
+//! branch on both. "The cache's own use" below is the calls that reach no row by that rule.
 //!
 //! | Row | Also catches | Misses |
 //! | --- | --- | --- |
-//! | `clock_gettime` | Nothing. | Reads inside the cache, which reach the commpage without binding to a name. |
-//! | the four `mach_*_time` names | Nothing. | The cache's own use of them, libdispatch's among them, and a program that reads the counter register or the commpage itself rather than calling any of them. |
+//! | `clock_gettime` | Nothing. | The cache's own use of it, and reads inside the cache that reach the commpage without calling it. |
+//! | the four `mach_*_time` names | Nothing. | The cache's own use of them, and a program that reads the counter register or the commpage itself rather than calling any of them. |
 //! | `clock_gettime_nsec_np` | Nothing. | The cache's own use of it. |
 //! | `host_get_clock_service` | Nothing, and it converts nothing either: the port it hands back is a name, and the read on that name is the row below. | The cache's own calls, whose ports this never sees, so a read on one of those passes through. |
 //! | `clock_get_time` | Nothing. | A port no row above handed out, and the `mach_msg` a caller could send the port itself. |
 //! | `gettimeofday`, `time`, `timespec_get`, `ftime` | Nothing. | The cache's own use of them. |
 //! | `clock` | Nothing: the answer is computed here rather than passed on. | Nothing beyond that. |
-//! | `times` | Nothing. | The `getrusage` and `gettimeofday` libSystem builds it from, which is why the answer is scaled once, here. |
-//! | `getrusage` | Nothing. | The cache's own calls, `times` among them. |
+//! | `times` | Nothing. | The cache's own use of it. The genuine answer is built from `getrusage` and `gettimeofday` called from this library, so it is scaled once, here. |
+//! | `getrusage` | Nothing. | The cache's own calls. |
 //! | `nanosleep` | Nothing. | The `sleep` and `usleep` libSystem builds out of it, which is why each of those is a row too. |
-//! | `sleep`, `usleep` | Nothing. | Nothing beyond that: each converts and then blocks in the genuine `nanosleep` by address. |
-//! | `mach_wait_until` | Nothing. | The cache's own use of it, libdispatch's included. |
+//! | `sleep`, `usleep` | Nothing. | Nothing beyond that: each converts and then blocks in the genuine `nanosleep`. |
+//! | `mach_wait_until` | Nothing. | The cache's own use of it. |
 //! | `poll` | Nothing. | The cache's own use of it. |
 //! | the three `select` names, the two `pselect` names | Nothing. | The cache's own use of them. Each answers through the widest spelling the image has, so nothing a caller could name is refused here that would have been allowed without us. |
-//! | `kevent`, `kevent64` | Nothing. | The cache's own use of them, libdispatch's included. |
+//! | `kevent`, `kevent64` | Nothing. | The cache's own use of them. |
 //! | `kevent_qos` | Nothing, and it converts nothing either: the call names no deadline. | The timers a caller arms through it as events, libdispatch's among them, which stay genuine. |
 //! | `pthread_cond_timedwait` | Nothing. | The relative form beside it, which belongs to no group. |
 //! | `aio_suspend` | Nothing. | Nothing beyond that. |
-//! | `setitimer` | Nothing. | The `alarm` libSystem builds out of it, which is why `alarm` is a row too. |
-//! | `getitimer`, `alarm` | Nothing. | Nothing beyond that. |
+//! | `setitimer`, `getitimer` | Nothing. | The cache's own use of them. |
+//! | `alarm` | Nothing. | Nothing beyond that: it converts and arms through the genuine `setitimer`. |
 //! | the four `stat` names | Nothing. | The cache's own use of them, and the unsuffixed `x86_64` names, which fill a buffer of another shape and so have no row. |
-//! | `utime` | Nothing. | The `utimes` libSystem builds it out of, which is why the conversion happens here and once. |
+//! | `utime` | Nothing. | Nothing beyond that: the pair converts here and is set through the genuine `utimes`, the call libSystem builds `utime` out of. |
 //! | `utimes`, `futimes`, `lutimes`, `utimensat`, `futimens` | Nothing. | The cache's own use of them. |
-//! | `settimeofday`, `clock_settime`, `adjtime` | Nothing. | The cache's own use of them, which nothing in it makes. |
+//! | `settimeofday`, `clock_settime`, `adjtime` | Nothing. | The cache's own use of them. |
 //!
 //! None of those misses costs a group anything. Every row answers from the session rather than by
-//! calling another row, and a genuine call of ours reaches libSystem by address, which no table
-//! redirects, so nothing here is converted twice or converted back.
+//! calling another row, and a genuine call of ours is a call through this library's own import of
+//! the name, which dyld binds past the table. Where libSystem builds a genuine function out of
+//! another name the table carries, `utime` out of `utimes` and the counter clocks out of the
+//! `mach_*_time` names among them, the genuine side is built here from the inner calls instead,
+//! since on `x86_64` libSystem's own inner call would come back through a row. So nothing here is
+//! converted twice or converted back.
 
 use std::ffi::{c_char, c_void};
 

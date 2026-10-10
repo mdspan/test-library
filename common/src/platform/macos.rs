@@ -1,11 +1,10 @@
 //! macOS.
 
-use std::ffi::{c_char, c_void};
+use std::ffi::c_void;
 use std::io;
-use std::ptr::{self, NonNull};
-use std::sync::atomic::{AtomicPtr, Ordering};
+use std::ptr;
 
-use crate::time::Family;
+use crate::time::{Family, Nanos};
 
 /// What the header's platform field carries for macOS.
 pub const OS_TAG: u32 = 3;
@@ -117,182 +116,209 @@ pub fn set_errno(value: libc::c_int) {
     unsafe { *location = value };
 }
 
-/// Where libSystem lives. Every process has it mapped before a line of its own runs, so it is
-/// opened rather than loaded.
-const LIBSYSTEM: &[u8] = b"/usr/lib/libSystem.B.dylib\0";
-
-/// The handle a genuine function is asked of, or null before anyone has asked.
-static IMAGE: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
-
-/// The image a genuine function comes from: libSystem itself.
-///
-/// Asked for by name rather than reached by a definition of ours, because there is no definition
-/// of ours to reach past. dyld binds two-level, so a second `clock_gettime` in this library would
-/// never be called; what puts us in front of the program is the interpose table, and the genuine
-/// side of every row in it is the address below.
-///
-/// Relaxed both ways: the handle names an image the loader mapped before this process ran a line
-/// of its own, so there is nothing for an acquire to order against. Two threads racing here open
-/// it twice and store the same answer.
-fn image() -> *mut c_void {
-    let known = IMAGE.load(Ordering::Relaxed);
-    if !known.is_null() {
-        return known;
-    }
-    // Safety: the path is NUL-terminated, and `RTLD_NOLOAD` asks only whether the image is already
-    // mapped, which in this process it always is.
-    let opened = unsafe {
-        libc::dlopen(
-            LIBSYSTEM.as_ptr().cast::<c_char>(),
-            libc::RTLD_LAZY | libc::RTLD_NOLOAD,
-        )
-    };
-    // An image that will not open by name leaves the loader's own search, which finds the same
-    // definition by another route: there is nothing of ours in front of it to search past.
-    let handle = if opened.is_null() {
-        super::RTLD_NEXT
-    } else {
-        opened
-    };
-    IMAGE.store(handle, Ordering::Relaxed);
-    handle
+// Every genuine function here is a call through this library's own import of the name: dyld binds
+// the imports of the image that carries the interpose table to the functions the table replaces,
+// and every other image's to the replacements.
+//
+// A call one library of the shared cache makes into another goes through a pointer on `x86_64`,
+// and dyld points those at the replacements as it does the program's. So where libSystem builds a
+// genuine function out of another name the table carries, it is built here out of the same calls.
+unsafe extern "C" {
+    /// Ticks of the counter that stops while the machine sleeps.
+    fn mach_absolute_time() -> u64;
+    /// The same counter read from the last tick.
+    fn mach_approximate_time() -> u64;
+    /// Ticks of the counter that keeps counting while the machine sleeps.
+    fn mach_continuous_time() -> u64;
+    /// The same counter read from the last tick.
+    fn mach_continuous_approximate_time() -> u64;
+    /// The ratio the counters convert to nanoseconds with.
+    fn mach_timebase_info(info: *mut TimebaseInfo) -> libc::kern_return_t;
 }
 
-/// libSystem's own definition of `name`, or `None` when it has none.
+/// What `mach_timebase_info` fills. Spelled here rather than taken from libc's bindings, which
+/// mark every Mach name deprecated in favour of a crate this workspace does not depend on.
+#[derive(Debug)]
+#[repr(C)]
+struct TimebaseInfo {
+    /// Nanoseconds per `denom` ticks.
+    numer: u32,
+    /// Ticks per `numer` nanoseconds.
+    denom: u32,
+}
+
+/// The ticks a second holds in what `times` answers: `CLK_TCK` in libSystem's headers.
+const CLK_TCK: i64 = 100;
+
+/// What `times` answers when it fails: `(clock_t)-1`.
+const NO_TICKS: libc::clock_t = !0;
+
+/// Nothing to settle: every genuine function here is an import of this library's own, which dyld
+/// bound before any code of the process ran.
+pub const fn prime_genuine() {}
+
+/// Reads a genuine clock. libc's convention.
 ///
-/// The way past every replacement of ours: there is no definition of ours to reach past, so the
-/// image is asked by name instead of the loader being asked for the next one along. Every caller
-/// remembers the answer, which never moves.
+/// libSystem's `clock_gettime` reads the four counter clocks through `mach_absolute_time` and its
+/// three neighbours, and the process's CPU time through `getrusage`, each in another library of the
+/// cache. Those five are read here from the same calls, converted the way libSystem converts them,
+/// and the rest are left to libSystem, which builds them from nothing the table carries.
 ///
 /// # Safety
-/// `name` must be NUL-terminated.
+/// `ts` must be null or valid for writes of a `timespec`.
 #[must_use]
-pub unsafe fn libsystem_symbol(name: &[u8]) -> Option<NonNull<c_void>> {
-    // Safety: the caller guarantees the name, and the handle is the loader's own.
-    let found = unsafe { libc::dlsym(image(), name.as_ptr().cast::<c_char>()) };
-    if found.is_null() {
-        // `dlerror` reports and clears, so leaving ours set would hand the program our message the
-        // next time it asked about a failure of its own.
-        // Safety: `dlerror` takes nothing and reports on the calling thread alone.
-        let _reported = unsafe { libc::dlerror() };
-        return None;
-    }
-    NonNull::new(found)
-}
-
-/// libSystem's definition of `name`, remembered after the first lookup.
-///
-/// Relaxed for the reason [`image`] is, and reaching the code through the pointer is an address
-/// dependency.
-fn found(slot: &AtomicPtr<c_void>, name: &[u8]) -> Option<NonNull<c_void>> {
-    if let Some(known) = NonNull::new(slot.load(Ordering::Relaxed)) {
-        return Some(known);
-    }
-    // Safety: the name is NUL-terminated by construction.
-    let found = unsafe { libsystem_symbol(name) }?;
-    slot.store(found.as_ptr(), Ordering::Relaxed);
-    Some(found)
-}
-
-/// Declares a genuine function: a slot for libSystem's own definition, the lookup that fills it,
-/// and a wrapper that calls it in libc's convention.
-///
-/// The name libSystem knows it by rather than the name spelled here, because every one of these is
-/// a function we stand in front of, and the wrapper carries a name of its own so that the two can
-/// live in one library.
-///
-/// A system with no such name leaves the wrapper answering the given refusal with `ENOSYS`, which
-/// only a program calling a function its own system never had can reach.
-macro_rules! genuine {
-    ($(
-        $(#[doc = $doc:expr])*
-        fn $name:ident($($arg:ident: $ty:ty),* $(,)?) -> $ret:ty = $symbol:expr, $refused:expr;
-    )*) => {
-        $(
-            mod $name {
-                //! One genuine function: where libSystem's definition of it is kept, and the
-                //! lookup that fills that in.
-                use super::{AtomicPtr, c_void, found, ptr};
-
-                /// libSystem's definition, or null until a lookup finds it.
-                pub(super) static FOUND: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
-
-                /// The name libSystem is asked for.
-                pub(super) const SYMBOL: &[u8] = $symbol;
-
-                /// Looks the name up now, so no later call has to.
-                pub(super) fn prime() {
-                    let _found = found(&FOUND, SYMBOL);
-                }
-            }
-
-            $(#[doc = $doc])*
-            ///
-            /// # Safety
-            /// The arguments must satisfy the contract libc gives the function of this name.
-            #[must_use]
-            #[inline]
-            pub unsafe fn $name($($arg: $ty),*) -> $ret {
-                /// What libSystem's definition is called through.
-                type Signature = unsafe extern "C" fn($($ty),*) -> $ret;
-                let Some(found) = found(&$name::FOUND, $name::SYMBOL) else {
-                    set_errno(libc::ENOSYS);
-                    return $refused;
-                };
-                // Safety: libSystem declares this name with this signature.
-                let call = unsafe {
-                    std::mem::transmute::<*mut c_void, Signature>(found.as_ptr())
-                };
-                // Safety: the caller guarantees the arguments, which pass on unchanged.
-                unsafe { call($($arg),*) }
-            }
-        )*
-
-        /// Finds every one of them now, from the constructor.
-        ///
-        /// A lookup takes the loader's own lock, and the first interposed call can come from
-        /// anywhere, a library's constructor included. Doing them all here leaves nothing for such
-        /// a call to find missing.
-        pub fn prime_genuine() {
-            $( $name::prime(); )*
+pub unsafe fn genuine_clock_gettime(
+    clock: libc::clockid_t,
+    ts: *mut libc::timespec,
+) -> libc::c_int {
+    let counter: unsafe extern "C" fn() -> u64 = match clock {
+        clock::MONOTONIC => mach_absolute_time,
+        clock::MONOTONIC_APPROX => mach_approximate_time,
+        clock::BOOTTIME_RAW => mach_continuous_time,
+        clock::BOOTTIME_RAW_APPROX => mach_continuous_approximate_time,
+        clock::PROCESS_CPUTIME => {
+            let Some(usage) = rusage(libc::RUSAGE_SELF) else {
+                return -1;
+            };
+            let used = Nanos::from_timeval(&usage.ru_utime)
+                .saturating_add(Nanos::from_timeval(&usage.ru_stime));
+            // Safety: the caller guarantees `ts`.
+            return unsafe { answer(used, ts) };
         }
+        // Safety: the caller guarantees `ts`, which passes on unchanged.
+        _ => return unsafe { libc::clock_gettime(clock, ts) },
     };
+    let mut timebase = TimebaseInfo { numer: 0, denom: 0 };
+    // Safety: `timebase` is a live, correctly typed buffer, which is all the call touches.
+    if unsafe { mach_timebase_info(&raw mut timebase) } != 0 || timebase.denom == 0 {
+        set_errno(libc::EINVAL);
+        return -1;
+    }
+    // Safety: the counter takes no argument.
+    let ticks = unsafe { counter() };
+    let nanos = u128::from(ticks) * u128::from(timebase.numer) / u128::from(timebase.denom);
+    // Safety: the caller guarantees `ts`.
+    unsafe { answer(Nanos(i64::try_from(nanos).unwrap_or(i64::MAX)), ts) }
 }
 
-genuine! {
-    /// Reads a genuine clock. libc's convention.
-    fn genuine_clock_gettime(clock: libc::clockid_t, ts: *mut libc::timespec) -> libc::c_int
-        = b"clock_gettime\0", -1;
+/// Writes a reading into the caller's `timespec`. A null one is refused with the `EFAULT` the
+/// kernel gives a buffer it cannot write.
+///
+/// # Safety
+/// `ts` must be null or valid for writes of a `timespec`.
+unsafe fn answer(now: Nanos, ts: *mut libc::timespec) -> libc::c_int {
+    if ts.is_null() {
+        set_errno(libc::EFAULT);
+        return -1;
+    }
+    // Safety: `ts` is non-null, so the caller's guarantee makes it valid for this write.
+    unsafe { *ts = now.to_timespec() };
+    0
+}
 
-    /// Reads the genuine process times: the fields of `buf`, which may be null, and the elapsed
-    /// ticks `times(3)` answers. libc's convention.
-    ///
-    /// libSystem builds this out of two `getrusage` calls and one `gettimeofday`, so the elapsed
-    /// ticks it answers count from the epoch rather than from boot. Both of those calls are ones
-    /// we stand in front of, and neither reaches us: dyld leaves the shared cache calling itself
-    /// by its own names.
-    fn genuine_times(buf: *mut libc::tms) -> libc::clock_t = b"times\0", !0;
+/// The genuine resource usage of `who`, or `None` when the kernel refuses it.
+fn rusage(who: libc::c_int) -> Option<libc::rusage> {
+    // Safety: a `rusage` is integers and `timeval`s, for which all zeroes is a value.
+    let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+    // Safety: `usage` is a live, correctly typed buffer.
+    (unsafe { libc::getrusage(who, &raw mut usage) } == 0).then_some(usage)
+}
 
-    /// Reads the genuine resource usage of `who`. libc's convention.
-    fn genuine_getrusage(who: libc::c_int, usage: *mut libc::rusage) -> libc::c_int
-        = b"getrusage\0", -1;
+/// A `timeval` in the ticks `times` counts in, truncated as libSystem truncates it.
+fn ticks(tv: &libc::timeval) -> libc::clock_t {
+    let ticks = tv
+        .tv_sec
+        .saturating_mul(CLK_TCK)
+        .saturating_add(i64::from(tv.tv_usec) / (1_000_000 / CLK_TCK));
+    libc::clock_t::try_from(ticks).unwrap_or(NO_TICKS)
+}
 
-    /// Sets the genuine wall clock, libc's convention, for a process this library is not faking.
-    ///
-    /// A null `tv` leaves the clock where it is and a null `tz` leaves the obsolete timezone
-    /// alone, which is what the kernel makes of each, so both pass through as the program wrote
-    /// them.
-    fn genuine_settimeofday(tv: *const libc::timeval, tz: *const c_void) -> libc::c_int
-        = b"settimeofday\0", -1;
+/// Reads the genuine process times: the fields of `buf`, which may be null, and the elapsed ticks
+/// `times(3)` answers. libc's convention.
+///
+/// Built here the way libSystem builds it, out of two `getrusage` calls and one `gettimeofday`,
+/// since libSystem's own `getrusage` call crosses into another library of the cache. The elapsed
+/// ticks count from the epoch rather than from boot, as libSystem's do.
+///
+/// # Safety
+/// `buf` must be null or valid for writes of a `tms`.
+#[must_use]
+pub unsafe fn genuine_times(buf: *mut libc::tms) -> libc::clock_t {
+    let (Some(own), Some(children)) = (rusage(libc::RUSAGE_SELF), rusage(libc::RUSAGE_CHILDREN))
+    else {
+        return NO_TICKS;
+    };
+    let mut now = libc::timeval {
+        tv_sec: 0,
+        tv_usec: 0,
+    };
+    // Safety: `now` is a live buffer, and the timezone may be null.
+    if unsafe { libc::gettimeofday(&raw mut now, ptr::null_mut()) } != 0 {
+        return NO_TICKS;
+    }
+    if !buf.is_null() {
+        // Safety: `buf` is non-null, so the caller's guarantee makes it valid for this write.
+        unsafe {
+            *buf = libc::tms {
+                tms_utime: ticks(&own.ru_utime),
+                tms_stime: ticks(&own.ru_stime),
+                tms_cutime: ticks(&children.ru_utime),
+                tms_cstime: ticks(&children.ru_stime),
+            }
+        };
+    }
+    ticks(&now)
+}
 
-    /// Sets a genuine clock, libc's convention, for a process this library is not faking.
-    fn genuine_clock_settime(clock: libc::clockid_t, tp: *const libc::timespec) -> libc::c_int
-        = b"clock_settime\0", -1;
+/// Reads the genuine resource usage of `who`. libc's convention.
+///
+/// # Safety
+/// `usage` must be valid for writes of a `rusage`.
+#[must_use]
+pub unsafe fn genuine_getrusage(who: libc::c_int, usage: *mut libc::rusage) -> libc::c_int {
+    // Safety: the caller guarantees `usage`, which passes on unchanged.
+    unsafe { libc::getrusage(who, usage) }
+}
 
-    /// Makes the genuine one-shot offset adjustment, libc's convention, for a process this library
-    /// is not faking.
-    fn genuine_adjtime(delta: *const libc::timeval, olddelta: *mut libc::timeval) -> libc::c_int
-        = b"adjtime\0", -1;
+/// Sets the genuine wall clock, libc's convention, for a process this library is not faking.
+///
+/// A null `tv` leaves the clock where it is and a null `tz` leaves the obsolete timezone alone,
+/// which is what the kernel makes of each, so both pass through as the program wrote them.
+///
+/// # Safety
+/// `tv` must be null or valid for reads of a `timeval`, and `tz` null or valid for reads of a
+/// `timezone`.
+#[must_use]
+pub unsafe fn genuine_settimeofday(tv: *const libc::timeval, tz: *const c_void) -> libc::c_int {
+    // Safety: the caller guarantees both, which pass on unchanged.
+    unsafe { libc::settimeofday(tv, tz.cast()) }
+}
+
+/// Sets a genuine clock, libc's convention, for a process this library is not faking.
+///
+/// # Safety
+/// `tp` must be valid for reads of a `timespec`.
+#[must_use]
+pub unsafe fn genuine_clock_settime(
+    clock: libc::clockid_t,
+    tp: *const libc::timespec,
+) -> libc::c_int {
+    // Safety: the caller guarantees `tp`, which passes on unchanged.
+    unsafe { libc::clock_settime(clock, tp) }
+}
+
+/// Makes the genuine one-shot offset adjustment, libc's convention, for a process this library is
+/// not faking.
+///
+/// # Safety
+/// `delta` must be valid for reads of a `timeval`, and `olddelta` null or valid for writes of one.
+#[must_use]
+pub unsafe fn genuine_adjtime(
+    delta: *const libc::timeval,
+    olddelta: *mut libc::timeval,
+) -> libc::c_int {
+    // Safety: the caller guarantees both, which pass on unchanged.
+    unsafe { libc::adjtime(delta, olddelta) }
 }
 
 /// The widest delta the platform's own `adjtime` takes before it refuses, in seconds.
@@ -422,28 +448,116 @@ mod tests {
         );
     }
 
-    #[test]
-    fn the_genuine_functions_come_from_libsystem() {
-        prime_genuine();
-        assert!(!image().is_null(), "libSystem is mapped in every process");
-
+    /// A genuine reading of `id` through the platform's own function.
+    fn ours(id: libc::clockid_t) -> i64 {
         let mut ts = libc::timespec {
             tv_sec: 0,
             tv_nsec: 0,
         };
         // Safety: `ts` is a live, correctly typed buffer.
-        let read = unsafe { genuine_clock_gettime(clock::REALTIME, &raw mut ts) };
-        assert_eq!(read, 0);
+        let read = unsafe { genuine_clock_gettime(id, &raw mut ts) };
+        assert_eq!(read, 0, "clock {id}");
+        Nanos::from_timespec(&ts).0
+    }
+
+    /// libSystem's own reading of `id`, which is genuine in a process with no interpose table.
+    fn libsystem(id: libc::clockid_t) -> i64 {
+        let mut ts = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        // Safety: `ts` is a live, correctly typed buffer.
+        let read = unsafe { libc::clock_gettime(id, &raw mut ts) };
+        assert_eq!(read, 0, "clock {id}");
+        Nanos::from_timespec(&ts).0
+    }
+
+    #[test]
+    fn every_clock_this_platform_names_reads() {
+        prime_genuine();
         assert!(
-            ts.tv_sec > 1_700_000_000,
+            ours(clock::REALTIME) > 1_700_000_000 * Nanos::SECOND,
             "the wall clock read {}",
-            ts.tv_sec
+            ours(clock::REALTIME)
         );
-        for &(name, id) in clock::named() {
-            // Safety: as above, for every clock this platform names.
-            let read = unsafe { genuine_clock_gettime(id, &raw mut ts) };
-            assert_eq!(read, 0, "{name}");
+        for &(_, id) in clock::named() {
+            ours(id);
         }
+    }
+
+    #[test]
+    fn the_clocks_read_from_the_calls_underneath_read_what_libsystem_reads() {
+        // Every one of these only moves forward, so a reading of ours between two of libSystem's
+        // is the same reading.
+        for id in [
+            clock::MONOTONIC,
+            clock::MONOTONIC_APPROX,
+            clock::BOOTTIME_RAW,
+            clock::BOOTTIME_RAW_APPROX,
+            clock::PROCESS_CPUTIME,
+        ] {
+            let before = libsystem(id);
+            let read = ours(id);
+            let after = libsystem(id);
+            assert!(
+                (before..=after).contains(&read),
+                "clock {id} read {read}, outside {before}..={after}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_process_times_are_the_ones_libsystem_answers() {
+        let empty = libc::tms {
+            tms_utime: 0,
+            tms_stime: 0,
+            tms_cutime: 0,
+            tms_cstime: 0,
+        };
+        let (mut before, mut read, mut after) = (empty, empty, empty);
+        // Safety: each buffer is a live, correctly typed `tms`.
+        let elapsed_before = unsafe { libc::times(&raw mut before) };
+        // Safety: as above.
+        let elapsed = unsafe { genuine_times(&raw mut read) };
+        // Safety: as above.
+        let elapsed_after = unsafe { libc::times(&raw mut after) };
+        assert!(
+            (elapsed_before..=elapsed_after).contains(&elapsed),
+            "elapsed {elapsed}, outside {elapsed_before}..={elapsed_after}"
+        );
+        for (field, low, mid, high) in [
+            (
+                "tms_utime",
+                before.tms_utime,
+                read.tms_utime,
+                after.tms_utime,
+            ),
+            (
+                "tms_stime",
+                before.tms_stime,
+                read.tms_stime,
+                after.tms_stime,
+            ),
+            (
+                "tms_cutime",
+                before.tms_cutime,
+                read.tms_cutime,
+                after.tms_cutime,
+            ),
+            (
+                "tms_cstime",
+                before.tms_cstime,
+                read.tms_cstime,
+                after.tms_cstime,
+            ),
+        ] {
+            assert!(
+                (low..=high).contains(&mid),
+                "{field} {mid}, outside {low}..={high}"
+            );
+        }
+        // Safety: a null buffer is one the call leaves alone.
+        assert_ne!(unsafe { genuine_times(ptr::null_mut()) }, NO_TICKS);
     }
 
     #[test]
@@ -458,11 +572,13 @@ mod tests {
     }
 
     #[test]
-    fn a_name_libsystem_never_had_is_refused_rather_than_called() {
-        static MISSING: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
-        assert_eq!(found(&MISSING, b"libtimewarp_no_such_symbol\0"), None);
-        // The message the failure left is cleared, so the program's next `dlerror` is its own.
-        // Safety: `dlerror` takes nothing and reports on this thread alone.
-        assert!(unsafe { libc::dlerror() }.is_null());
+    fn a_counter_read_into_no_buffer_is_refused_as_a_bad_address() {
+        // Safety: a null buffer is refused before anything is written through it.
+        let refused = unsafe { genuine_clock_gettime(clock::MONOTONIC, ptr::null_mut()) };
+        assert_eq!(refused, -1);
+        assert_eq!(
+            io::Error::last_os_error().raw_os_error(),
+            Some(libc::EFAULT)
+        );
     }
 }

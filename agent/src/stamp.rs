@@ -18,8 +18,9 @@
 //! `statx`, the `64` names and the `__xstat` family are Linux's alone, and the birth time inside a
 //! `stat` buffer is the BSDs', so each carries a `cfg` of its own. So does `utime`: FreeBSD's libc
 //! builds it out of one call to `utimes`, which we already take over, and the arm there leaves the
-//! set to that call rather than converting it twice. macOS keeps `utime` as a call of its own
-//! reached by its own name, so that arm has one to catch.
+//! set to that call rather than converting it twice. libSystem builds it out of `utimes` too, but
+//! the program's call to `utime` reaches nothing of ours through that inner call on arm64, so the
+//! macOS arm catches `utime` itself and sets the pair through the genuine `utimes`.
 
 #[cfg(target_os = "linux")]
 use std::ffi::c_uint;
@@ -627,7 +628,41 @@ pub(crate) unsafe fn utime(path: *const c_char, times: *const libc::utimbuf) -> 
     let converted = unsafe { stored_utimbuf(times) };
     let times = converted.as_ref().map_or(times, std::ptr::from_ref);
     // Safety: `path` is the caller's, and `times` is either theirs or the copy just built.
-    unsafe { genuine::utime(path, times) }.unwrap_or_else(unsupported)
+    unsafe { set_utimbuf(path, times) }.unwrap_or_else(unsupported)
+}
+
+/// Sets the pair a `utimbuf` names through the genuine `utime`.
+///
+/// # Safety
+/// `path` must be a valid NUL-terminated path, and `times` null or valid for reads of a `utimbuf`.
+#[cfg(target_os = "linux")]
+#[inline]
+unsafe fn set_utimbuf(path: *const c_char, times: *const libc::utimbuf) -> Option<c_int> {
+    // Safety: the caller guarantees both, which pass on unchanged.
+    unsafe { genuine::utime(path, times) }
+}
+
+/// Sets the pair a `utimbuf` names through the genuine `utimes`, as libSystem's own `utime` does.
+/// That inner call crosses into another library of the shared cache, which reaches our `utimes`
+/// row on `x86_64`, so the pair is handed to `utimes` from here, already converted once.
+///
+/// # Safety
+/// `path` must be a valid NUL-terminated path, and `times` null or valid for reads of a `utimbuf`.
+#[cfg(target_os = "macos")]
+#[inline]
+unsafe fn set_utimbuf(path: *const c_char, times: *const libc::utimbuf) -> Option<c_int> {
+    if times.is_null() {
+        // Safety: the caller guarantees `path`, and a null pair asks for now.
+        return unsafe { genuine::utimes(path, std::ptr::null()) };
+    }
+    // Safety: `times` is non-null, so the caller's guarantee makes this read valid.
+    let asked = unsafe { *times };
+    let pair = [asked.actime, asked.modtime].map(|seconds| libc::timeval {
+        tv_sec: seconds,
+        tv_usec: 0,
+    });
+    // Safety: the caller guarantees `path`, and `pair` is two live `timeval`s.
+    unsafe { genuine::utimes(path, pair.as_ptr()) }
 }
 
 /// # Safety
