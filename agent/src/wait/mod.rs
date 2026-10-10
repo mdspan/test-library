@@ -874,7 +874,7 @@ pub(crate) unsafe fn pthread_rwlock_timedwrlock(
 /// # Safety
 /// `retval` must be null or valid for writes of a pointer, and `abstime` null or valid for reads
 /// of a `timespec`.
-#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+#[cfg(target_os = "linux")]
 #[inline]
 pub(crate) unsafe fn pthread_timedjoin_np(
     thread: libc::pthread_t,
@@ -887,6 +887,48 @@ pub(crate) unsafe fn pthread_timedjoin_np(
     let abstime = converted.as_ref().map_or(abstime, ptr::from_ref);
     // Safety: the thread and the slot for its answer are the caller's, passed on unchanged.
     unsafe { genuine::pthread_timedjoin_np(thread, retval, abstime) }.unwrap_or(libc::ENOSYS)
+}
+
+/// The same, where libthr turns the deadline into a timeout itself, by subtracting what
+/// `clock_gettime(CLOCK_REALTIME)` answers. That call reaches our own interposer, so the genuine
+/// deadline goes in as what that call answers now plus the genuine time left. libthr reads the
+/// clock again after an interrupted wait, and on a clock running faster than the genuine one that
+/// times out early, so a timeout before the genuine deadline is waited out again.
+///
+/// # Safety
+/// `retval` must be null or valid for writes of a pointer, and `abstime` null or valid for reads
+/// of a `timespec`.
+#[cfg(target_os = "freebsd")]
+#[inline]
+pub(crate) unsafe fn pthread_timedjoin_np(
+    thread: libc::pthread_t,
+    retval: *mut *mut std::ffi::c_void,
+    abstime: *const libc::timespec,
+) -> libc::c_int {
+    // Safety: `abstime` is the caller's, read only where it is non-null.
+    let converted =
+        unsafe { absolute_deadline(Func::PthreadTimedjoinNp, clock::REALTIME, abstime) };
+    let Some(until) = converted.as_ref().map(Nanos::from_timespec) else {
+        // Safety: the thread and the slot for its answer are the caller's, passed on unchanged.
+        return unsafe { genuine::pthread_timedjoin_np(thread, retval, abstime) }
+            .unwrap_or(libc::ENOSYS);
+    };
+    loop {
+        let now = platform::genuine_nanos(clock::REALTIME).unwrap_or(until);
+        let showing = interpose::reading(Func::ClockGettime, clock::REALTIME).unwrap_or(now);
+        let request = showing
+            .saturating_add(Nanos(until.saturating_sub(now).0.max(0)))
+            .to_timespec();
+        // Safety: the thread and the slot for its answer are the caller's, and `request` is a live
+        // `timespec` of our own.
+        let result = unsafe { genuine::pthread_timedjoin_np(thread, retval, &raw const request) }
+            .unwrap_or(libc::ENOSYS);
+        let early = result == libc::ETIMEDOUT
+            && platform::genuine_nanos(clock::REALTIME).is_some_and(|after| after < until);
+        if !early {
+            return result;
+        }
+    }
 }
 
 /// # Safety
