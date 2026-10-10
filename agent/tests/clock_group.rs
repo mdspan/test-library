@@ -86,6 +86,12 @@ fn assert_near(what: &str, value: i64, wanted: i64) {
     );
 }
 
+/// What `clock` answered under `tag`, in nanoseconds: it counts in the `CLOCKS_PER_SEC` the target
+/// reported beside it, which is a million on Linux and macOS and 128 on FreeBSD.
+fn clock_nanos(report: &Report, tag: &str) -> i64 {
+    report.nanos(&format!("{tag}.clock")) * SECOND / report.nanos(&format!("{tag}.clocks_per_sec"))
+}
+
 /// Asserts that `value` is `wanted` to within `percent` of it, plus `floor` for quantisation.
 fn assert_close(what: &str, value: i64, wanted: i64, percent: i64, floor: i64) {
     let slack = floor + wanted.abs() * percent / 100;
@@ -136,8 +142,11 @@ fn the_cpu_group_scales_what_the_process_consumed() {
     let dir = tempfile::tempdir().unwrap();
     let report = clocks(dir.path(), &[("LIBTIMEWARP_CPU_RATE", "8")]);
 
-    // `clock` answers in CLOCKS_PER_SEC units rather than nanoseconds.
-    assert_eq!(report.nanos("a.clocks_per_sec"), 1_000_000);
+    // `clock` answers in the units the platform's headers name rather than nanoseconds.
+    assert_eq!(
+        report.nanos("a.clocks_per_sec"),
+        common::platform::CLOCKS_PER_SEC
+    );
     let consumed = report.nanos("a.process_cpu.genuine");
     assert!(
         consumed > 100_000_000,
@@ -145,7 +154,7 @@ fn the_cpu_group_scales_what_the_process_consumed() {
     );
     assert_close(
         "a.clock",
-        report.nanos("a.clock") * 1_000,
+        clock_nanos(&report, "a"),
         8 * consumed,
         5,
         10_000_000,
@@ -202,7 +211,7 @@ fn a_bare_rate_leaves_consumption_alone() {
 
     assert_close(
         "a.clock",
-        report.nanos("a.clock") * 1_000,
+        clock_nanos(&report, "a"),
         report.nanos("a.process_cpu.genuine"),
         5,
         10_000_000,

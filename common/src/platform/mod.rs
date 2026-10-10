@@ -16,6 +16,7 @@
 //! | `SET_ORDER` | The order the kernel makes the four checks of a set of the clock in. |
 //! | `ADJTIME_NULL_ASKS` | Whether `adjtime` with no delta is a question that needs no privilege. |
 //! | `ADJTIME_SECONDS` | The widest delta the platform's own `adjtime` takes before it refuses. |
+//! | `CLOCKS_PER_SEC` | The units `clock` answers in, which the platform's headers fix. |
 //! | `set_errno` | Sets this thread's `errno`, which is how a refused call reports itself. |
 //! | `thread_id` | The id the kernel gives the calling thread, taking no thread-local storage to answer. |
 //! | `take_write_lock` | Takes the write lock on a descriptor, blocking. libc's convention. |

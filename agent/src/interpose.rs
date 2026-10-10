@@ -5,7 +5,7 @@
 
 use common::hook::{Func, Kind};
 use common::platform::{
-    clock, genuine_clock_gettime, genuine_getrusage, genuine_nanos, genuine_times,
+    CLOCKS_PER_SEC, clock, genuine_clock_gettime, genuine_getrusage, genuine_nanos, genuine_times,
     monotonic_timebase,
 };
 use common::session::{clock_now, cpu_scaled};
@@ -16,10 +16,6 @@ use crate::state;
 /// The base C11 gives `timespec_get` for the wall clock, and the only one any libc we support
 /// defines.
 const TIME_UTC: libc::c_int = 1;
-
-/// What `clock` counts its answer in. POSIX fixes it at a million on an XSI system, which every
-/// platform we support is.
-const CLOCKS_PER_SEC: i64 = 1_000_000;
 
 /// The failure `clock` and `times` report: `(clock_t)-1`, whose sign differs by platform.
 const NO_TICKS: libc::clock_t = !0;

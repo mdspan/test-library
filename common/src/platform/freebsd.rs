@@ -576,6 +576,10 @@ pub const SET_ORDER: [super::SetCheck; 4] = [
 /// answers it before it asks for any.
 pub const ADJTIME_NULL_ASKS: bool = true;
 
+/// The units `clock` answers in: `CLOCKS_PER_SEC`, which this platform's headers fix at 128 rather
+/// than at the million an XSI system names, and which libc's own `clock` counts in.
+pub const CLOCKS_PER_SEC: i64 = 128;
+
 /// Whether the kernel would let this process set the clock: an effective uid of 0 here, since
 /// FreeBSD gates the call on the superuser rather than on a capability.
 #[must_use]

@@ -343,6 +343,9 @@ pub const SET_ORDER: [super::SetCheck; 4] = [
 /// kernel asks for privilege first and then reads the delta, which a null pointer makes `EFAULT`.
 pub const ADJTIME_NULL_ASKS: bool = false;
 
+/// The units `clock` answers in: the million `CLOCKS_PER_SEC` names on an XSI system.
+pub const CLOCKS_PER_SEC: i64 = 1_000_000;
+
 /// Whether the kernel would let this process set the clock: an effective uid of 0 here, since
 /// macOS gates the call on the superuser rather than on a capability.
 #[must_use]

@@ -532,6 +532,9 @@ pub const SET_ORDER: [super::SetCheck; 4] = [
 /// it an `adjtimex` that sets nothing.
 pub const ADJTIME_NULL_ASKS: bool = true;
 
+/// The units `clock` answers in: the million `CLOCKS_PER_SEC` names on an XSI system.
+pub const CLOCKS_PER_SEC: i64 = 1_000_000;
+
 /// Whether the kernel would let this process set the clock: `CAP_SYS_TIME` in its effective set.
 ///
 /// The effective set rather than the uid, because root in a container often lacks the capability
