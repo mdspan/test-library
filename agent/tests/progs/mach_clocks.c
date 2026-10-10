@@ -112,9 +112,12 @@ static void round_of(const char *tag) {
     } while (0)
 
     /* The genuine side of the three families first, so that the window between a reading and the
-       genuine one it is measured against is as narrow as the two calls are apart. */
+       genuine one it is measured against is as narrow as the two calls are apart. Boottime's zero
+       comes from `CLOCK_MONOTONIC`, the wall clock less the boot time, which is not the counter
+       `CLOCK_MONOTONIC_RAW` reads and can sit a fraction of a second from it, so both are here. */
     SAY("uptime_raw.genuine", genuine(CLOCK_UPTIME_RAW));
     SAY("monotonic_raw.genuine", genuine(CLOCK_MONOTONIC_RAW));
+    SAY("monotonic.genuine", genuine(CLOCK_MONOTONIC));
     SAY("realtime.genuine", genuine(CLOCK_REALTIME));
 
     /* The counter that stops while the machine sleeps, which is the Monotonic family's. */

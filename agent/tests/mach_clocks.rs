@@ -123,17 +123,18 @@ fn a_shift_moves_every_mach_clock_with_the_id_beside_it() {
     assert_pairs_agree(&report, "a", SLACK);
     assert_pairs_agree(&report, "b", SLACK);
     // And each family moved by the shift it was given, which is what leaves the pairs somewhere
-    // the genuine counter is not.
-    for (key, shift) in [
-        ("a.realtime", -2 * HOUR),
-        ("a.uptime_raw", HOUR),
-        ("a.monotonic_raw", 2 * HOUR),
+    // the genuine counter is not. A family's shift is measured from the clock its zero comes from:
+    // for Boottime that is `CLOCK_MONOTONIC`, which libSystem builds from the wall clock rather
+    // than from the counter `CLOCK_MONOTONIC_RAW` reads.
+    for (key, zero, shift) in [
+        ("a.realtime", "a.realtime.genuine", -2 * HOUR),
+        ("a.uptime_raw", "a.uptime_raw.genuine", HOUR),
+        ("a.monotonic_raw", "a.monotonic.genuine", 2 * HOUR),
     ] {
-        let genuine = report.nanos(&format!("{key}.genuine"));
-        let moved = report.nanos(key) - genuine;
+        let moved = report.nanos(key) - report.nanos(zero);
         assert!(
             (moved - shift).abs() <= SLACK,
-            "{key} moved {moved} ns, wanted {shift} ns"
+            "{key} moved {moved} ns from {zero}, wanted {shift} ns"
         );
     }
 }
