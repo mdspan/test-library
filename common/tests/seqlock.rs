@@ -44,7 +44,6 @@ mod verdict {
     pub(crate) const NO_READING: i32 = 2;
     pub(crate) const WENT_BACKWARDS: i32 = 3;
     pub(crate) const TORN: i32 = 4;
-    pub(crate) const TOO_FEW_READS: i32 = 5;
     pub(crate) const WRONG_VALUE: i32 = 6;
 }
 
@@ -116,7 +115,12 @@ fn deadline(after: i64) -> Nanos {
     Nanos(now().0.saturating_add(after))
 }
 
-/// Reads the clock and the parameters until `until`, checking both on every pass.
+/// The fewest passes a reader makes. A reader that never got going would pass every check without
+/// checking anything, so one past `until` keeps reading until it has made this many.
+const LEAST_READS: u64 = 1_000;
+
+/// Reads the clock and the parameters until `until` and [`LEAST_READS`] passes, checking both on
+/// every pass.
 fn reading_until(header: &Header, until: Nanos, expected: Option<ParamsValue>) -> i32 {
     let mut last = Nanos(i64::MIN);
     let mut reads: u64 = 0;
@@ -138,15 +142,10 @@ fn reading_until(header: &Header, until: Nanos, expected: Option<ParamsValue>) -
         }
 
         reads += 1;
-        if reads.is_multiple_of(32) && now() >= until {
-            break;
+        if reads >= LEAST_READS && reads.is_multiple_of(32) && now() >= until {
+            return verdict::WHOLE;
         }
     }
-    // A reader that never got going would pass every check above without checking anything.
-    if reads < 1_000 {
-        return verdict::TOO_FEW_READS;
-    }
-    verdict::WHOLE
 }
 
 fn fork_child(body: impl FnOnce() -> i32) -> libc::pid_t {
