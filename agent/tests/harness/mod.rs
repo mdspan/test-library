@@ -566,3 +566,16 @@ pub(crate) fn genuine_now() -> i64 {
 }
 
 pub(crate) const HOUR: i64 = 3_600 * 1_000_000_000;
+
+/// How far past its deadline the kernel may wake a wait, or fire a timer on elapsed time, in
+/// nanoseconds, without anything being wrong.
+///
+/// macOS coalesces those timers, and gives a process it runs in the background up to 100 ms of
+/// leeway on each, the cap xnu sets on Intel and Apple silicon alike. A CI runner can run the
+/// suite that way. Linux defers a timer by 50 µs at most and FreeBSD by 5% of its duration, both
+/// inside the windows the cases already allow.
+pub(crate) const TIMER_LEEWAY: i64 = if cfg!(target_os = "macos") {
+    100_000_000
+} else {
+    0
+};

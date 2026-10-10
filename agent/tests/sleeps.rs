@@ -157,8 +157,8 @@ fn waits(dir: &Path, base_millis: i64, env: &[(&str, &str)]) -> Report {
 /// whether it ran at all: a wait this system does not have reports nothing to measure.
 ///
 /// The window is wide below and wider above, because a slow machine can only ever make a wait
-/// longer. It still has to exclude the duration the wait asked for, which is what the cases below
-/// choose their rates to keep clear of.
+/// longer, and so can the kernel's leeway. It still has to exclude the duration the wait asked
+/// for, which is what the cases below choose their rates and durations to keep clear of.
 #[track_caller]
 fn assert_blocked(report: &Report, key: &str, expected: i64) -> bool {
     if report.nanos(&format!("{key}.available")) == 0 {
@@ -166,7 +166,7 @@ fn assert_blocked(report: &Report, key: &str, expected: i64) -> bool {
     }
     let genuine = report.nanos(&format!("{key}.genuine"));
     let low = expected * 3 / 5;
-    let high = expected * 2 + 60 * MILLI;
+    let high = expected * 2 + 60 * MILLI + harness::TIMER_LEEWAY;
     assert!(
         (low..=high).contains(&genuine),
         "{key} blocked {} ms, which is not the {} ms it was owed ({}..={} ms)",
@@ -254,7 +254,9 @@ fn a_monotonic_rate_reaches_the_monotonic_waits_alone() {
 #[test]
 fn a_wall_clock_rate_reaches_the_waits_that_name_a_wall_clock_deadline_alone() {
     let dir = tempfile::tempdir().unwrap();
-    let report = waits(dir.path(), 100, &[("LIBTIMEWARP_REALTIME_RATE", "20")]);
+    // Two hundred fake milliseconds are ten genuine ones on the wall clock, whose window, the
+    // kernel's leeway included, still ends short of the two hundred an unconverted wait blocks.
+    let report = waits(dir.path(), 200, &[("LIBTIMEWARP_REALTIME_RATE", "20")]);
     assert_every_wait(&report, (1, 1), (20, 1));
 }
 
@@ -607,11 +609,11 @@ fn every_wait_reaches_the_hook_as_a_fake_duration_with_its_familys_clock() {
 #[test]
 fn a_wait_the_family_table_leaves_alone_blocks_for_what_it_asked() {
     let dir = tempfile::tempdir().unwrap();
-    // Every family ten times faster, so a wait that followed any of them would be a tenth as long.
-    // `nanosleep` follows Monotonic, and this checks the other side of the same rule: the run
-    // above with no session at all leaves every wait exactly as the program wrote it.
-    let faked = waits(dir.path(), 200, &[("LIBTIMEWARP_RATE", "10")]);
-    assert_blocked(&faked, "nanosleep", 20 * MILLI);
+    // Every family twenty times faster, so a wait that followed any of them would be a twentieth
+    // as long. `nanosleep` follows Monotonic, and this checks the other side of the same rule: the
+    // run above with no session at all leaves every wait exactly as the program wrote it.
+    let faked = waits(dir.path(), 200, &[("LIBTIMEWARP_RATE", "20")]);
+    assert_blocked(&faked, "nanosleep", 10 * MILLI);
 
     let plain = waits(dir.path(), 200, &[("LIBTIMEWARP_KEEPER", "null")]);
     assert_blocked(&plain, "nanosleep", 200 * MILLI);

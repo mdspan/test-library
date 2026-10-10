@@ -171,16 +171,17 @@ fn run_timers(dir: &Path, base_millis: i64, cpu: bool, env: &[(&str, &str)]) -> 
 /// whether it ran at all: a timer this system does not have reports nothing to measure.
 ///
 /// The window is wide below and wider above, because a slow machine can only ever make a timer
-/// later. It still has to exclude the duration the timer was armed for, which is what the cases
-/// below choose their rates to keep clear of.
+/// later, and so can `leeway`, the most the kernel may defer the timer by. It still has to exclude
+/// the duration the timer was armed for, which is what the cases below choose their rates and
+/// durations to keep clear of.
 #[track_caller]
-fn assert_fired(report: &Report, key: &str, expected: i64) -> bool {
+fn assert_fired(report: &Report, key: &str, expected: i64, leeway: i64) -> bool {
     if report.nanos(&format!("{key}.available")) == 0 {
         return false;
     }
     let genuine = report.nanos(&format!("{key}.genuine"));
     let low = expected * 3 / 5;
-    let high = expected * 2 + 60 * MILLI;
+    let high = expected * 2 + 60 * MILLI + leeway;
     assert!(
         (low..=high).contains(&genuine),
         "{key} fired after {} ms, which is not the {} ms it was armed for ({}..={} ms)",
@@ -232,15 +233,21 @@ fn assert_every_timer(
     realtime: (i64, i64),
     cpu: Option<(i64, i64)>,
 ) {
-    let mut groups = vec![(MONOTONIC_TIMERS, monotonic), (REALTIME_TIMERS, realtime)];
+    // A timer on elapsed time may fire as late as the kernel's leeway allows. One that counts
+    // consumption is measured in the consumption itself, which no leeway reaches.
+    let mut groups = vec![
+        (MONOTONIC_TIMERS, monotonic, harness::TIMER_LEEWAY),
+        (REALTIME_TIMERS, realtime, harness::TIMER_LEEWAY),
+    ];
     if let Some(cpu) = cpu {
-        groups.push((CPU_TIMERS, cpu));
+        groups.push((CPU_TIMERS, cpu, 0));
     }
 
     let mut measured = 0;
-    for (keys, (numerator, denominator)) in groups {
+    for (keys, (numerator, denominator), leeway) in groups {
         for key in keys {
-            if assert_fired(report, key, owed(report, key, numerator, denominator)) {
+            let expected = owed(report, key, numerator, denominator);
+            if assert_fired(report, key, expected, leeway) {
                 measured += 1;
             }
         }
@@ -297,7 +304,9 @@ fn a_monotonic_rate_reaches_the_timers_created_on_a_monotonic_clock_alone() {
 #[test]
 fn a_wall_clock_rate_reaches_the_timers_that_follow_the_wall_clock_alone() {
     let dir = tempfile::tempdir().unwrap();
-    let report = timers(dir.path(), 100, &[("LIBTIMEWARP_REALTIME_RATE", "20")]);
+    // Two hundred fake milliseconds are ten genuine ones on the wall clock, whose window, the
+    // kernel's leeway included, still ends short of the two hundred an unconverted timer takes.
+    let report = timers(dir.path(), 200, &[("LIBTIMEWARP_REALTIME_RATE", "20")]);
     assert_every_timer(&report, (1, 1), (20, 1), None);
 }
 
@@ -318,13 +327,14 @@ fn a_sleep_and_a_timer_armed_together_still_fire_together() {
     let sleep = report.nanos("together.sleep");
     let timer = report.nanos("together.timer");
     assert!(
-        (expected * 3 / 5..=expected * 2 + 60 * MILLI).contains(&sleep),
+        (expected * 3 / 5..=expected * 2 + 60 * MILLI + harness::TIMER_LEEWAY).contains(&sleep),
         "the sleep woke after {} ms, not the {} ms it asked for",
         sleep / MILLI,
         expected / MILLI,
     );
+    // The kernel may defer either of the two by its leeway without deferring the other.
     assert!(
-        (timer - sleep).abs() <= 40 * MILLI,
+        (timer - sleep).abs() <= 40 * MILLI + harness::TIMER_LEEWAY,
         "the sleep woke after {} ms and the timer fired after {} ms, so the two parted",
         sleep / MILLI,
         timer / MILLI,
