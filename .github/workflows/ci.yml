@@ -1,30 +1,11 @@
 name: CI
 
-# Three tiers, because a private repo bills its minutes and macOS bills them at ten times the rate
-# of everything else. The free allowance is 2,000 Linux-equivalent minutes a month, which is 200
-# wall-clock minutes of macOS and no more.
+# Every job runs on every trigger: each pull request, each push to main or a release tag, the
+# weekly run, and the Run workflow button. Hosted runners are free for a public repository, macOS
+# and the FreeBSD VMs included, so no platform waits for a label or a schedule.
 #
-#   every pull request, and every push to main   the Linux pair, and macOS and FreeBSD
-#                                                cross-checked from a Linux runner    1x
-#   weekly, on demand, or on a labelled PR       both macOS arches, and a stress run
-#                                                of the racy cases                    1x / 10x
-#   only when asked for by name                  every FreeBSD release, and FreeBSD
-#                                                aarch64                              1x
-#
-# A branch without a pull request runs nothing: `push` is narrowed to main so a branch that has one
-# open is not billed twice for the same commit. To put the wide tier on a single pull request, add
-# the `ci:full` label to it; to run it now, use the Run workflow button.
-#
-# The FreeBSD VMs start for nothing on their own. A VM job is twenty-odd minutes and the sweep is
-# nine of them, which is most of a month's allowance for a platform whose code changes rarely. What
-# still runs on every push is the cross-check below, which compiles and lints the FreeBSD arms on a
-# Linux runner; what it cannot catch is a link error or a wrong answer at run time. So ask for a VM
-# before merging anything that touches the FreeBSD code: the `ci:freebsd` label on a pull request
-# runs one release, and the box on the Run workflow button runs the whole sweep.
-#
-# The knob to turn if the wide tier is too rare: add `github.ref == 'refs/heads/main'` to the `if:`
-# the macos and stress jobs share, which buys a full platform sweep on every merge for about 200
-# billed minutes a time.
+# A branch without a pull request runs nothing: `push` is narrowed to main and tags so a branch
+# that has one open does not run twice for the same commit.
 
 on:
   push:
@@ -32,15 +13,10 @@ on:
     tags: ["v*"]
   pull_request:
   schedule:
-    # Sunday, 03:00 UTC. Weekly rather than nightly: the wide tier is about 200 billed minutes a
-    # run, so a nightly one would spend the month's allowance three times over.
+    # Sunday, 03:00 UTC, for what changes under an unchanged commit: the runner images, and the
+    # packages the FreeBSD VMs install.
     - cron: "0 3 * * 0"
   workflow_dispatch:
-    inputs:
-      freebsd:
-        description: "Run the FreeBSD VMs too, which nothing else starts"
-        type: boolean
-        default: false
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -51,8 +27,7 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
-  # Everything the suite has, on both architectures we support. This and the cross-check below are
-  # what an ordinary pull request runs, and between them what gates a merge.
+  # Everything the suite has, on both architectures we support.
   linux:
     name: linux ${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
@@ -148,9 +123,8 @@ jobs:
           retention-days: 7
 
   # What a Mac and a FreeBSD box are needed for is linking and running. Type-checking and linting
-  # their code needs neither, so both happen here on an ordinary Linux runner that bills as one
-  # rather than ten. This is what gives a push macOS signal at all: a refactor that breaks a
-  # platform is caught on the push that broke it rather than at the weekly sweep.
+  # their code needs neither, so both happen here on a Linux runner, which reports a platform's
+  # compile error well before that platform's own job finishes.
   #
   # What it cannot catch is a link error or a wrong answer at run time, which is what the jobs on
   # real machines below are for. FreeBSD aarch64 is missing here too, since that target has no
@@ -197,70 +171,14 @@ jobs:
             echo "::endgroup::"
           done
 
-  # One FreeBSD release, for a pull request that wants a VM without wanting nine. Started by the
-  # `ci:freebsd` label alone: see the note at the top about what the VMs cost and what stands in
-  # for them on a push.
-  freebsd:
-    name: freebsd x86_64 15.0
-    if: contains(github.event.pull_request.labels.*.name, 'ci:freebsd')
-    runs-on: ubuntu-24.04
-    timeout-minutes: 60
-    env:
-      PLATFORM: freebsd x86_64 15.0
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Build and test in the VM
-        uses: vmactions/freebsd-vm@v1
-        with:
-          release: "15.0"
-          usesh: true
-          prepare: |
-            # The base system carries no root certificates, so cargo cannot reach crates.io
-            # until this package drops a bundle at /etc/ssl/cert.pem.
-            # python3 is for the Python tool's own cases; procstat, which those cases use to
-            # read another process's environment here, is in the base system. go builds the
-            # program whose runtime reads the clock through the fallback routines the library
-            # interposes, which is the target the whole mechanism exists for.
-            pkg install -y ca_root_nss rustup-init python3 go
-            rustup-init -y --no-modify-path --default-toolchain none
-            # The POSIX message queues live behind a module. Without it `mq_open` fails and the
-            # two timed message queue waits report themselves unexercised instead of running.
-            kldload mqueuefs || true
-          run: |
-            . "$HOME/.cargo/env"
-            rustup toolchain install
-            # Named, so a Go case that cannot build its program fails rather than skipping.
-            export GO=go
-            cargo build --locked --workspace --all-targets --all-features
-            cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
-            # The build with no Go faking: --no-default-features drops the fallback
-            # interposition, which no other command here compiles.
-            cargo clippy --locked -p agent --no-default-features --all-targets -- -D warnings
-            # /bin/sh has no PIPESTATUS, so the log is a file the exit status survives.
-            cargo test --locked --workspace --all-features --no-fail-fast >test.log 2>&1
-            status=$?
-            cat test.log
-            (cd python && PYTHONPATH=. python3 -m unittest discover -s tests -t .) || status=1
-            if [ $status -ne 0 ]; then
-              echo "=== freebsd failed ==="
-              grep -E '^test .+ \.\.\. FAILED$' test.log
-            fi
-            exit $status
-
-      - name: Name what failed
-        if: failure()
-        shell: bash
-        run: .github/report-failure.sh "$PLATFORM" test.log
-
-  # Both macOS architectures, and the only tier that bills at ten times the rate. Apple silicon
-  # carries the 125:3 timebase and Intel the 1:1, and the Mach conversion has to be right at both;
-  # a job on one of them leaves the other's arithmetic unexecuted.
+  # Both macOS architectures. Apple silicon carries the 125:3 timebase and Intel the 1:1, and the
+  # Mach conversion has to be right at both; a job on one of them leaves the other's arithmetic
+  # unexecuted.
   #
-  # The two entries are of different releases on purpose. Two jobs is what the budget buys, and a
-  # pair that differs in both the architecture and the release covers more of what a program meets
-  # than a pair that differs in one: what the rows here interpose is libSystem, which is a
-  # different library on each release. `macos-26` is the current one and `macos-15` the one before.
+  # The two entries are of different releases on purpose: a pair that differs in both the
+  # architecture and the release covers more of what a program meets than a pair that differs in
+  # one, since what the rows here interpose is libSystem, which is a different library on each
+  # release. `macos-26` is the current one and `macos-15` the one before.
   #
   # `macos-15-intel` goes away in August 2027, and x86_64 goes with it. When it does, the x86_64
   # rows and the 1:1 ratio lose their runtime coverage and the cross-build step below becomes the
@@ -268,10 +186,6 @@ jobs:
   # move forward before then.
   macos:
     name: macos ${{ matrix.arch }} ${{ matrix.release }}
-    if: >-
-      github.event_name == 'schedule' ||
-      github.event_name == 'workflow_dispatch' ||
-      contains(github.event.pull_request.labels.*.name, 'ci:full')
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     strategy:
@@ -348,8 +262,6 @@ jobs:
           retention-days: 7
 
   # Every FreeBSD release the family table distinguishes, and the architecture no other job builds.
-  # Started by the box on the Run workflow button alone, which is the other half of the switch the
-  # job above carries: one release on a labelled pull request, the whole sweep on demand.
   #
   # The releases matter because the running kernel picks between the table's two FreeBSD columns:
   # 13.x and 14.x are where nothing counts suspended time, and 15.x is where `CLOCK_MONOTONIC` and
@@ -363,9 +275,8 @@ jobs:
   # rows run them. Two further rows stress how the rewrite lands rather than which release runs
   # it: a kernel that forbids write-and-execute at once, and a target that samples itself through
   # SIGPROF.
-  freebsd-wide:
+  freebsd:
     name: freebsd ${{ matrix.arch }} ${{ matrix.release }}
-    if: inputs.freebsd
     runs-on: ubuntu-24.04
     # The aarch64 VM is emulated rather than accelerated, so it runs several times slower than the
     # others and carries the longer bound.
@@ -386,8 +297,6 @@ jobs:
             arch: x86_64
             go: go123
             timeout: 60
-          # The release the single-VM job above runs. The two never start together, so this is the
-          # sweep's own row rather than a repeat of one.
           - release: "15.0"
             arch: x86_64
             go: go124
@@ -431,8 +340,14 @@ jobs:
           arch: ${{ matrix.arch }}
           usesh: true
           prepare: |
+            # The base system carries no root certificates, so cargo cannot reach crates.io
+            # until this package drops a bundle at /etc/ssl/cert.pem.
+            # python3 is for the Python tool's own cases; procstat, which those cases use to
+            # read another process's environment here, is in the base system.
             pkg install -y ca_root_nss rustup-init python3
             rustup-init -y --no-modify-path --default-toolchain none
+            # The POSIX message queues live behind a module. Without it `mq_open` fails and the
+            # two timed message queue waits report themselves unexercised instead of running.
             kldload mqueuefs || true
             # The pinned Go builds the program whose runtime reads the clock through the fallback
             # routines the library interposes. Installed on every arch, the emulated one included,
@@ -474,14 +389,9 @@ jobs:
 
   # The cases that can disagree with themselves between one run and the next: the seqlock the
   # readers and a writer share, and the clock group racing against a write. Running them many times
-  # on a real machine is what stands in for a model checker here, and it costs Linux minutes rather
-  # than macOS ones.
+  # on a real machine is what stands in for a model checker here.
   stress:
     name: linux stress
-    if: >-
-      github.event_name == 'schedule' ||
-      github.event_name == 'workflow_dispatch' ||
-      contains(github.event.pull_request.labels.*.name, 'ci:full')
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
@@ -523,25 +433,26 @@ jobs:
         shell: bash
         run: .github/report-failure.sh "$PLATFORM" "$RUNNER_TEMP/test.log"
 
-  # One check to point branch protection at. The Linux pair runs the suite; the cross-check says
-  # the other two platforms still compile. Both are cheap and both run on every pull request, which
-  # is what makes them fit to gate a merge. Neither a hosted macOS runner nor a FreeBSD VM is
-  # something a merge should wait on.
+  # One check to point branch protection at, passing only when every job above has.
   gate:
     name: gate
-    needs: [linux, cross]
+    needs: [linux, cross, macos, freebsd, stress]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - name: Require the Linux jobs and the cross-check
+      - name: Require every job
         run: |
           failed=
-          [ '${{ needs.linux.result }}' = success ] || failed="the Linux jobs are ${{ needs.linux.result }}"
-          if [ '${{ needs.cross.result }}' != success ]; then
-            failed="${failed:+$failed, and }the cross-check is ${{ needs.cross.result }}"
-          fi
+          for job in \
+            'linux=${{ needs.linux.result }}' \
+            'cross=${{ needs.cross.result }}' \
+            'macos=${{ needs.macos.result }}' \
+            'freebsd=${{ needs.freebsd.result }}' \
+            'stress=${{ needs.stress.result }}'; do
+            [ "${job#*=}" = success ] || failed="${failed:+$failed, }${job%%=*} is ${job#*=}"
+          done
           if [ -n "$failed" ]; then
-            echo "${failed}, so this branch does not merge." >&2
+            echo "${failed}, so this commit does not pass." >&2
             exit 1
           fi
