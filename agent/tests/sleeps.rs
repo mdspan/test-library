@@ -153,17 +153,13 @@ fn waits(dir: &Path, base_millis: i64, env: &[(&str, &str)]) -> Report {
     run.run()
 }
 
-/// Asserts that the wait under `key` blocked for about `expected` genuine nanoseconds, and says
-/// whether it ran at all: a wait this system does not have reports nothing to measure.
+/// Asserts that the wait under `key` blocked for about `expected` genuine nanoseconds.
 ///
 /// The window is wide below and wider above, because a slow machine can only ever make a wait
 /// longer, and so can the kernel's leeway. It still has to exclude the duration the wait asked
 /// for, which is what the cases below choose their rates and durations to keep clear of.
 #[track_caller]
-fn assert_blocked(report: &Report, key: &str, expected: i64) -> bool {
-    if report.nanos(&format!("{key}.available")) == 0 {
-        return false;
-    }
+fn assert_blocked(report: &Report, key: &str, expected: i64) {
     let genuine = report.nanos(&format!("{key}.genuine"));
     let low = expected * 3 / 5;
     let high = expected * 2 + 60 * MILLI + harness::TIMER_LEEWAY;
@@ -175,7 +171,6 @@ fn assert_blocked(report: &Report, key: &str, expected: i64) -> bool {
         low / MILLI,
         high / MILLI,
     );
-    true
 }
 
 /// How many of the waits above a run may find missing.
@@ -203,9 +198,11 @@ fn assert_every_wait(report: &Report, monotonic: (i64, i64), realtime: (i64, i64
         [(MONOTONIC_WAITS, monotonic), (REALTIME_WAITS, realtime)]
     {
         for key in keys {
-            if assert_blocked(report, key, owed(report, key, numerator, denominator)) {
-                measured += 1;
+            if report.nanos(&format!("{key}.available")) == 0 {
+                continue;
             }
+            assert_blocked(report, key, owed(report, key, numerator, denominator));
+            measured += 1;
         }
     }
     let least = MONOTONIC_WAITS.len() + REALTIME_WAITS.len() - MAY_BE_MISSING;
