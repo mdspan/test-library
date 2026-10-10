@@ -143,7 +143,7 @@ fn a_program_reading_its_clocks_follows_every_transaction_and_never_steps_back()
     }
 
     let (first, last) = (ticks[0], ticks[ticks.len() - 1]);
-    assert!(last[0] - first[0] >= DAY, "the wall clock never got there");
+    assert!(last[0] >= deadline, "the wall clock never got there");
     assert!(last[1] - first[1] >= 10 * SECOND, "Monotonic never moved");
     assert!(last[2] - first[2] >= 10 * SECOND, "Boottime never moved");
 
