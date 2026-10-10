@@ -38,8 +38,29 @@ pub const PT_LOAD: u32 = 1;
 /// The segment holding the dynamic array.
 pub const PT_DYNAMIC: u32 = 2;
 
+/// The segment that points at the program header array itself, which carries the address the array
+/// was linked for and so the load bias.
+pub const PT_PHDR: u32 = 6;
+
 /// A segment the program may read.
 pub const PF_R: u32 = 4;
+
+/// A segment the program may execute, which is where its own code sits.
+pub const PF_X: u32 = 1;
+
+/// A segment the program may write, which is where its own data sits.
+pub const PF_W: u32 = 2;
+
+// The auxiliary-vector tags that name the program's own headers: where the array is in memory, how
+// long one entry is, and how many there are. A target that reads the clock without libc carries
+// that code in its own executable segments, which these locate.
+
+/// Where the program header array is in memory.
+pub const AT_PHDR: libc::c_ulong = 3;
+/// How long one program header is.
+pub const AT_PHENT: libc::c_ulong = 4;
+/// How many program headers there are.
+pub const AT_PHNUM: libc::c_ulong = 5;
 
 // The dynamic tags we write and read. The three above `DT_LOOS` are the versioning ones, which
 // carry the version a symbol is defined under.
@@ -359,6 +380,164 @@ unsafe fn named(at: usize, name: &[u8]) -> bool {
         .is_some_and(|end| unsafe { read::<u8>(end) } == 0)
 }
 
+/// How many load segments of one kind [`MainImage`] keeps. A program links one or two of each; the
+/// bound is well above any real count and is what a malformed header cannot grow the walk past.
+const MAX_SEGMENTS: usize = 8;
+
+/// Up to [`MAX_SEGMENTS`] ranges of memory, in the order the program headers list them.
+#[derive(Debug, Clone, Copy)]
+struct Spans {
+    /// The ranges, as `(start, end)` pairs.
+    spans: [(usize, usize); MAX_SEGMENTS],
+    /// How many of `spans` are filled.
+    count: usize,
+}
+
+impl Spans {
+    /// No ranges.
+    const EMPTY: Self = Self {
+        spans: [(0, 0); MAX_SEGMENTS],
+        count: 0,
+    };
+
+    /// Adds `start..end`, or leaves it out once [`MAX_SEGMENTS`] are kept.
+    fn push(&mut self, start: usize, end: usize) {
+        if let Some(slot) = self.spans.get_mut(self.count) {
+            *slot = (start, end);
+            self.count += 1;
+        }
+    }
+
+    /// The ranges.
+    fn iter(&self) -> impl Iterator<Item = std::ops::Range<usize>> + '_ {
+        self.spans
+            .iter()
+            .take(self.count)
+            .map(|&(start, end)| start..end)
+    }
+}
+
+/// The main program's own image, found through the auxiliary vector rather than through a shared
+/// object.
+///
+/// A target that reads the clock without libc, the Go runtime among them, carries that code in its
+/// own executable load segments. This derives the load bias every address in the program is
+/// counted from and the ranges that code sits in, so a scan can recognise a routine by its bytes,
+/// and the ranges the program's initialised data sits in, where the Go linker records the release
+/// that built the program.
+#[derive(Debug)]
+pub struct MainImage {
+    /// What a linked address has added to it to reach where the segment landed.
+    bias: usize,
+    /// The executable load ranges.
+    executable: Spans,
+    /// The part of each writable, non-executable load segment that the file supplies, which leaves
+    /// out the zeroed tail no initialised data sits in.
+    writable: Spans,
+}
+
+impl MainImage {
+    /// Locates the image from the three `AT_PHDR` auxiliary-vector values: the in-memory address
+    /// of the program header array, the size of one entry, and the count.
+    ///
+    /// `None` when the entry size is not this build's [`Phdr`], when no load bias can be derived,
+    /// or when the headers name no executable segment.
+    ///
+    /// # Safety
+    /// `phdr` must be the address the auxiliary vector carries for this process's program headers,
+    /// with `phnum` entries of `phent` bytes each.
+    #[must_use]
+    pub unsafe fn locate(phdr: usize, phent: usize, phnum: usize) -> Option<Self> {
+        if phdr == 0 || phent != size_of::<Phdr>() {
+            return None;
+        }
+        // Safety: the caller guarantees the array.
+        let bias = unsafe { load_bias(phdr, phnum) }?;
+        let mut executable = Spans::EMPTY;
+        let mut writable = Spans::EMPTY;
+        for index in 0..phnum {
+            let at = phdr.checked_add(index.checked_mul(phent)?)?;
+            // Safety: the auxiliary vector says a program header sits here.
+            let header: Phdr = unsafe { read(at) };
+            if header.kind != PT_LOAD {
+                continue;
+            }
+            let start = bias.wrapping_add(usize::try_from(header.vaddr).ok()?);
+            if header.flags & PF_X != 0 {
+                executable.push(
+                    start,
+                    start.checked_add(usize::try_from(header.memsz).ok()?)?,
+                );
+            } else if header.flags & PF_W != 0 {
+                writable.push(
+                    start,
+                    start.checked_add(usize::try_from(header.filesz).ok()?)?,
+                );
+            }
+        }
+        (executable.count > 0).then_some(Self {
+            bias,
+            executable,
+            writable,
+        })
+    }
+
+    /// What a linked address has added to it to reach where this image landed.
+    #[must_use]
+    pub const fn bias(&self) -> usize {
+        self.bias
+    }
+
+    /// The executable ranges, where the program's own code sits.
+    pub fn executable_ranges(&self) -> impl Iterator<Item = std::ops::Range<usize>> + '_ {
+        self.executable.iter()
+    }
+
+    /// The ranges the program's initialised data sits in: the part of each writable,
+    /// non-executable load segment that the file supplies.
+    pub fn writable_ranges(&self) -> impl Iterator<Item = std::ops::Range<usize>> + '_ {
+        self.writable.iter()
+    }
+}
+
+/// The load bias of the main program: where a segment landed less where it was linked to land.
+///
+/// From [`PT_PHDR`] where there is one, which every position-independent executable carries.
+/// Otherwise from the ELF header, which a linker places at the image base with the program header
+/// array just past it, so the header sits one header-length below the array; its base is where the
+/// load segment that maps file offset zero landed, and the bias follows from that segment's vaddr.
+///
+/// # Safety
+/// As [`MainImage::locate`].
+unsafe fn load_bias(phdr: usize, phnum: usize) -> Option<usize> {
+    for index in 0..phnum {
+        let at = phdr.checked_add(index.checked_mul(size_of::<Phdr>())?)?;
+        // Safety: the caller guarantees the array.
+        let header: Phdr = unsafe { read(at) };
+        if header.kind == PT_PHDR {
+            return Some(phdr.wrapping_sub(usize::try_from(header.vaddr).ok()?));
+        }
+    }
+
+    // No `PT_PHDR`: the header is the length of itself below the array.
+    let base = phdr.checked_sub(size_of::<Ehdr>())?;
+    // Safety: the array is mapped and the header precedes it in the same first page.
+    let header: Ehdr = unsafe { read(base) };
+    if header.ident.get(..4)? != MAGIC || usize::try_from(header.phoff).ok()? != size_of::<Ehdr>() {
+        return None;
+    }
+    // The load segment whose file offset is zero maps that offset, the header, to `base`.
+    for index in 0..phnum {
+        let at = phdr.checked_add(index.checked_mul(size_of::<Phdr>())?)?;
+        // Safety: as above.
+        let segment: Phdr = unsafe { read(at) };
+        if segment.kind == PT_LOAD && segment.offset == 0 {
+            return Some(base.wrapping_sub(usize::try_from(segment.vaddr).ok()?));
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -375,6 +554,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn the_kernel_vdso_clock_is_its_own_code() {
         // Safety: `getauxval` takes a tag and answers a number.
         let base = unsafe { libc::getauxval(crate::platform::AT_SYSINFO_EHDR) };
@@ -400,5 +580,55 @@ mod tests {
         assert_eq!(size_of::<Sym>(), 24);
         assert_eq!(size_of::<Verdef>(), 20);
         assert_eq!(size_of::<Verdaux>(), 8);
+    }
+
+    /// The bias and the ranges this process computes for itself from its own `AT_PHDR` family land
+    /// this function's own address inside an executable range. A test binary is built
+    /// position-independent, so it carries a `PT_PHDR` and the bias is non-trivial.
+    #[test]
+    #[cfg(target_os = "linux")]
+    #[expect(
+        clippy::fn_to_numeric_cast_any,
+        reason = "the runtime address of this code is what the executable range is checked to hold"
+    )]
+    fn the_main_image_covers_this_programs_own_code() {
+        // Safety: `getauxval` takes a tag and answers a number, touching nothing of ours.
+        let value = |tag| usize::try_from(unsafe { libc::getauxval(tag) }).unwrap();
+        let (phdr, phent, phnum) = (value(AT_PHDR), value(AT_PHENT), value(AT_PHNUM));
+        assert_eq!(phent, size_of::<Phdr>());
+        // Safety: the three values are this process's own, from the auxiliary vector.
+        let image = unsafe { MainImage::locate(phdr, phent, phnum) }.expect("the image is located");
+
+        let here = (the_main_image_covers_this_programs_own_code as *const ()).expose_provenance();
+        assert!(
+            image.executable_ranges().any(|range| range.contains(&here)),
+            "this function sits outside every executable range the image found"
+        );
+        // The program header array itself is inside the image, above its bias.
+        assert!(phdr > image.bias());
+    }
+
+    /// A static this program initialised to something other than zero sits in the part of a
+    /// writable segment the file supplies, which is where the image says its data is.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn the_main_image_covers_this_programs_own_data() {
+        static DATA: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0x5eed);
+
+        // Safety: `getauxval` takes a tag and answers a number, touching nothing of ours.
+        let value = |tag| usize::try_from(unsafe { libc::getauxval(tag) }).unwrap();
+        let (phdr, phent, phnum) = (value(AT_PHDR), value(AT_PHENT), value(AT_PHNUM));
+        // Safety: the three values are this process's own, from the auxiliary vector.
+        let image = unsafe { MainImage::locate(phdr, phent, phnum) }.expect("the image is located");
+
+        let here = std::ptr::from_ref(&DATA).addr();
+        assert!(
+            image.writable_ranges().any(|range| range.contains(&here)),
+            "this program's data sits outside every writable range the image found"
+        );
+        assert!(
+            !image.executable_ranges().any(|range| range.contains(&here)),
+            "this program's data sits inside an executable range"
+        );
     }
 }

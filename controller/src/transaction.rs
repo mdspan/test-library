@@ -5,8 +5,6 @@ use std::io;
 use std::path::Path;
 
 use common::session::layout::{FamilyValue, Header, Keeper, ParamsValue};
-use common::session::page_elapsed_family;
-use common::session::timekeep::Page;
 use common::sync::{self, Anchor, WriteLock};
 use common::time::{Family, Nanos, Rate};
 
@@ -19,10 +17,6 @@ const OUT_OF_RANGE: &str = "the move would leave the range an instant can hold";
 
 /// What a rate the fixed point cannot carry is refused with.
 const BAD_RATE: &str = "a rate must be a number at or above zero and below the ceiling, 2^32";
-
-/// What a commit that would separate the two clocks the timekeep page serves is refused with.
-const PAGE_SHARES_A_RATE: &str = "the timekeep page carries one rate for the wall clock and the elapsed clock, so a session \
-     with it on cannot run the two at different speeds";
 
 /// Which of the three lines in a copy of the parameters an operation lands on.
 ///
@@ -135,32 +129,12 @@ impl Operation {
         line.line.timebase_anchor = now;
 
         if self.is_a_step() {
-            // A move of the value is the user's own discontinuity, which the FreeBSD republisher
-            // follows rather than smooths away; a change of speed leaves the line where it is.
+            // A move of the value is the user's own discontinuity, marked in the published epoch; a
+            // change of speed leaves the line where it is.
             params.epoch = params.epoch.wrapping_add(1);
         }
         Ok(())
     }
-}
-
-/// Refuses a copy of the parameters this session's timekeep page could not carry.
-///
-/// The page computes both of its clocks from one scale, so a session with the page live keeps
-/// Realtime and the family `CLOCK_MONOTONIC` belongs to at one rate. A transaction that sets both
-/// passes; one that moves either alone away from the other does not. A session with the page off,
-/// and a platform that reads the clock some other way, take any pair.
-fn rates_the_page_can_carry(page: bool, params: &mut ParamsValue) -> Result<(), Error> {
-    if !page {
-        return Ok(());
-    }
-    let Some(elapsed) = page_elapsed_family().and_then(Slot::of) else {
-        return Ok(());
-    };
-    let rate = elapsed.within(params).line.rate;
-    if rate == params.realtime.line.rate {
-        return Ok(());
-    }
-    Err(Error::BadArgument(PAGE_SHARES_A_RATE))
 }
 
 /// Monotonic and Boottime refuse a value below what the family shows at the anchor.
@@ -184,7 +158,6 @@ fn refuse_backwards(slot: Slot, showing: Nanos, requested: Nanos) -> Result<(), 
 #[derive(Debug)]
 pub struct Transaction<'a> {
     header: &'a Header,
-    page: Option<&'a Page>,
     lock: WriteLock,
     staged: Vec<Operation>,
 }
@@ -204,22 +177,17 @@ impl<'a> Transaction<'a> {
     /// # Errors
     /// [`Error::UnsupportedForKeeper`] on a null session, which has no parameters to change, and
     /// [`Error::Io`] when the lock file cannot be opened, is not ours, or cannot be locked.
-    pub fn begin(
-        header: &'a Header,
-        page: Option<&'a Page>,
-        lock_path: &Path,
-    ) -> Result<Self, Error> {
+    pub fn begin(header: &'a Header, lock_path: &Path) -> Result<Self, Error> {
         if Keeper::from_tag(header.keeper) != Some(Keeper::Affine) {
             return Err(Error::UnsupportedForKeeper);
         }
-        Ok(Self::new(header, page, sync::begin(header, lock_path)?))
+        Ok(Self::new(header, sync::begin(header, lock_path)?))
     }
 
     /// A transaction over `header`, holding the write lock `lock`, with nothing staged yet.
-    const fn new(header: &'a Header, page: Option<&'a Page>, lock: WriteLock) -> Self {
+    const fn new(header: &'a Header, lock: WriteLock) -> Self {
         Self {
             header,
-            page,
             lock,
             staged: Vec::new(),
         }
@@ -275,24 +243,21 @@ impl<'a> Transaction<'a> {
     /// three families change together against timebases sampled inside that one section.
     ///
     /// # Errors
-    /// Whatever the first refused operation refused with, and [`Error::BadArgument`] when the
-    /// result would leave the two clocks this session's timekeep page serves at different rates. A
-    /// refusal aborts the whole transaction with nothing written: **W6** through **W9** never ran
-    /// and the shadow-complete flag is still clear, so the section closes looking to a reader
-    /// exactly like a writer that died between **W3** and **W7**.
+    /// Whatever the first refused operation refused with. A refusal aborts the whole transaction
+    /// with nothing written: **W6** through **W9** never ran and the shadow-complete flag is still
+    /// clear, so the section closes looking to a reader exactly like a writer that died between
+    /// **W3** and **W7**.
     pub fn commit(self) -> Result<(), Error> {
         let Self {
             header,
-            page,
             lock,
             staged,
         } = self;
-        let published = lock.publish(header, page, |anchor, live| {
+        let published = lock.publish(header, |anchor, live| {
             let mut next = live;
             for operation in staged {
                 operation.apply(&mut next, anchor)?;
             }
-            rates_the_page_can_carry(page.is_some(), &mut next)?;
             Ok(next)
         });
         drop(lock); // W12
@@ -302,54 +267,5 @@ impl<'a> Transaction<'a> {
     /// Discards the staged operations and releases the write lock, having written nothing.
     pub fn abort(self) {
         drop(self);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use common::session::layout::FamilyValue;
-    use common::time::Line;
-
-    use super::*;
-
-    fn family(rate: Rate) -> FamilyValue {
-        FamilyValue {
-            line: Line {
-                fake_anchor: Nanos::ZERO,
-                timebase_anchor: Nanos::ZERO,
-                rate,
-            },
-            timebase: 0,
-        }
-    }
-
-    /// A copy of the parameters with the wall clock at one rate and the family the page's elapsed
-    /// clock belongs to at another.
-    fn params(realtime: Rate, elapsed: Rate) -> ParamsValue {
-        let mut value = ParamsValue {
-            realtime: family(realtime),
-            monotonic: family(Rate::UNITY),
-            boottime: family(Rate::UNITY),
-            cpu_rate: Rate::UNITY,
-            tai_offset: 0,
-            epoch: 0,
-        };
-        if let Some(slot) = page_elapsed_family().and_then(Slot::of) {
-            *slot.within(&mut value) = family(elapsed);
-        }
-        value
-    }
-
-    #[test]
-    fn a_session_with_the_page_live_keeps_the_two_clocks_it_serves_at_one_rate() {
-        let fast = Rate::from_f64(4.0).unwrap();
-        assert!(rates_the_page_can_carry(true, &mut params(fast, fast)).is_ok());
-        assert!(matches!(
-            rates_the_page_can_carry(true, &mut params(fast, Rate::UNITY)),
-            Err(Error::BadArgument(_))
-        ));
-        // A session that turned the page off takes any pair, which is what freezing the wall clock
-        // while timeouts keep running needs.
-        assert!(rates_the_page_can_carry(false, &mut params(fast, Rate::UNITY)).is_ok());
     }
 }

@@ -78,6 +78,7 @@ pub(super) fn prime() {
 
 /// What the kernel left in the entry, or `None` when this process has nothing there to pose as or
 /// the vector could not be reached.
+#[cfg(target_os = "linux")]
 pub(super) fn genuine() -> Option<usize> {
     if SLOT.load(Ordering::Relaxed).is_null() {
         return None;
@@ -100,6 +101,84 @@ pub(super) fn point_at(base: usize) -> bool {
     // that built the object has to be visible to that reader first.
     entry.value.store(base, Ordering::Release);
     true
+}
+
+/// Zeroes the timekeep entry, so a Go runtime that reads it when it starts finds no page and falls
+/// back to the routine interposed in its own text. Says whether there was an entry to zero.
+///
+/// The same store [`point_at`] makes, Release for the same reason: the fallback it steers the
+/// runtime onto reads the session this process installed first.
+#[cfg(target_os = "freebsd")]
+#[cfg_attr(
+    not(feature = "vdso"),
+    expect(
+        dead_code,
+        reason = "the FreeBSD pose path withholds the entry through this; a build without the \
+                  vdso feature does not compile that path and leaves it unused"
+    )
+)]
+pub(super) fn withhold_timekeep() -> bool {
+    point_at(0)
+}
+
+/// This process's `AT_PHDR`, `AT_PHENT`, and `AT_PHNUM`: where its program header array is, how
+/// long one entry is, and how many there are. `None` when any is absent.
+///
+/// Read through libc's own reader rather than from the vector walked above, which finds the one
+/// entry the platform names the clock in and nothing else. A target that reads the clock without
+/// libc carries that code in the segments these headers describe.
+#[cfg_attr(
+    not(any(test, all(target_os = "freebsd", feature = "vdso"))),
+    expect(
+        dead_code,
+        reason = "only the FreeBSD pose path reads the headers through this; elsewhere it is \
+                  unused"
+    )
+)]
+pub(super) fn program_headers() -> Option<(usize, usize, usize)> {
+    let phdr = aux_ptr(common::elf::AT_PHDR);
+    let phent = aux_count(common::elf::AT_PHENT);
+    let phnum = aux_count(common::elf::AT_PHNUM);
+    (phdr != 0 && phent != 0 && phnum != 0).then_some((phdr, phent, phnum))
+}
+
+/// The pointer-valued auxiliary-vector entry `tag` carries, or zero when there is none.
+#[cfg(target_os = "linux")]
+fn aux_ptr(tag: libc::c_ulong) -> usize {
+    // Safety: `getauxval` takes a tag and answers a number, touching nothing of ours.
+    usize::try_from(unsafe { libc::getauxval(tag) }).unwrap_or(0)
+}
+
+/// The count-valued auxiliary-vector entry `tag` carries, which Linux answers the same way.
+#[cfg(target_os = "linux")]
+fn aux_count(tag: libc::c_ulong) -> usize {
+    aux_ptr(tag)
+}
+
+/// The pointer-valued auxiliary-vector entry `tag` carries, read in a pointer's width.
+#[cfg(target_os = "freebsd")]
+fn aux_ptr(tag: libc::c_ulong) -> usize {
+    let tag = libc::c_int::try_from(tag).unwrap_or(0);
+    let mut at: *mut libc::c_void = ptr::null_mut();
+    let len = libc::c_int::try_from(size_of::<*mut libc::c_void>()).unwrap_or(0);
+    // Safety: the buffer is a live pointer-sized word, which is what this entry answers in.
+    if unsafe { libc::elf_aux_info(tag, (&raw mut at).cast(), len) } != 0 {
+        return 0;
+    }
+    at.addr()
+}
+
+/// The count-valued auxiliary-vector entry `tag` carries, read in an int's width.
+#[cfg(target_os = "freebsd")]
+fn aux_count(tag: libc::c_ulong) -> usize {
+    let tag = libc::c_int::try_from(tag).unwrap_or(0);
+    let mut value: libc::c_int = 0;
+    let len = libc::c_int::try_from(size_of::<libc::c_int>()).unwrap_or(0);
+    // Safety: the buffer is a live int, which is what this entry answers in.
+    if unsafe { libc::elf_aux_info(tag, (&raw mut value).cast(), len) } != 0 {
+        return 0;
+    }
+    usize::try_from(value).unwrap_or(0)
 }
 
 /// The [`TAG`] entry of this process's vector, or `None` when the vector cannot be reached or
@@ -208,5 +287,17 @@ mod tests {
             ptr::without_provenance_mut(0x4000_1000),
         ];
         assert!(walk(planted.as_ptr().cast_mut(), 0).is_none());
+    }
+
+    /// The program headers this process reports locate an image that covers its own code, which is
+    /// what the scan for the Go fallback routines runs over.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn the_program_headers_are_found_and_describe_this_image() {
+        let (phdr, phent, phnum) = program_headers().expect("a program the kernel started");
+        assert_eq!(phent, size_of::<common::elf::Phdr>());
+        // Safety: the three values are this process's own, from the auxiliary vector.
+        let image = unsafe { common::elf::MainImage::locate(phdr, phent, phnum) };
+        assert!(image.is_some(), "the headers located no image");
     }
 }

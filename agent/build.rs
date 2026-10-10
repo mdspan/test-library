@@ -26,6 +26,7 @@ const FIRST_PLAIN_STAT: (u32, u32) = (2, 33);
 fn main() {
     println!("cargo::rerun-if-changed=build.rs");
     println!("cargo::rustc-check-cfg=cfg(glibc_pre_2_33)");
+    println!("cargo::rustc-check-cfg=cfg(loom)");
     println!("cargo::rerun-if-env-changed=CC");
     for (flag, _, _) in DARWIN_NAMES {
         println!("cargo::rustc-check-cfg=cfg({flag})");

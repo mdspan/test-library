@@ -2,8 +2,10 @@
 //! inside it, and how a genuine reading becomes a fake one.
 
 pub mod config;
-// The kernel's vDSO, which the genuine clock reads through and the agent's synthetic one imitates.
-#[cfg(target_os = "linux")]
+// The kernel's vDSO, which the genuine clock reads through and the agent's synthetic one imitates
+// on Linux, and the program's own headers, which FreeBSD scans to find a Go runtime's clock
+// routines.
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 pub mod elf;
 pub mod hook;
 pub mod log;
@@ -11,8 +13,3 @@ pub mod platform;
 pub mod session;
 pub mod sync;
 pub mod time;
-
-// The updater is a process started beside a session, which is exactly the half of way #2 a build
-// without the feature is meant not to carry at all.
-#[cfg(feature = "vdso")]
-pub mod updater;

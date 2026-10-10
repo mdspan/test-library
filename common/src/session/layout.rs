@@ -2,7 +2,8 @@
 //!
 //! The header is one *block*, not literally one page: the 4096-byte hook path the layout table
 //! mandates pushes it past a 4 KiB page, so the block is the header rounded up to a page multiple
-//! and the timekeep page follows it. Every offset below is derived, never assumed.
+//! and the arena, when the session has one, follows it. Every offset below is derived, never
+//! assumed.
 
 use std::sync::atomic::{AtomicI32, AtomicI64, AtomicU32, AtomicU64, Ordering};
 
@@ -13,7 +14,7 @@ use crate::time::{Line, Nanos, Rate};
 pub const MAGIC: [u8; 8] = *b"TIMEWARP";
 
 /// Bumped on any layout change.
-pub const ABI_VERSION: u32 = 1;
+pub const ABI_VERSION: u32 = 2;
 
 /// Long enough for `PATH_MAX`, so an attacher with a stripped environment can still load the hook.
 pub const HOOK_PATH_MAX: usize = 4096;
@@ -244,7 +245,8 @@ pub struct Params {
     pub cpu_rate: AtomicU64,
     /// Whole seconds by which genuine `CLOCK_TAI` leads genuine `CLOCK_REALTIME`, fixed at creation.
     pub tai_offset: AtomicI64,
-    /// Bumped by `set_time`, left alone by a rate change; read by the FreeBSD republisher.
+    /// A discontinuity counter in the published parameters: bumped by `set_time`, left alone by a
+    /// rate change, so a reader can tell a deliberate step from continuous motion.
     pub epoch: AtomicU64,
     /// Alignment only; the layout puts nothing here.
     pub padding: u64,
@@ -373,8 +375,6 @@ pub struct Header {
     pub padding0: u32,
     /// Genuine `CLOCK_REALTIME` when the session was created.
     pub creation_time: i64,
-    /// Nanoseconds between republishes of the FreeBSD timekeep page.
-    pub timekeep_interval: u64,
     /// The hook library an attacher loads, NUL-terminated. See [`Header::hook_path`].
     pub hook_path: [u8; HOOK_PATH_MAX],
     /// Why the session stopped faking, or zero while it still is.
@@ -407,16 +407,11 @@ pub const fn header_block_size(page_size: usize) -> usize {
     round_up(size_of::<Header>(), page_size)
 }
 
-/// Where the timekeep page sits. Zero and unread on Linux and macOS.
-#[must_use]
-pub const fn timekeep_offset(page_size: usize) -> usize {
-    header_block_size(page_size)
-}
-
-/// Where the arena would sit. Only meaningful when the session has a hook.
+/// Where the arena sits: directly after the header block. Only meaningful when the session has a
+/// hook.
 #[must_use]
 pub const fn arena_offset(page_size: usize) -> usize {
-    timekeep_offset(page_size) + page_size
+    header_block_size(page_size)
 }
 
 /// How long a session file with this page size and arena is.
@@ -544,9 +539,8 @@ mod tests {
         assert_eq!(offset_of!(Header, arena_size), 48);
         assert_eq!(offset_of!(Header, creator_pid), 56);
         assert_eq!(offset_of!(Header, creation_time), 64);
-        assert_eq!(offset_of!(Header, timekeep_interval), 72);
-        assert_eq!(offset_of!(Header, hook_path), 80);
-        assert_eq!(offset_of!(Header, fault), 80 + HOOK_PATH_MAX);
+        assert_eq!(offset_of!(Header, hook_path), 72);
+        assert_eq!(offset_of!(Header, fault), 72 + HOOK_PATH_MAX);
     }
 
     #[test]
@@ -621,8 +615,7 @@ mod tests {
         for page in [4096usize, 16384] {
             assert_eq!(header_block_size(page) % page, 0);
             assert!(header_block_size(page) >= size_of::<Header>());
-            assert_eq!(timekeep_offset(page), header_block_size(page));
-            assert_eq!(arena_offset(page), timekeep_offset(page) + page);
+            assert_eq!(arena_offset(page), header_block_size(page));
             assert_eq!(file_size(page, 0), arena_offset(page));
             assert_eq!(file_size(page, 1), arena_offset(page) + page);
         }

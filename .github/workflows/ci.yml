@@ -67,6 +67,8 @@ jobs:
             runner: ubuntu-24.04-arm
     env:
       PLATFORM: linux ${{ matrix.arch }}
+      # Named, so a Go case that cannot build its program fails rather than skipping.
+      GO: go
     steps:
       - uses: actions/checkout@v4
 
@@ -74,7 +76,8 @@ jobs:
         run: rustup toolchain install
 
       # The Go cases run a real Go runtime against the synthetic vDSO, which is the target the
-      # whole mechanism exists for. Without a toolchain they skip themselves and say so.
+      # whole mechanism exists for, and cross-compile the FreeBSD runtime whose clock fallback
+      # routines the library matches by their bytes.
       - uses: actions/setup-go@v5
         with:
           go-version: stable
@@ -106,6 +109,23 @@ jobs:
           set -o pipefail
           cargo test --locked --workspace --all-features --no-fail-fast 2>&1 \
             | tee "$RUNNER_TEMP/test.log"
+
+      # The library finds the FreeBSD Go runtime's clock fallback routines by their bytes, which
+      # the Go assembler has encoded differently from one release to another. Each release the
+      # FreeBSD sweep pins, at its latest patch, is cross-compiled here for both FreeBSD
+      # architectures and checked against the encodings the library carries, with no FreeBSD
+      # machine needed; go1.21.0 stands for the arm64 encoding 1.21.7 changed. Every encoding has
+      # to come out of some release here. The step above checks the stable release the same way.
+      - name: The Go fallback encodings of every pinned Go release
+        if: matrix.arch == 'x86_64'
+        shell: bash
+        env:
+          TIMEWARP_TEST_GO_TOOLCHAINS: >-
+            go1.21.0 go1.21.13 go1.22.12 go1.23.12 go1.24.13 go1.25.14 go1.26.9 go1.27.2
+        run: |
+          set -o pipefail
+          cargo test --locked --workspace --all-features --lib go_locate 2>&1 \
+            | tee -a "$RUNNER_TEMP/test.log"
 
       # The Python tool is pure Python over the C library, so its own cases run wherever an
       # interpreter does. The ones that read another process's environment exercise this
@@ -199,9 +219,8 @@ jobs:
             # until this package drops a bundle at /etc/ssl/cert.pem.
             # python3 is for the Python tool's own cases; procstat, which those cases use to
             # read another process's environment here, is in the base system. go builds the
-            # program that reads the clock from the timekeep page the way a runtime does,
-            # which is the target the whole mechanism exists for; without it those cases skip
-            # themselves and say so.
+            # program whose runtime reads the clock through the fallback routines the library
+            # interposes, which is the target the whole mechanism exists for.
             pkg install -y ca_root_nss rustup-init python3 go
             rustup-init -y --no-modify-path --default-toolchain none
             # The POSIX message queues live behind a module. Without it `mq_open` fails and the
@@ -210,10 +229,12 @@ jobs:
           run: |
             . "$HOME/.cargo/env"
             rustup toolchain install
+            # Named, so a Go case that cannot build its program fails rather than skipping.
+            export GO=go
             cargo build --locked --workspace --all-targets --all-features
             cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
-            # The arm that leaves out the timekeep page and its updater altogether, which no
-            # other command here compiles.
+            # The build with no Go faking: one mechanism and no page, so --no-default-features
+            # drops the fallback interposition, which no other command here compiles.
             cargo clippy --locked -p agent --no-default-features --all-targets -- -D warnings
             # /bin/sh has no PIPESTATUS, so the log is a file the exit status survives.
             cargo test --locked --workspace --all-features --no-fail-fast >test.log 2>&1
@@ -331,8 +352,16 @@ jobs:
   #
   # The releases matter because the running kernel picks between the table's two FreeBSD columns:
   # 13.x and 14.x are where nothing counts suspended time, and 15.x is where `CLOCK_MONOTONIC` and
-  # `CLOCK_BOOTTIME` do. The aarch64 entry matters because the raw system call path is hand-written
-  # assembly per architecture, and the aarch64 arm of it is compiled by nothing else here.
+  # `CLOCK_BOOTTIME` do. The aarch64 entry matters because the raw system call path and the shim
+  # that fakes Go are both hand-written assembly per architecture, and the aarch64 arm of each is
+  # compiled and run by nothing else here.
+  #
+  # Each row pins a different Go release so the sweep spans Go 1.21 through 1.27, whose fallback
+  # routines the library matches in each encoding the Go assembler has given them; the Linux job
+  # checks those encodings against every one of these releases on each pull request, and these
+  # rows run them. Two further rows stress how the rewrite lands rather than which release runs
+  # it: a kernel that forbids write-and-execute at once, and a target that samples itself through
+  # SIGPROF.
   freebsd-wide:
     name: freebsd ${{ matrix.arch }} ${{ matrix.release }}
     if: inputs.freebsd
@@ -346,24 +375,49 @@ jobs:
         include:
           - release: "13.5"
             arch: x86_64
+            go: go121
             timeout: 60
           - release: "14.2"
             arch: x86_64
+            go: go122
             timeout: 60
           - release: "14.5"
             arch: x86_64
+            go: go123
             timeout: 60
           # The release the single-VM job above runs. The two never start together, so this is the
           # sweep's own row rather than a repeat of one.
           - release: "15.0"
             arch: x86_64
+            go: go124
             timeout: 60
           - release: "15.1"
             arch: x86_64
+            go: go125
             timeout: 60
           - release: "15.0"
             arch: aarch64
+            go: go126
             timeout: 150
+          # The newest Go, and the two targets that stress how the rewrite lands.
+          - release: "15.1"
+            arch: x86_64
+            go: go127
+            timeout: 60
+          # A kernel that refuses a page writable and executable at once, so the rewrite takes its
+          # anonymous copy-patch-remap fallback rather than an in-place mprotect.
+          - release: "15.1"
+            arch: x86_64
+            go: go127
+            allow_wx: "0"
+            timeout: 60
+          # Every Go target samples itself through SIGPROF, so a read taken mid-read drives the
+          # shim's reentrancy guard onto its in-assembly genuine path.
+          - release: "15.1"
+            arch: x86_64
+            go: go127
+            profiling: "1"
+            timeout: 60
     env:
       PLATFORM: freebsd ${{ matrix.arch }} ${{ matrix.release }}
     steps:
@@ -379,17 +433,28 @@ jobs:
             pkg install -y ca_root_nss rustup-init python3
             rustup-init -y --no-modify-path --default-toolchain none
             kldload mqueuefs || true
-            # Go builds the program that reads the clock from the timekeep page the way a runtime
-            # does. The emulated architecture is slow enough already, so it skips those cases
-            # rather than spending a Go build on them; the accelerated ones run them.
-            if [ "${{ matrix.arch }}" = "x86_64" ]; then
-              pkg install -y go
-            fi
+            # The pinned Go builds the program whose runtime reads the clock through the fallback
+            # routines the library interposes. Installed on every arch, the emulated one included,
+            # since the aarch64 shim is built and run by nothing else.
+            pkg install -y ${{ matrix.go }}
           run: |
             . "$HOME/.cargo/env"
             rustup toolchain install
+            # The pinned Go, named for the harness the way CC names the C compiler.
+            export GO=${{ matrix.go }}
+            # A hardened kernel refuses a page writable and executable at once, which sends the
+            # rewrite down its anonymous-page fallback.
+            if [ -n "${{ matrix.allow_wx }}" ]; then
+              sysctl kern.elf64.allow_wx=${{ matrix.allow_wx }}
+            fi
+            # A profiling row profiles every Go target.
+            if [ -n "${{ matrix.profiling }}" ]; then
+              export TIMEWARP_TEST_GO_PROFILE=${{ matrix.profiling }}
+            fi
             cargo build --locked --workspace --all-targets --all-features
             cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+            # The build with no Go faking: one mechanism and no page, so --no-default-features
+            # drops the fallback interposition, which no other command here compiles.
             cargo clippy --locked -p agent --no-default-features --all-targets -- -D warnings
             cargo test --locked --workspace --all-features --no-fail-fast >test.log 2>&1
             status=$?
@@ -406,10 +471,10 @@ jobs:
         shell: bash
         run: .github/report-failure.sh "$PLATFORM" test.log
 
-  # The cases that can disagree with themselves between one run and the next: the seqlock, the page
-  # the updater writes and the readers read, and the clock group racing against a write. Running
-  # them many times on a real machine is what stands in for a model checker here, and it costs
-  # Linux minutes rather than macOS ones.
+  # The cases that can disagree with themselves between one run and the next: the seqlock the
+  # readers and a writer share, and the clock group racing against a write. Running them many times
+  # on a real machine is what stands in for a model checker here, and it costs Linux minutes rather
+  # than macOS ones.
   stress:
     name: linux stress
     if: >-
@@ -436,8 +501,8 @@ jobs:
         run: |
           set -u
           for round in $(seq 1 40); do
-            if ! cargo test --locked -p common --lib session:: >"$RUNNER_TEMP/round.log" 2>&1; then
-              echo "round $round of the timekeep and seqlock cases failed" >&2
+            if ! cargo test --locked -p common --test seqlock >"$RUNNER_TEMP/round.log" 2>&1; then
+              echo "round $round of the seqlock cases failed" >&2
               cat "$RUNNER_TEMP/round.log"
               cp "$RUNNER_TEMP/round.log" "$RUNNER_TEMP/test.log"
               exit 1

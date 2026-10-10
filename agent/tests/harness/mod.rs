@@ -202,21 +202,39 @@ pub(crate) fn go_program(name: &str) -> Option<PathBuf> {
     if fresh {
         return Some(binary);
     }
-    let built = Command::new("go")
-        .args(["build", "-buildmode=pie", "-o"])
+    // A CI row pinning a Go release names its binary here, the way the C compiler is named with
+    // `CC`; the default is whatever `go` is in the path.
+    let named = std::env::var_os("GO");
+    let go = named.as_deref().unwrap_or_else(|| "go".as_ref());
+    let mut command = Command::new(go);
+    command.arg("build");
+    // Dynamically linked, so the preloaded library loads: a position-independent executable where
+    // Go builds one, and external linking on FreeBSD arm64, where it does not.
+    if cfg!(all(target_os = "freebsd", target_arch = "aarch64")) {
+        command.arg("-ldflags=-linkmode=external");
+    } else {
+        command.arg("-buildmode=pie");
+    }
+    let built = command
+        .arg("-o")
         .arg(&binary)
         .arg(&source)
         .env("CGO_ENABLED", "1")
         .env("GOCACHE", out_dir.join("gocache"))
         .status();
-    match built {
-        Ok(status) if status.success() => Some(binary),
-        // A machine with no Go checks nothing here rather than failing the suite.
-        _ => {
-            eprintln!("no working go on this machine, so the Go cases went unexercised");
-            None
-        }
+    // A machine with no Go checks nothing here rather than failing the suite. With `GO` set the
+    // cases are required, so a build that fails fails them.
+    if named.is_none() && !built.as_ref().is_ok_and(std::process::ExitStatus::success) {
+        eprintln!("no working go on this machine, so the Go cases went unexercised");
+        return None;
     }
+    let status = built.expect("the named go runs");
+    assert!(
+        status.success(),
+        "{} could not build {name}: {status}",
+        Path::new(go).display()
+    );
+    Some(binary)
 }
 
 /// Compiles `source` into `binary`, once per test run, unless the binary is already newer.
@@ -245,18 +263,10 @@ fn build(source: &Path, binary: &Path, extra: &[String]) -> PathBuf {
 
 /// What a case sets beside its own environment when it gives one family a rate of its own.
 ///
-/// The FreeBSD timekeep page carries one rate for the wall clock and the elapsed clock it serves,
-/// so a session with the page on refuses a pair that differs, and a case about one family's line
-/// runs there with the page off, which is what the design says such a case must do. Everywhere
-/// else there is no such page and this is empty. A case that names such a rate in its environment
-/// is noticed by `Run` without asking; this is for the ones that reach for the controller instead,
-/// and for the ones that build their own command.
+/// Independent family rates are accepted on every platform now, so nothing extra is needed. Kept
+/// as a seam the cases that build their own command or reach for the controller still name.
 pub(crate) const fn separate_family_rates() -> &'static [(&'static str, &'static str)] {
-    if cfg!(target_os = "freebsd") {
-        &[("LIBTIMEWARP_EMULATE_VDSO", "0")]
-    } else {
-        &[]
-    }
+    &[]
 }
 
 /// Whether a name in the session directory is a session file. The lock file beside each one is
@@ -399,22 +409,6 @@ impl Run {
         self
     }
 
-    /// Whether this run gives one family a rate of its own.
-    ///
-    /// The timekeep page carries one rate for the wall clock and the elapsed clock it serves, so a
-    /// session with the page on refuses a pair that differs: the page is what rules the
-    /// combination out. A bare `LIBTIMEWARP_RATE` covers every family at once and needs none of
-    /// this, which is what leaves the cases about the page itself running with it on.
-    fn names_one_familys_rate(&self) -> bool {
-        [
-            "LIBTIMEWARP_REALTIME_RATE",
-            "LIBTIMEWARP_MONOTONIC_RATE",
-            "LIBTIMEWARP_BOOTTIME_RATE",
-        ]
-        .iter()
-        .any(|name| self.env.contains_key(*name))
-    }
-
     /// Runs the target and asserts it succeeded, which is what every case but a deliberate
     /// failure wants.
     pub(crate) fn run(self) -> Report {
@@ -452,16 +446,14 @@ impl Run {
         if let Some(dir) = &self.session_dir {
             command.env("LIBTIMEWARP_SESSION_DIR", dir);
         }
-        // On FreeBSD the timekeep page rules out two things a case may ask for, and a case that
-        // asks for either runs with the page off, as the design says such a case must. A case that
-        // says otherwise still wins, because its own settings go on below.
-        if cfg!(target_os = "freebsd")
-            && (self.env.contains_key("LIBTIMEWARP_HOOK") || self.names_one_familys_rate())
-        {
-            command.env("LIBTIMEWARP_EMULATE_VDSO", "0");
-        }
         for (name, value) in &self.env {
             command.env(name, value);
+        }
+        // A profiling CI row asks every Go target to sample itself, which drives SIGPROF through
+        // the shim's reentrancy guard. Forwarded here because the run is otherwise hermetic; a
+        // target that does not read it ignores it.
+        if let Some(on) = std::env::var_os("TIMEWARP_TEST_GO_PROFILE") {
+            command.env("TIMEWARP_TEST_GO_PROFILE", on);
         }
 
         let before = genuine_now();

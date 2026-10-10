@@ -2,7 +2,6 @@
 
 pub mod layout;
 pub mod naming;
-pub mod timekeep;
 
 use std::ffi::{CString, OsStr, c_void};
 use std::io;
@@ -13,8 +12,8 @@ use std::sync::atomic::Ordering;
 
 use crate::config::{
     self, BadValue, ENV_CPU_RATE, ENV_EMULATE_VDSO, ENV_FAIL_CLOSED, ENV_HOOK, ENV_KEEPER,
-    ENV_RATE, ENV_REALTIME_SHIFT, ENV_SHIFT, ENV_TIME, ENV_TIMEKEEP_INTERVAL, EnvLookup, Reason,
-    duration_var, flag_var, rate_var, timestamp_var,
+    ENV_RATE, ENV_REALTIME_SHIFT, ENV_SHIFT, ENV_TIME, EnvLookup, Reason, duration_var, flag_var,
+    rate_var, timestamp_var,
 };
 use crate::hook::{self, Hook, Init, Spec};
 use crate::platform::{self, clock};
@@ -22,7 +21,6 @@ use crate::sync;
 use crate::time::{Family, Line, Nanos, Rate};
 
 use layout::{BadHeader, Fault, Header, Keeper};
-use timekeep::Page;
 
 /// What the environment asked one family to do. Cpu has no line, so it has none of this: its rate
 /// is [`Setup::cpu_rate`].
@@ -147,11 +145,7 @@ pub struct Setup {
     pub emulate_vdso: bool,
     /// Whether a target whose setup failed refuses to run.
     pub fail_closed: bool,
-    /// How often the FreeBSD timekeep page is republished.
-    pub timekeep_interval: Nanos,
 }
-
-const DEFAULT_TIMEKEEP_INTERVAL: Nanos = Nanos(1_000_000);
 
 impl Setup {
     /// A session that fakes nothing: every family where its genuine clock is, at real speed.
@@ -168,7 +162,6 @@ impl Setup {
             cpu_rate: Rate::UNITY,
             emulate_vdso: true,
             fail_closed: false,
-            timekeep_interval: DEFAULT_TIMEKEEP_INTERVAL,
         }
     }
 
@@ -202,20 +195,8 @@ impl Setup {
             hook: hook_from_env(env),
             emulate_vdso: flag_var(env, ENV_EMULATE_VDSO, true),
             fail_closed: flag_var(env, ENV_FAIL_CLOSED, false),
-            timekeep_interval: duration_var(env, ENV_TIMEKEEP_INTERVAL)?
-                .unwrap_or(DEFAULT_TIMEKEEP_INTERVAL),
             ..Self::plain(dir)
         };
-        // A hook answers with a function, and the timekeep page carries numbers, so a session with
-        // both would claim to fake a reader of the page and hand it time the hook never saw. On
-        // either keeper, which is why this comes before the null keeper leaves.
-        if hook_needs_page_off(
-            platform::HAS_TIMEKEEP_PAGE && cfg!(feature = "vdso"),
-            session.emulate_vdso,
-            session.hook.is_some(),
-        ) {
-            return Err(BadValue::new(ENV_HOOK, Reason::NeedsPageOff));
-        }
 
         // The clock settings belong to the affine keeper alone, so a null session reads none of
         // them, and a value none of them will be asked for cannot be a bad one.
@@ -242,23 +223,6 @@ impl Setup {
             realtime_at,
             ..session
         };
-
-        // The page carries one scale for the wall clock and the elapsed clock it serves, so the
-        // two families cannot be given rates of their own while it is live.
-        if let Some(family) = page_elapsed_family()
-            && let Some(elapsed) = session.family(family)
-            && page_rates_differ(
-                platform::HAS_TIMEKEEP_PAGE && cfg!(feature = "vdso"),
-                session.emulate_vdso,
-                session.realtime.rate,
-                elapsed.rate,
-            )
-        {
-            return Err(BadValue::new(
-                config::family_vars(family).rate,
-                Reason::PageSharesARate,
-            ));
-        }
         Ok(session)
     }
 
@@ -309,10 +273,9 @@ impl Setup {
     }
 }
 
-/// The family the timekeep page's elapsed clock belongs to: the one `CLOCK_MONOTONIC` names,
-/// which is Monotonic through FreeBSD 14.x and Boottime from 15.0.
+/// The family `CLOCK_MONOTONIC` belongs to: Monotonic through FreeBSD 14.x and Boottime from 15.0.
 ///
-/// `None` where that clock belongs to no family, which is a platform that fakes it some other way.
+/// `None` where that clock belongs to no family.
 #[must_use]
 #[cfg_attr(
     not(target_os = "freebsd"),
@@ -324,33 +287,6 @@ impl Setup {
 )]
 pub fn page_elapsed_family() -> Option<Family> {
     clock::family_of(clock::MONOTONIC)
-}
-
-/// Whether a session would leave the two clocks the timekeep page serves running at different
-/// speeds.
-///
-/// The page carries one scale, so the wall clock and the elapsed clock it computes from that scale
-/// advance together whatever the session says. Three things have to be true for that to bind: the
-/// platform reads the clock from such a page, this build can write one, and the session asked for
-/// it.
-#[must_use]
-const fn page_rates_differ(
-    page_in_this_build: bool,
-    emulate_vdso: bool,
-    realtime: Rate,
-    elapsed: Rate,
-) -> bool {
-    page_in_this_build && emulate_vdso && realtime.0 != elapsed.0
-}
-
-/// Whether a session asks for a hook on a platform whose timekeep page it also leaves on.
-///
-/// Three things have to be true: the platform reads the clock from such a page, this build can
-/// write one, and the session asked for it. A build without the page, or a session that turned it
-/// off, runs the hook through interposition and reaches every program that calls libc.
-#[must_use]
-const fn hook_needs_page_off(page_in_this_build: bool, emulate_vdso: bool, hook: bool) -> bool {
-    page_in_this_build && emulate_vdso && hook
 }
 
 /// The clock a family's line starts on: its default timebase, and the wall clock for the one
@@ -585,69 +521,16 @@ impl Session {
         Ok(())
     }
 
-    /// The timekeep page inside the mapping, or `None` when this session keeps none live.
-    ///
-    /// Live means all three: the platform reads the clock from such a page, this build can write
-    /// one, and the session asked for it. Everywhere else the page is present in the file, zero,
-    /// and unread.
+    /// Hands the mapping and the hook to the process for good.
     #[must_use]
-    pub fn timekeep(&self) -> Option<&Page> {
-        let page = timekeep_in(self.base, self.len, self.header())?;
-        // Safety: the page lies inside a mapping this `Session` keeps alive, and every word of it
-        // is an atomic, so a shared reference to it is sound however many processes hold one.
-        Some(unsafe { page.as_ref() })
-    }
-
-    /// Hands the mapping, the timekeep page, and the hook to the process for good.
-    #[must_use]
-    pub fn leak(
-        mut self,
-    ) -> (
-        &'static Header,
-        Option<&'static Page>,
-        Option<&'static Hook>,
-    ) {
+    pub fn leak(mut self) -> (&'static Header, Option<&'static Hook>) {
         let hook = self.hook.take().map(|hook| &*Box::leak(Box::new(hook)));
         let session = std::mem::ManuallyDrop::new(self);
         // Safety: the mapping outlives the process, because `ManuallyDrop` keeps `Drop` from
         // unmapping it, and both `attach` and `create` validated it is at least a header long.
         let header: &'static Header = unsafe { &*header_ptr(session.base) };
-        let page = timekeep_in(session.base, session.len, header).map(|page| {
-            // Safety: the page lies inside the same mapping, and every word of it is an atomic.
-            unsafe { page.as_ref() }
-        });
-        (header, page, hook)
+        (header, hook)
     }
-}
-
-/// Makes sure a session with the page on has an updater keeping it fresh.
-#[cfg(feature = "vdso")]
-fn ensure_updater(path: &Path, header: &Header) {
-    crate::updater::ensure(path, header);
-}
-
-/// A build without the feature keeps no updater, so there is nothing to make sure of.
-#[cfg(not(feature = "vdso"))]
-const fn ensure_updater(_path: &Path, _header: &Header) {}
-
-/// Whether `header` names a session that keeps its timekeep page live.
-#[must_use]
-pub const fn page_is_live(header: &Header) -> bool {
-    platform::HAS_TIMEKEEP_PAGE && cfg!(feature = "vdso") && header.emulate_vdso == 1
-}
-
-/// Where the timekeep page sits inside a mapping, or `None` when this session keeps none live or
-/// the mapping is too short to hold one.
-fn timekeep_in(base: NonNull<u8>, len: usize, header: &Header) -> Option<NonNull<Page>> {
-    if !page_is_live(header) {
-        return None;
-    }
-    let offset = layout::timekeep_offset(usize::try_from(header.page_size).ok()?);
-    if offset.checked_add(size_of::<Page>())? > len {
-        return None;
-    }
-    // Safety: the page lies inside a mapping of `len` bytes, which the check above holds to.
-    Some(unsafe { base.add(offset) }.cast::<Page>())
 }
 
 /// The arena inside a mapping, and how long it is: the pair a hook is handed.
@@ -884,26 +767,10 @@ pub fn create_named(
         }
     };
 
-    // The timekeep page, while the file is still under its private name, so the first process to
-    // find it finds a page a reader can already follow.
-    if let Some(page) = timekeep_in(base, len, header) {
-        // Safety: the page lies inside the mapping, which nothing else can reach yet.
-        let page = unsafe { page.as_ref() };
-        page.initialize();
-        if let Some(basis) = timekeep::counter::basis() {
-            timekeep::republish(header, page, basis);
-        }
-    }
-
     // The lock file carries no data, so it is made here and never touched again: writers take the
     // lock on it and readers probe it, whichever generation of the state the session file holds. It
     // comes after the session file, so a creator that gives up leaves neither behind.
     sync::install(&naming::lock_path(&path))?;
-    // The lease belongs to the updater that keeps the timekeep page fresh, so a session with the
-    // page off has no lease to keep and gets the write lock's file alone.
-    if platform::HAS_TIMEKEEP_PAGE && cfg!(feature = "vdso") && setup.emulate_vdso {
-        sync::create(&naming::lease_path(&path))?;
-    }
 
     let c_path = cstring(&path)?;
     // Safety: `c_tmp` and `c_path` are live NUL-terminated paths.
@@ -920,10 +787,6 @@ pub fn create_named(
     }
     // Safety: `c_tmp` names the link we just duplicated.
     unsafe { libc::unlink(c_tmp.as_ptr()) };
-
-    // The updater keeps the page fresh for as long as anyone is attached. Spawned once the session
-    // is in place, so the process it execs finds a session to attach to.
-    ensure_updater(&path, header);
 
     Ok(Session {
         base,
@@ -1022,8 +885,6 @@ unsafe fn initialize(header: *mut Header, setup: &Setup, plan: &Plan, build: &Bu
     write_hook_path(header, &build.hook_path);
     header.creator_pid = build.pid;
     header.creation_time = plan.creation_time.0;
-    // A negative interval is not a thing; it lands as zero rather than as an enormous one.
-    header.timekeep_interval = u64::try_from(setup.timekeep_interval.0).unwrap_or(0);
 
     let params = &header.live;
     params
@@ -1128,9 +989,6 @@ pub fn attach(path: &Path) -> Result<Session, SessionError> {
     // So this process's readers can probe the write lock. A session made by an older process
     // always has the file; one that somehow does not gets it here.
     sync::install(&naming::lock_path(path))?;
-    // Every attach to a session with the page on probes the lease, because an updater that died
-    // leaves the page to go stale and nothing else is watching for it.
-    ensure_updater(path, session.header());
     Ok(session)
 }
 

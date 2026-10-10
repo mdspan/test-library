@@ -403,8 +403,7 @@ fn a_transaction_opens_over_a_session_the_caller_already_holds_mapped() {
 
     // The same W1 a controller takes, over a header somebody else mapped, which is how a target
     // that sets the clock becomes a writer without opening a second view of its own session.
-    let mut transaction =
-        Transaction::begin(fixture.header(), fixture.session.timekeep(), &lock_path).unwrap();
+    let mut transaction = Transaction::begin(fixture.header(), &lock_path).unwrap();
     assert_eq!(fixture.counter(), before, "begin publishes nothing");
     transaction.shift(Family::Realtime, Nanos(HOUR)).unwrap();
     transaction.commit().unwrap();
@@ -413,11 +412,7 @@ fn a_transaction_opens_over_a_session_the_caller_already_holds_mapped() {
     // And a null session refuses at that entry point too, before it locks anything.
     let null = fixture_on(Keeper::Null);
     assert!(matches!(
-        Transaction::begin(
-            null.header(),
-            null.session.timekeep(),
-            &naming::lock_path(null.session.path())
-        ),
+        Transaction::begin(null.header(), &naming::lock_path(null.session.path())),
         Err(Error::UnsupportedForKeeper)
     ));
 }
@@ -600,35 +595,6 @@ fn wait_to_be_killed() -> ! {
         // Safety: `pause` waits for a signal and touches nothing of ours.
         unsafe { libc::pause() };
     }
-}
-
-/// The timekeep page carries one rate for the wall clock and the elapsed clock it serves, so a
-/// commit that would separate them is refused. FreeBSD is the platform that keeps such a page.
-#[cfg(target_os = "freebsd")]
-#[test]
-fn a_commit_that_would_separate_the_two_clocks_the_page_serves_is_refused() {
-    let _one = one_at_a_time();
-    let fixture = fixture::fixture_with(Keeper::Affine, true);
-    let before = fixture.live();
-    let elapsed = common::session::page_elapsed_family().unwrap();
-
-    let mut transaction = fixture.controller.begin().unwrap();
-    transaction.set_rate(Family::Realtime, 4.0).unwrap();
-    assert!(matches!(transaction.commit(), Err(Error::BadArgument(_))));
-    assert_eq!(
-        fixture.live(),
-        before,
-        "a refused commit published a change"
-    );
-
-    // Both in one transaction is how a session with the page on asks for a faster clock, and that
-    // is what passes.
-    let mut transaction = fixture.controller.begin().unwrap();
-    transaction.set_rate(Family::Realtime, 4.0).unwrap();
-    transaction.set_rate(elapsed, 4.0).unwrap();
-    transaction.commit().unwrap();
-    let fast = Rate::from_f64(4.0).unwrap();
-    assert_eq!(fixture.live().realtime.line.rate, fast);
 }
 
 #[test]

@@ -5,7 +5,6 @@
 //! | Item | Contract |
 //! |---|---|
 //! | `OS_TAG` | The value the session header's platform field carries for this OS. |
-//! | `HAS_TIMEKEEP_PAGE` | Whether Go reads the clock here from a page of kernel parameters, so a session that poses as that page keeps an updater and a lease file. |
 //! | `clock` | The clock ids of the families, the names a user writes for them, which family each id belongs to, and which id carries the TAI offset. |
 //! | `default_timebase` | The first clock in a family's column of the family table. FreeBSD answers from the running kernel, because the names crossed over at 15.0. |
 //! | `genuine_clock_gettime` | Reads a genuine clock into the caller's `timespec`, libc's convention. Async-signal-safe, and never routed through a symbol we interpose. |
@@ -18,8 +17,7 @@
 //! | `set_errno` | Sets this thread's `errno`, which is how a refused call reports itself. |
 //! | `thread_id` | The id the kernel gives the calling thread, taking no thread-local storage to answer. |
 //! | `take_write_lock` | Takes the write lock on a descriptor, blocking. libc's convention. |
-//! | `take_lease` | Takes the updater's lease on a descriptor, without blocking. libc's convention. |
-//! | `probe_write_lock` | Asks the kernel whether the write lock is held, taking nothing. The same probe answers for the lease. |
+//! | `probe_write_lock` | Asks the kernel whether the write lock is held, taking nothing. |
 //! | `random_bytes` | Fills a buffer with randomness, for the session name. |
 //!
 //! [`genuine_symbol`] is the one way back to a genuine function that needs no arm of its own: the
@@ -30,8 +28,8 @@
 //! is one of the calls we take over there, and only that arm's interposers name it,
 //! `kernel_clock_gettime` with `kernel_gettimeofday`, which answer in the convention a vDSO entry
 //! owes its caller in place of libc's, and `AT_SYSINFO_EHDR`, the entry naming the vDSO. FreeBSD
-//! supplies `AT_TIMEKEEP`, `any_process_maps` and `genuine_nanosleep`, which the timekeep page and
-//! its updater need and no other platform has. macOS's `prime_genuine` finds libSystem's own
+//! supplies `AT_TIMEKEEP`, the entry naming the timekeep page, which the Go fallback interposition
+//! withholds and no other platform has. macOS's `prime_genuine` finds libSystem's own
 //! definition of every function the interpose table stands in front of, once, at load; a lookup
 //! there takes the loader's lock, and the constructor is the one moment where nothing of the
 //! program's is holding it. macOS also supplies `libsystem_symbol`, which is that lookup for one

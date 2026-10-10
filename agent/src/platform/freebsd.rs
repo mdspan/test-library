@@ -15,7 +15,7 @@
 //! at the call it delegates to, which converts it exactly once. glibc reaches the same five
 //! through internal names no loader can reach, which is why the Linux arm defines them itself.
 //!
-//! The timekeep page that catches Go lands here later.
+//! A Go runtime that skips libc is caught by [`crate::go_shim`] and [`crate::go_locate`].
 
 use std::ffi::c_char;
 

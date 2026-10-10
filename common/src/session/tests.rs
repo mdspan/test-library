@@ -6,7 +6,7 @@ use super::*;
 use crate::config::{
     ENV_BOOTTIME_SHIFT, ENV_CPU_RATE, ENV_EMULATE_VDSO, ENV_FAIL_CLOSED, ENV_HOOK, ENV_KEEPER,
     ENV_MONOTONIC_SHIFT, ENV_MONOTONIC_TIMEBASE, ENV_RATE, ENV_REALTIME_RATE,
-    ENV_REALTIME_TIMEBASE, ENV_SHIFT, ENV_TIME, ENV_TIMEKEEP_INTERVAL, family_vars,
+    ENV_REALTIME_TIMEBASE, ENV_SHIFT, ENV_TIME, family_vars,
 };
 use layout::{Fault, FaultCode};
 
@@ -116,45 +116,15 @@ fn creation_leaves_one_whole_session_file_and_its_lock_and_no_temporary() {
 }
 
 #[test]
-fn the_lease_file_belongs_to_a_session_with_the_timekeep_page_on() {
-    let tmp = tempfile::tempdir().unwrap();
-    let mut setup = setup_in(tmp.path());
-    setup.emulate_vdso = true;
-    let with_page = create(&setup).unwrap();
-
-    // The lease is the updater's, and an updater keeps a timekeep page fresh, so only a platform
-    // that has such a page has one.
-    assert!(naming::lock_path(with_page.path()).exists());
-    assert_eq!(
-        naming::lease_path(with_page.path()).exists(),
-        platform::HAS_TIMEKEEP_PAGE && cfg!(feature = "vdso")
-    );
-
-    setup.emulate_vdso = false;
-    let without_page = create(&setup).unwrap();
-    assert!(naming::lock_path(without_page.path()).exists());
-    assert!(!naming::lease_path(without_page.path()).exists());
-}
-
-#[test]
 fn a_lock_file_is_private_to_us() {
     let tmp = tempfile::tempdir().unwrap();
-    let mut setup = setup_in(tmp.path());
-    setup.emulate_vdso = true;
-    let session = create(&setup).unwrap();
+    let session = create(&setup_in(tmp.path())).unwrap();
 
-    // A wider mode would let another user take a shared lock on one and block every writer for
-    // good, and every reader that probes one is its owner by the security checks.
-    for beside in [
-        naming::lock_path(session.path()),
-        naming::lease_path(session.path()),
-    ] {
-        if !beside.exists() {
-            continue;
-        }
-        let mode = fs::metadata(&beside).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600, "{}", beside.display());
-    }
+    // A wider mode would let another user take a shared lock on it and block every writer for
+    // good, and every reader that probes it is its owner by the security checks.
+    let lock = naming::lock_path(session.path());
+    let mode = fs::metadata(&lock).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600, "{}", lock.display());
 }
 
 #[test]
@@ -171,7 +141,6 @@ fn every_header_field_is_filled_before_the_file_is_published() {
     let mut setup = setup_in(tmp.path());
     setup.emulate_vdso = false;
     setup.fail_closed = true;
-    setup.timekeep_interval = Nanos(2_000_000);
     let session = create(&setup).unwrap();
     let header = session.header();
 
@@ -188,7 +157,6 @@ fn every_header_field_is_filled_before_the_file_is_published() {
     assert_eq!(header.arena_size, 0);
     assert_eq!(header.creator_pid, std::process::id());
     assert!(header.creation_time > 1_700_000_000 * Nanos::SECOND);
-    assert_eq!(header.timekeep_interval, 2_000_000);
     assert_eq!(header.hook_path(), b"");
     assert_eq!(header.fault.load(Ordering::Relaxed), 0);
     assert_eq!(header.seqlock.sequence.load(Ordering::Relaxed) % 2, 0);
@@ -512,9 +480,8 @@ fn with_no_shift_the_realtime_line_is_the_genuine_clock() {
 
 #[test]
 fn setup_reads_the_environment_it_owns() {
-    let setup = setup_from(&[(ENV_SHIFT, "-2h"), (ENV_TIMEKEEP_INTERVAL, "5ms")]).unwrap();
+    let setup = setup_from(&[(ENV_SHIFT, "-2h")]).unwrap();
     assert_eq!(setup.realtime.shift, Nanos(-7_200 * Nanos::SECOND));
-    assert_eq!(setup.timekeep_interval, Nanos(5_000_000));
     assert!(setup.emulate_vdso);
     assert!(!setup.fail_closed);
 }
@@ -1311,40 +1278,12 @@ fn an_arena_no_session_file_could_carry_is_refused_before_anything_is_written() 
 }
 
 #[test]
-fn the_two_clocks_the_timekeep_page_serves_have_to_share_a_rate() {
-    // One scale serves both, so a session with the page live cannot give them rates of their own.
-    let fast = Rate::from_f64(2.0).unwrap();
-    assert!(page_rates_differ(true, true, Rate::UNITY, fast));
-    assert!(!page_rates_differ(true, true, fast, fast));
-    // A session that turned the page off, and a build that carries none, take any pair.
-    assert!(!page_rates_differ(true, false, Rate::UNITY, fast));
-    assert!(!page_rates_differ(false, true, Rate::UNITY, fast));
-}
-
-#[test]
-fn rates_the_page_could_not_carry_are_a_bad_value_where_it_is_live() {
+fn independent_family_rates_are_accepted() {
+    // The wall clock and the elapsed clock may run at rates of their own: no single-scale page
+    // ties them together on any platform now.
     let elapsed = page_elapsed_family().expect("CLOCK_MONOTONIC belongs to a family");
     let separated = [(ENV_REALTIME_RATE, "2"), (family_vars(elapsed).rate, "3")];
-    let together = [(ENV_REALTIME_RATE, "2"), (family_vars(elapsed).rate, "2")];
-
-    // The rule binds where the page is live: this platform reads the clock from one, this build
-    // can write one, and the session left it on.
-    if platform::HAS_TIMEKEEP_PAGE && cfg!(feature = "vdso") {
-        assert_eq!(
-            setup_from(&separated).unwrap_err().reason,
-            Reason::PageSharesARate,
-        );
-        // And turning the page off is what the message tells the user to do.
-        let off = [
-            (ENV_REALTIME_RATE, "2"),
-            (family_vars(elapsed).rate, "3"),
-            (ENV_EMULATE_VDSO, "0"),
-        ];
-        assert!(setup_from(&off).is_ok());
-    } else {
-        assert!(setup_from(&separated).is_ok());
-    }
-    // A bare rate covers both, so the usual way of asking for a fast clock is never refused.
-    assert!(setup_from(&together).is_ok());
+    assert!(setup_from(&separated).is_ok());
+    // A bare rate covers every family at once, the usual way of asking for a fast clock.
     assert!(setup_from(&[(ENV_RATE, "10")]).is_ok());
 }

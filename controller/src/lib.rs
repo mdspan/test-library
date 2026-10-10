@@ -79,7 +79,6 @@ impl Controller {
     /// because each of its clocks scales its own consumption. [`Error::Io`] when the kernel will
     /// not read the family's clock at all.
     pub fn get(&self, family: Family) -> Result<Nanos, Error> {
-        self.probe_lease();
         let clock =
             default_timebase(family).ok_or(Error::BadArgument(error::CPU_HAS_ONE_SETTING))?;
         let header = self.session.header();
@@ -97,28 +96,8 @@ impl Controller {
     /// hook, with the fault recorded in it.
     #[must_use]
     pub fn info(&self) -> Info {
-        self.probe_lease();
         Info::of(self.session.header())
     }
-
-    /// Asks whether this session still has the updater that keeps its timekeep page fresh, and
-    /// starts one when it does not.
-    ///
-    /// Every controller operation does this, because a page nobody republishes goes stale and the
-    /// processes that read it are exactly the ones that never run our code. A session with the page
-    /// off, or a build without it, returns at once.
-    #[cfg(feature = "vdso")]
-    fn probe_lease(&self) {
-        common::updater::ensure(self.session.path(), self.session.header());
-    }
-
-    /// A build without the feature keeps no updater, so there is no lease to probe.
-    #[cfg(not(feature = "vdso"))]
-    #[expect(
-        clippy::unused_self,
-        reason = "the other arm of this pair reads the session, and one signature serves both"
-    )]
-    const fn probe_lease(&self) {}
 
     /// The keeper this session computes through.
     ///
@@ -138,10 +117,8 @@ impl Controller {
     /// [`Error::UnsupportedForKeeper`] on a null session, which has no parameters to change, and
     /// [`Error::Io`] when the lock file cannot be opened, is not ours, or cannot be locked.
     pub fn begin(&self) -> Result<Transaction<'_>, Error> {
-        self.probe_lease();
         Transaction::begin(
             self.session.header(),
-            self.session.timekeep(),
             &naming::lock_path(self.session.path()),
         )
     }

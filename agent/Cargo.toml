@@ -23,12 +23,16 @@ libc = { workspace = true }
 [features]
 default = ["vdso"]
 
-# The synthetic vDSO on Linux and the substituted timekeep page on FreeBSD, with the updater that
-# keeps the page fresh. Off leaves symbol interposition, which reaches every program that calls
-# libc.
+# The synthetic vDSO on Linux and the interposed Go clock fallback on FreeBSD. Off leaves symbol
+# interposition, which reaches every program that calls libc.
 vdso = ["common/vdso", "controller/vdso"]
 
 [dev-dependencies]
 common = { path = "../common" }
 libc = { workspace = true }
 tempfile = "3.24.0"
+
+# The slot try-lock the Go shims claim in assembly is modelled in Rust and checked under loom,
+# which drives the interleavings the atomic exchange hides. Pulled in only for a `--cfg loom` run.
+[target.'cfg(loom)'.dev-dependencies]
+loom = "0.7"

@@ -10,6 +10,22 @@
 
 mod genuine;
 mod interpose;
+
+// The FreeBSD mechanism that reaches the Go runtime's clock reads by interposing its own fallback
+// routines: the entry shims and their scratch stacks, and recognising and rewriting the routines.
+// Built here so a Linux host can compile and unit-test the platform-agnostic pieces; the FreeBSD
+// pose path, which wires them in, is elsewhere.
+#[cfg(any(
+    all(target_os = "freebsd", feature = "vdso"),
+    all(test, any(target_os = "linux", target_os = "freebsd"))
+))]
+mod go_locate;
+#[cfg(any(
+    all(target_os = "freebsd", feature = "vdso"),
+    all(test, any(target_os = "linux", target_os = "freebsd"))
+))]
+mod go_shim;
+
 mod platform;
 mod setter;
 mod stamp;
@@ -26,8 +42,9 @@ mod clocks;
 #[cfg(any(target_os = "macos", test))]
 mod mach;
 
-// Posing as what a target reads the clock from without libc: the vDSO on Linux, the timekeep page
-// on FreeBSD. macOS hands Go libSystem, which interposition already reaches.
+// Posing as what a target reads the clock from without libc: the vDSO on Linux. On FreeBSD it
+// withholds the timekeep entry and interposes the Go runtime's clock fallback routines. macOS
+// hands Go libSystem, which interposition already reaches.
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 mod vdso;
 
@@ -59,80 +76,15 @@ pub unsafe extern "C" fn libtimewarp_genuine_clock_gettime(
     unsafe { genuine_clock_gettime(clock, ts) }
 }
 
-/// The library run as a program: the updater that keeps a session's timekeep page fresh.
-///
-/// `libtimewarp.so` is the updater, so a build whose shared object the kernel will also start finds
-/// its way here, by its own path, with `--updater <session>`. Where the object is one the loader can
-/// only load, the constructor below runs the loop instead and this is never reached.
-///
-/// Left out of a test build of this crate, which is a program with an entry point of its own: two
-/// of those in one binary is a binary that does not link.
-///
-/// # Safety
-/// Called by the C runtime with the argument vector this process was started with.
-#[cfg(all(target_os = "freebsd", feature = "vdso", not(test)))]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn main(
-    count: libc::c_int,
-    vector: *const *const libc::c_char,
-) -> libc::c_int {
-    // Safety: the caller guarantees the vector.
-    let taken = unsafe { arguments(count, vector) };
-    let Some(session) = common::updater::session_in_args(&taken) else {
-        // `EX_USAGE`: this program has exactly one thing it does, and it was not asked for it.
-        return 64;
-    };
-    log::init(&ProcessEnv);
-    common::updater::run(&session)
-}
-
-/// The argument vector as owned strings.
-///
-/// # Safety
-/// `vector` must hold `count` live NUL-terminated strings.
-#[cfg(all(target_os = "freebsd", feature = "vdso", not(test)))]
-unsafe fn arguments(
-    count: libc::c_int,
-    vector: *const *const libc::c_char,
-) -> Vec<std::ffi::OsString> {
-    use std::os::unix::ffi::OsStrExt as _;
-
-    let mut taken = Vec::new();
-    for index in 0..usize::try_from(count).unwrap_or(0) {
-        // Safety: the caller guarantees that many elements.
-        let at = unsafe { vector.add(index) };
-        // Safety: as above, and each element is a live NUL-terminated string.
-        let string = unsafe { *at };
-        if string.is_null() {
-            break;
-        }
-        // Safety: as above.
-        let bytes = unsafe { std::ffi::CStr::from_ptr(string) }.to_bytes();
-        taken.push(std::ffi::OsStr::from_bytes(bytes).to_owned());
-    }
-    taken
-}
-
 #[ctor::ctor]
 fn constructor() {
-    // An updater is this library under another hat, so the constructor gets out of the way: `main`
-    // above runs the loop where the kernel started us by our own path, and the loop runs here where
-    // it started a host program with us preloaded, because that program's `main` is not ours.
-    #[cfg(all(target_os = "freebsd", feature = "vdso"))]
-    if let Some(session) = common::updater::requested(&ProcessEnv) {
-        if !started_by_our_own_path() {
-            log::init(&ProcessEnv);
-            // Safety: `_exit` ends the process, so nothing of the host program is reached.
-            unsafe { libc::_exit(common::updater::run(&session)) };
-        }
-        return;
-    }
     // The genuine side of every wait, found before the program can call one. A lookup takes the
     // loader's own lock, and this is the one moment where nothing of the program's is holding it.
     genuine::prime();
     // The same for the genuine clock. On Linux and FreeBSD this also has to come before
-    // `vdso::install` points the auxiliary vector away from what the kernel mapped: its vDSO on
-    // Linux, and on FreeBSD the timekeep page libc reads.
+    // `vdso::install` changes the auxiliary vector: on Linux it points `AT_SYSINFO_EHDR` away from
+    // the kernel's vDSO, and on FreeBSD it withholds `AT_TIMEKEEP`, the entry naming the kernel's
+    // timekeep page that libc reads.
     common::platform::prime_genuine();
     // And the ratio the Mach counter runs at, which every reading of it converts through.
     #[cfg(target_os = "macos")]
@@ -198,10 +150,11 @@ fn publish(session: session::Session) {
 /// and the lock file a setter takes the write lock on.
 fn install(session: session::Session) {
     let lock_file = naming::lock_path(session.path());
-    let (header, timekeep, hook) = session.leak();
-    state::install(header, timekeep, hook, lock_file);
-    // After the session, so a target that finds the synthetic vDSO or the substituted timekeep page
-    // and reads straight from it reads the session rather than genuine time.
+    let (header, hook) = session.leak();
+    state::install(header, hook, lock_file);
+    // After the session, so a target that finds the synthetic vDSO on Linux, or the Go fallback
+    // routines interposed on FreeBSD, and reads through them reads the session rather than genuine
+    // time.
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     vdso::install(header);
 }
@@ -272,19 +225,6 @@ fn fail_closed(reason: &dyn Display) -> ! {
     log::Sink::stderr().write(Level::Error, format_args!("{reason}"));
     // Safety: `_exit` ends the process, so nothing here can be reached afterwards.
     unsafe { libc::_exit(EX_CONFIG) }
-}
-
-/// Whether the kernel started this process from this library's own file, which is what decides
-/// whether `main` above will run.
-///
-/// An answer either way is safe: a constructor that runs the loop when `main` would have run it
-/// simply gets there first, and `main` is never reached.
-#[cfg(all(target_os = "freebsd", feature = "vdso"))]
-fn started_by_our_own_path() -> bool {
-    let (Ok(program), Some(library)) = (std::env::current_exe(), common::updater::library()) else {
-        return false;
-    };
-    program == library
 }
 
 /// This process's own command: the basename of the file it was executed from, or `None` when it

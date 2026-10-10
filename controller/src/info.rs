@@ -34,7 +34,8 @@ pub struct Info {
     /// Genuine `CLOCK_REALTIME` when the session was created, which is what tells two files of one
     /// directory apart when their creators' pids have been recycled.
     pub creation_time: Nanos,
-    /// Whether the session poses as the vDSO on Linux, or substitutes the timekeep page on FreeBSD.
+    /// Whether the session poses as the vDSO on Linux, or interposes the Go runtime's clock
+    /// fallback routines on FreeBSD.
     pub emulate_vdso: bool,
     /// Whether a process that cannot set up what it was asked for exits rather than running
     /// genuine.

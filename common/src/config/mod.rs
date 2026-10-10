@@ -12,10 +12,6 @@ use crate::time::{Family, Nanos, Rate};
 /// everything else in the environment.
 pub const ENV_SHARED_FILE: &str = "LIBTIMEWARP__SHARED_FILE";
 
-/// Set by whoever spawns an updater, so the constructor of the process it execs knows it is one
-/// and returns at once rather than attaching as a target would.
-pub const ENV_UPDATER: &str = "LIBTIMEWARP__UPDATER";
-
 /// The loader's variable for a library to put ahead of libc.
 ///
 /// Ours is the value a target runs under, and the one place a controller inside a faked tree can
@@ -136,9 +132,6 @@ pub const ENV_EMULATE_VDSO: &str = "LIBTIMEWARP_EMULATE_VDSO";
 /// Whether a target whose setup failed refuses to run rather than showing genuine time. A flag.
 pub const ENV_FAIL_CLOSED: &str = "LIBTIMEWARP_FAIL_CLOSED";
 
-/// How often the FreeBSD timekeep page is republished, as a duration.
-pub const ENV_TIMEKEEP_INTERVAL: &str = "LIBTIMEWARP_TIMEKEEP_INTERVAL";
-
 /// Basenames to leave on genuine time, comma-separated. Read by every process at every exec,
 /// attachers included: the decision is per process, not per session.
 pub const ENV_SKIP_CMDS: &str = "LIBTIMEWARP_SKIP_CMDS";
@@ -210,12 +203,6 @@ pub enum Reason {
     BelowZero,
     /// A timekeeper this library does not have.
     UnknownKeeper,
-    /// Something that cannot run while the timekeep page is on, which is the hook: the page
-    /// carries numbers and a hook answers with a function.
-    NeedsPageOff,
-    /// A rate that would leave the two clocks the timekeep page serves running at different
-    /// speeds, which its one scale cannot carry.
-    PageSharesARate,
     /// A hook library the library could not put in front of the keeper.
     Hook(crate::hook::HookError),
 }
@@ -233,15 +220,6 @@ impl std::fmt::Display for Reason {
             Self::OutOfRange => f.write_str("outside the range an instant can hold"),
             Self::BelowZero => f.write_str("would put a nondecreasing family below zero"),
             Self::UnknownKeeper => f.write_str("not a timekeeper this library has"),
-            Self::NeedsPageOff => write!(
-                f,
-                "cannot be used while the timekeep page is on; set {ENV_EMULATE_VDSO}=0"
-            ),
-            Self::PageSharesARate => write!(
-                f,
-                "differs from the wall clock's rate, which the timekeep page cannot carry \
-                 alongside it; set {ENV_EMULATE_VDSO}=0"
-            ),
             Self::Hook(why) => write!(f, "{why}"),
         }
     }

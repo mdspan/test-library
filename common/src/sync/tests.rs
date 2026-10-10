@@ -107,7 +107,7 @@ fn a_publish_writes_both_copies_and_closes_the_section() {
     let opened = fixture.counter();
     let lock = begin(fixture.header(), &fixture.lock_path()).unwrap();
 
-    lock.publish::<()>(fixture.header(), None, |anchor, live| {
+    lock.publish::<()>(fixture.header(), |anchor, live| {
         Ok(at_rate(anchor, live, Rate::from_f64(10.0).unwrap()))
     })
     .unwrap();
@@ -137,7 +137,7 @@ fn a_refused_write_publishes_nothing_and_still_closes_the_section() {
     let opened = fixture.counter();
     let lock = begin(fixture.header(), &fixture.lock_path()).unwrap();
 
-    let refused = lock.publish(fixture.header(), None, |_, _| Err("would go backwards"));
+    let refused = lock.publish(fixture.header(), |_, _| Err("would go backwards"));
     drop(lock); // W12
 
     assert_eq!(refused, Err("would go backwards"));
@@ -161,7 +161,7 @@ fn the_anchor_is_sampled_a_settle_after_the_counter_goes_odd() {
     let lock = begin(fixture.header(), &fixture.lock_path()).unwrap();
     let before = platform::genuine_nanos(clock::MONOTONIC).unwrap();
 
-    lock.publish::<()>(fixture.header(), None, |anchor, live| {
+    lock.publish::<()>(fixture.header(), |anchor, live| {
         let sampled = anchor.of(live.monotonic.timebase).unwrap();
         assert!(
             sampled.0 - before.0 >= WRITE_SETTLE_NS,
@@ -179,7 +179,7 @@ fn every_timebase_in_use_is_sampled_once() {
     let fixture = fixture().unwrap();
     let lock = begin(fixture.header(), &fixture.lock_path()).unwrap();
 
-    lock.publish::<()>(fixture.header(), None, |anchor, mut live| {
+    lock.publish::<()>(fixture.header(), |anchor, mut live| {
         // Two families on one timebase re-anchor against one instant, not two.
         live.boottime.timebase = live.monotonic.timebase;
         let shared = Anchor::sample(&live);
@@ -200,7 +200,7 @@ fn a_write_section_runs_with_every_maskable_signal_blocked() {
     let fixture = fixture().unwrap();
     let lock = begin(fixture.header(), &fixture.lock_path()).unwrap();
 
-    lock.publish::<()>(fixture.header(), None, |_, live| {
+    lock.publish::<()>(fixture.header(), |_, live| {
         assert!(blocked(libc::SIGUSR1));
         assert!(blocked(libc::SIGTERM));
         Ok(live)

@@ -76,7 +76,7 @@ fn every_value_the_library_refuses_drops_the_process_to_the_null_keeper() {
         vec![("LIBTIMEWARP_MONOTONIC_SHIFT", "-100000d")],
         vec![("LIBTIMEWARP_REALTIME_TIMEBASE", "CLOCK_YESTERDAY")],
         vec![("LIBTIMEWARP_MONOTONIC_TIMEBASE", "CLOCK_REALTIME")],
-        vec![("LIBTIMEWARP_TIMEKEEP_INTERVAL", "often")],
+        vec![("LIBTIMEWARP_BOOTTIME_SHIFT", "often")],
         vec![
             ("LIBTIMEWARP_TIME", "2020-01-01T00:00:00Z"),
             ("LIBTIMEWARP_SHIFT", "-2h"),

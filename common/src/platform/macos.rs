@@ -10,10 +10,6 @@ use crate::time::Family;
 /// What the header's platform field carries for macOS.
 pub const OS_TAG: u32 = 3;
 
-/// Go reaches the clock here through libSystem rather than through a page of parameters, so no
-/// session keeps an updater or a lease file.
-pub const HAS_TIMEKEEP_PAGE: bool = false;
-
 /// The clock ids of the families, by the names the family table gives them.
 ///
 /// The two elapsed names are the reverse of Linux's: `CLOCK_MONOTONIC` keeps counting while the
@@ -314,11 +310,9 @@ pub fn may_set_the_clock() -> bool {
     euid == 0
 }
 
-/// `fcntl`'s open-file-description locks. The kernel has had them since 10.11, but an SDK older
-/// than macOS 14 hides the definitions, so the numbers are spelled here rather than taken from
-/// bindings that follow a header which may not have them.
-const F_OFD_SETLK: libc::c_int = 90;
-/// The same, waiting for the current holder rather than refusing.
+/// `fcntl`'s open-file-description lock, waiting for the current holder. The kernel has had these
+/// since 10.11, but an SDK older than macOS 14 hides the definitions, so the numbers are spelled
+/// here rather than taken from bindings that follow a header which may not have them.
 const F_OFD_SETLKW: libc::c_int = 91;
 /// The question of whether such a lock is held.
 const F_OFD_GETLK: libc::c_int = 92;
@@ -333,22 +327,6 @@ pub unsafe fn take_write_lock(fd: libc::c_int) -> libc::c_int {
     let request = crate::sync::lock_request();
     // Safety: the caller guarantees `fd`, and `request` is a live `flock`.
     unsafe { libc::fcntl(fd, F_OFD_SETLKW, &raw const request) }
-}
-
-/// Takes the updater's lease on `fd`, without blocking. libc's convention.
-///
-/// No session here keeps one, because Go reads the clock through libSystem rather than from a page
-/// of parameters, so nothing on this platform has an updater to lease. The arm exists so that the
-/// seam is answered everywhere, and it takes the same description-owned lock the write lock does,
-/// which is the one [`probe_write_lock`] can see.
-///
-/// # Safety
-/// `fd` must be an open descriptor on the lease file, opened for writing.
-#[must_use]
-pub unsafe fn take_lease(fd: libc::c_int) -> libc::c_int {
-    let request = crate::sync::lock_request();
-    // Safety: the caller guarantees `fd`, and `request` is a live `flock`.
-    unsafe { libc::fcntl(fd, F_OFD_SETLK, &raw const request) }
 }
 
 /// Asks the kernel whether the write lock on `fd` is held, taking nothing. Fills `request`, which
