@@ -69,12 +69,14 @@ const STAMPS: &[&str] = &["atime", "mtime", "ctime"];
 
 /// Every setter of the group, by the key the target reports it under. `utime` is among them
 /// everywhere: FreeBSD reaches the conversion through the `utimes` its own libc calls, and the
-/// other two catch it under its own name.
+/// other two catch it under its own name. `lutimes` is there twice, on the file and on a link to
+/// it, because libSystem sets the two through different calls.
 const SETTERS: &[&str] = &[
     "utime",
     "utimes",
     "futimes",
     "lutimes",
+    "lutimes_link",
     "utimensat",
     "futimens",
 ];

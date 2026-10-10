@@ -20,7 +20,9 @@
 //! builds it out of one call to `utimes`, which we already take over, and the arm there leaves the
 //! set to that call rather than converting it twice. libSystem builds it out of `utimes` too, but
 //! the program's call to `utime` reaches nothing of ours through that inner call on arm64, so the
-//! macOS arm catches `utime` itself and sets the pair through the genuine `utimes`.
+//! macOS arm catches `utime` itself and sets the pair through the genuine `utimes`. libSystem's
+//! `lutimes` sets anything but a link through `utimes` as well, so on macOS the set behind it is
+//! built here from the same inner calls.
 
 #[cfg(target_os = "linux")]
 use std::ffi::c_uint;
@@ -697,7 +699,85 @@ pub(crate) unsafe fn lutimes(path: *const c_char, times: *const libc::timeval) -
     let converted = unsafe { stored_timevals(Func::Lutimes, times) };
     let times = converted.as_ref().map_or(times, |pair| pair.as_ptr());
     // Safety: `path` is the caller's, and `times` is either theirs or the copy just built.
-    unsafe { genuine::lutimes(path, times) }.unwrap_or_else(unsupported)
+    unsafe { set_without_following(path, times) }.unwrap_or_else(unsupported)
+}
+
+/// Sets a pair on `path` itself rather than on what a link there names, through the genuine
+/// `lutimes`.
+///
+/// # Safety
+/// `path` must be a valid NUL-terminated path, and `times` null or valid for reads of two
+/// `timeval`s.
+#[cfg(not(target_os = "macos"))]
+#[inline]
+unsafe fn set_without_following(path: *const c_char, times: *const libc::timeval) -> Option<c_int> {
+    // Safety: the caller guarantees both, which pass on unchanged.
+    unsafe { genuine::lutimes(path, times) }
+}
+
+/// Sets a pair on `path` itself the way libSystem's own `lutimes` does: through the genuine
+/// `utimes` for anything but a link, and through `setattrlist` on a link, with the genuine now
+/// where the program named no pair. libSystem's call to `utimes` crosses into another library of
+/// the shared cache, which reaches our `utimes` row on `x86_64`, so the pair is set from here,
+/// already converted once.
+///
+/// # Safety
+/// `path` must be a valid NUL-terminated path, and `times` null or valid for reads of two
+/// `timeval`s.
+#[cfg(target_os = "macos")]
+#[inline]
+unsafe fn set_without_following(path: *const c_char, times: *const libc::timeval) -> Option<c_int> {
+    // Safety: a `stat` is integers and `timespec`s, for which all zeroes is a value.
+    let mut found: libc::stat = unsafe { std::mem::zeroed() };
+    // Safety: the caller guarantees `path`, and `found` is a live buffer of the shape this fills.
+    let looked = unsafe { genuine::lstat(path, &raw mut found) }?;
+    if looked != 0 {
+        return Some(looked);
+    }
+    if found.st_mode & libc::S_IFMT != libc::S_IFLNK {
+        // Safety: the caller guarantees both, which pass on unchanged.
+        return unsafe { genuine::utimes(path, times) };
+    }
+    let [access, modified] = if times.is_null() {
+        let Some(now) = common::platform::genuine_nanos(clock::REALTIME) else {
+            return Some(-1);
+        };
+        [now.to_timespec(); 2]
+    } else {
+        // Safety: `times` is non-null, so the caller's guarantee makes this read valid.
+        let first = unsafe { *times };
+        // Safety: as above, for the second of the two the caller guarantees.
+        let second = unsafe { times.add(1) };
+        // Safety: `second` is the second of the pair, which the caller guarantees.
+        let second = unsafe { *second };
+        [first, second].map(|tv| libc::timespec {
+            tv_sec: tv.tv_sec,
+            tv_nsec: i64::from(tv.tv_usec).saturating_mul(1_000),
+        })
+    };
+    let mut asked = libc::attrlist {
+        bitmapcount: libc::ATTR_BIT_MAP_COUNT,
+        reserved: 0,
+        commonattr: libc::ATTR_CMN_MODTIME | libc::ATTR_CMN_ACCTIME,
+        volattr: 0,
+        dirattr: 0,
+        fileattr: 0,
+        forkattr: 0,
+    };
+    // The values follow the order of their bits in the list, which puts the modification time
+    // first.
+    let mut values = [modified, access];
+    // Safety: the caller guarantees `path`, and the list and the values are live and as long as
+    // the call is told.
+    Some(unsafe {
+        libc::setattrlist(
+            path,
+            (&raw mut asked).cast(),
+            values.as_mut_ptr().cast(),
+            size_of_val(&values),
+            libc::FSOPT_NOFOLLOW,
+        )
+    })
 }
 
 /// # Safety

@@ -14,7 +14,8 @@
 
    Each setter then asks for `argv[2]` on both the access and the modification time and the file is
    read back with `stat`, so `<key>.mtime` is the round trip through both conversions and
-   `<key>.rc` is what the setter itself answered.
+   `<key>.rc` is what the setter itself answered. `lutimes_link` is `lutimes` on a link to the file,
+   which sets the link itself, read back with `lstat`.
 
    Last come the two `utimensat` flags that name no instant: `UTIME_OMIT` on the modification time,
    which must leave the round trip where it was, and `UTIME_NOW` on the access time, which must
@@ -57,6 +58,9 @@
 
 /* The file every reader and every setter works on. */
 static char path[4096];
+
+/* A link to it, for the setter that sets a link rather than what the link names. */
+static char link_path[4096];
 
 /* An open descriptor on it, for the three functions that take one. */
 static int fd = -1;
@@ -157,6 +161,15 @@ static void report_round_trip(const char *key, int set) {
     }
 }
 
+/* The same for the link itself. */
+static void report_link_round_trip(const char *key, int set) {
+    struct stat st;
+    printf("%s.rc=%d\n", key, set);
+    if (set == 0 && lstat(link_path, &st) == 0) {
+        report_stat(key, &st);
+    }
+}
+
 /* Every setter of the group, each asking for the same instant on both timestamps. */
 static void set_them_all(void) {
     struct utimbuf buf;
@@ -173,6 +186,7 @@ static void set_them_all(void) {
     report_round_trip("utimes", utimes(path, tv));
     report_round_trip("futimes", futimes(fd, tv));
     report_round_trip("lutimes", lutimes(path, tv));
+    report_link_round_trip("lutimes_link", lutimes(link_path, tv));
 
     ts[0].tv_sec = (time_t)target_s;
     ts[0].tv_nsec = 0;
@@ -199,6 +213,7 @@ int main(int argc, char **argv) {
         return 2;
     }
     snprintf(path, sizeof(path), "%s/written", argv[1]);
+    snprintf(link_path, sizeof(link_path), "%s/link", argv[1]);
     target_s = atoll(argv[2]);
     printf("target=%lld\n", target_s * NS_PER_S);
 
@@ -209,6 +224,10 @@ int main(int argc, char **argv) {
     }
     if (write(fd, "x", 1) != 1) {
         perror("write");
+        return 1;
+    }
+    if (symlink("written", link_path) != 0) {
+        perror("symlink");
         return 1;
     }
 

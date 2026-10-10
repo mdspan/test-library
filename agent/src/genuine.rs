@@ -618,7 +618,9 @@ genuine! {
     /// The genuine `futimes`.
     fn futimes(fd: libc::c_int, times: *const libc::timeval) -> libc::c_int;
 
-    /// The genuine `lutimes`.
+    /// The genuine `lutimes`. macOS's set is built out of the calls libSystem's own makes
+    /// instead, since one of them is a name we take over.
+    #[cfg(not(target_os = "macos"))]
     fn lutimes(path: *const libc::c_char, times: *const libc::timeval) -> libc::c_int;
 
     /// The genuine `utimensat`.

@@ -54,17 +54,18 @@
 //! | `alarm` | Nothing. | Nothing beyond that: it converts and arms through the genuine `setitimer`. |
 //! | the four `stat` names | Nothing. | The cache's own use of them, and the unsuffixed `x86_64` names, which fill a buffer of another shape and so have no row. |
 //! | `utime` | Nothing. | Nothing beyond that: the pair converts here and is set through the genuine `utimes`, the call libSystem builds `utime` out of. |
-//! | `utimes`, `futimes`, `lutimes`, `utimensat`, `futimens` | Nothing. | The cache's own use of them. |
+//! | `lutimes` | Nothing. | Nothing beyond that: the pair converts here and is set through the genuine `utimes`, or through `setattrlist` on a link, the calls libSystem builds `lutimes` out of. |
+//! | `utimes`, `futimes`, `utimensat`, `futimens` | Nothing. | The cache's own use of them. |
 //! | `settimeofday`, `clock_settime`, `adjtime` | Nothing. | The cache's own use of them. |
 //!
 //! None of those misses costs a group anything. Every row answers from the session rather than by
 //! calling another row, and a genuine call of ours is a call through this library's own import of
 //! the name, which dyld binds past the table. Where libSystem builds a genuine function out of
-//! another name the table carries, `utime` out of `utimes`, the counter clocks out of the
-//! `mach_*_time` names, and the remainder of a cut-short `nanosleep` out of `clock_get_time` among
-//! them, the genuine side is built here through this library's own imports instead, since on
-//! `x86_64` libSystem's own inner call would come back through a row. So nothing here is converted
-//! twice or converted back.
+//! another name the table carries, `utime` and `lutimes` out of `utimes`, the counter clocks out
+//! of the `mach_*_time` names, and the remainder of a cut-short `nanosleep` out of
+//! `clock_get_time` among them, the genuine side is built here through this library's own imports
+//! instead, since on `x86_64` libSystem's own inner call would come back through a row. So nothing
+//! here is converted twice or converted back.
 
 use std::ffi::{c_char, c_void};
 
