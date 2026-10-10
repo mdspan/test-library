@@ -41,12 +41,23 @@ const STRANGERS: &[libc::clockid_t] = &[STRANGER];
 #[cfg(not(target_os = "macos"))]
 const STRANGERS: &[libc::clockid_t] = &[-4, -6, STRANGER];
 
+/// The whole seconds by which [`readings`] puts TAI ahead of the wall clock.
+const TAI_LEAD: i64 = 37;
+
+/// The TAI offset a plan built against [`readings`] carries. macOS keeps no TAI clock, so its TAI
+/// id is the wall clock's own, which [`readings`] answers with the wall clock.
+const PLANNED_TAI_OFFSET: i64 = if clock::TAI == clock::REALTIME {
+    0
+} else {
+    TAI_LEAD
+};
+
 /// Genuine readings a plan can be built against without waiting for a clock.
 fn readings(clock: libc::clockid_t) -> Option<Nanos> {
     if clock == clock::REALTIME {
         Some(Nanos(1_700_000_000 * Nanos::SECOND))
     } else if clock == clock::TAI {
-        Some(Nanos(1_700_000_037 * Nanos::SECOND))
+        Some(Nanos((1_700_000_000 + TAI_LEAD) * Nanos::SECOND))
     } else if clock == monotonic() {
         Some(Nanos(3_600 * Nanos::SECOND))
     } else if clock == boottime() {
@@ -561,12 +572,18 @@ fn a_timebase_a_family_may_not_track_is_refused() {
         setup_from(&[(ENV_MONOTONIC_TIMEBASE, "CLOCK_REALTIME")]).unwrap_err(),
         BadValue::new(ENV_MONOTONIC_TIMEBASE, Reason::ForbiddenTimebase)
     );
-    // Realtime takes `CLOCK_REALTIME` itself but no other clock of its own family.
+    // Realtime takes `CLOCK_REALTIME` itself but no other clock of its own family, of which macOS
+    // has none.
     assert!(setup_from(&[(ENV_REALTIME_TIMEBASE, "CLOCK_REALTIME")]).is_ok());
-    assert_eq!(
-        setup_from(&[(ENV_REALTIME_TIMEBASE, "CLOCK_TAI")]).unwrap_err(),
-        BadValue::new(ENV_REALTIME_TIMEBASE, Reason::ForbiddenTimebase)
-    );
+    for &(name, id) in clock::named() {
+        if clock::family_of(id) == Some(Family::Realtime) && id != clock::REALTIME {
+            assert_eq!(
+                setup_from(&[(ENV_REALTIME_TIMEBASE, name)]).unwrap_err(),
+                BadValue::new(ENV_REALTIME_TIMEBASE, Reason::ForbiddenTimebase),
+                "{name}"
+            );
+        }
+    }
     // As is a Cpu clock, for every family.
     assert_eq!(
         setup_from(&[
@@ -621,7 +638,7 @@ fn a_plan_anchors_each_family_on_its_default_timebase() {
     assert_eq!(plan.monotonic.fake_anchor, Nanos(3_600 * Nanos::SECOND));
     assert_eq!(plan.boottime.fake_anchor, Nanos(7_200 * Nanos::SECOND));
     assert_eq!(plan.cpu_rate, Rate::UNITY);
-    assert_eq!(plan.tai_offset, 37);
+    assert_eq!(plan.tai_offset, PLANNED_TAI_OFFSET);
     assert_eq!(plan.creation_time, Nanos(1_700_000_000 * Nanos::SECOND));
 }
 
@@ -733,15 +750,16 @@ fn every_family_reads_the_line_the_setup_asked_for() {
 
 /// Every clock of each family that carries a line, from this platform's own column of the family
 /// table. TAI is left out: it reads the Realtime line plus an offset, which the case below is for.
-fn family_groups() -> Vec<Vec<libc::clockid_t>> {
+fn family_groups() -> Vec<(Family, Vec<libc::clockid_t>)> {
     [Family::Realtime, Family::Monotonic, Family::Boottime]
         .iter()
         .map(|&family| {
-            clock::named()
+            let group = clock::named()
                 .iter()
                 .map(|&(_, id)| id)
                 .filter(|&id| clock::family_of(id) == Some(family) && !clock::is_tai(id))
-                .collect()
+                .collect();
+            (family, group)
         })
         .collect()
 }
@@ -752,8 +770,11 @@ fn every_clock_of_a_family_reads_the_family_value() {
     let session = create(&setup_in(tmp.path())).unwrap();
     let header = session.header();
 
-    for group in family_groups() {
-        assert!(group.len() > 1, "{group:?} is not a group");
+    for (family, group) in family_groups() {
+        // macOS keeps one wall clock, so its Realtime family is that clock alone.
+        let alone = cfg!(target_os = "macos") && family == Family::Realtime;
+        let least = if alone { 1 } else { 2 };
+        assert!(group.len() >= least, "{family} holds only {group:?}");
         let readings: Vec<i64> = group
             .iter()
             .map(|&id| clock_now(header, id).unwrap().0)
@@ -1088,7 +1109,7 @@ fn a_genuine_plan_refuses_no_reading() {
     assert_eq!(plan.realtime.timebase_anchor, plan.realtime.fake_anchor);
     assert_eq!(plan.realtime.rate, Rate::UNITY);
     assert_eq!(plan.creation_time, readings(clock::REALTIME).unwrap());
-    assert_eq!(plan.tai_offset, 37);
+    assert_eq!(plan.tai_offset, PLANNED_TAI_OFFSET);
 
     // A clock the kernel will not give up lands as zero rather than as a bad value, so a creator
     // recording a fault still gets its session onto disk.

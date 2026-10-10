@@ -175,14 +175,33 @@ mod tests {
             .map(|family| default_timebase(family).unwrap_or(clock::REALTIME))
     }
 
+    /// The Boottime clock that reads the Monotonic timebase's counter plus the time suspended.
+    ///
+    /// The Boottime timebase itself, except on macOS: libSystem computes `CLOCK_MONOTONIC` there as
+    /// the wall clock less `kern.boottime`, which the kernel records as the wall-clock time it first
+    /// set the calendar at, after the counter started. That clock has a later zero than the counter
+    /// and follows every slew of the wall clock, so `CLOCK_MONOTONIC_RAW` is the one that counts on.
+    #[cfg(target_os = "macos")]
+    const fn counting_on(_boottime: libc::clockid_t) -> libc::clockid_t {
+        clock::BOOTTIME_RAW
+    }
+
+    /// The same, where that clock is the Boottime timebase.
+    #[cfg(not(target_os = "macos"))]
+    const fn counting_on(boottime: libc::clockid_t) -> libc::clockid_t {
+        boottime
+    }
+
     #[test]
     fn the_genuine_clocks_read() {
         let [realtime, monotonic, boottime] = family_clocks();
         assert!(genuine_nanos(realtime).unwrap() > Nanos(1_700_000_000 * Nanos::SECOND));
         let elapsed = genuine_nanos(monotonic).unwrap();
         assert!(elapsed >= Nanos::ZERO);
-        // Read second, and counting at least as much, so it can only be at or above the first.
-        assert!(genuine_nanos(boottime).unwrap() >= elapsed);
+        assert!(genuine_nanos(boottime).unwrap() >= Nanos::ZERO);
+        // Read second, from the same counter plus the time suspended, so it can only be at or above
+        // the first.
+        assert!(genuine_nanos(counting_on(boottime)).unwrap() >= elapsed);
     }
 
     #[cfg(target_os = "linux")]
