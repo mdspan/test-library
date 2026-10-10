@@ -16,10 +16,15 @@
    Each timer reports three facts: `<key>.fake`, the nanoseconds of faketime it was armed for,
    `<key>.genuine`, the nanoseconds of genuine time it took to fire, and `<key>.rc`, what the arm
    answered. A query reports `<key>.fake` and `<key>.remaining`, the nanoseconds the timer said it
-   had left. A timer this system does not have reports `<key>.available=0` instead. */
+   had left. A timer this system does not have reports `<key>.available=0` instead.
+
+   Each line goes straight to the descriptor. libSystem's own calls reach the library's rows as the
+   program's do, and a buffered stream stats its descriptor before its first write, which the hook
+   case would count as a call of this target's. */
 #define _GNU_SOURCE
 #include <errno.h>
 #include <signal.h>
+#include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -94,30 +99,50 @@ static struct timeval val_of(long long ns) {
     return tv;
 }
 
+/* Writes one formatted line to stdout. */
+static void say(const char *format, ...) {
+    char line[4200];
+    const char *next = line;
+    size_t left;
+    va_list args;
+    int length;
+
+    va_start(args, format);
+    length = vsnprintf(line, sizeof line, format, args);
+    va_end(args);
+    if (length < 0) {
+        return;
+    }
+    left = (size_t)length < sizeof line ? (size_t)length : sizeof line - 1;
+    while (left > 0) {
+        ssize_t wrote = write(STDOUT_FILENO, next, left);
+        if (wrote <= 0) {
+            return;
+        }
+        next += wrote;
+        left -= (size_t)wrote;
+    }
+}
+
 static long long started;
 
 static void begin(void) { started = genuine_mono(); }
 
 static void done(const char *key, long long fake, long long rc) {
     long long elapsed = genuine_mono() - started;
-    printf("%s.available=1\n", key);
-    printf("%s.fake=%lld\n", key, fake);
-    printf("%s.genuine=%lld\n", key, elapsed);
-    printf("%s.rc=%lld\n", key, rc);
-    fflush(stdout);
+    say("%s.available=1\n", key);
+    say("%s.fake=%lld\n", key, fake);
+    say("%s.genuine=%lld\n", key, elapsed);
+    say("%s.rc=%lld\n", key, rc);
 }
 
 static void queried(const char *key, long long fake, long long remaining) {
-    printf("%s.available=1\n", key);
-    printf("%s.fake=%lld\n", key, fake);
-    printf("%s.remaining=%lld\n", key, remaining);
-    fflush(stdout);
+    say("%s.available=1\n", key);
+    say("%s.fake=%lld\n", key, fake);
+    say("%s.remaining=%lld\n", key, remaining);
 }
 
-static void skipped(const char *key) {
-    printf("%s.available=0\n", key);
-    fflush(stdout);
-}
+static void skipped(const char *key) { say("%s.available=0\n", key); }
 
 /* Waits for one of the timer signals, which main blocks so that it is caught here rather than
    killing the process. macOS has no `sigwaitinfo`, and `sigwait` answers the same question. */
@@ -200,18 +225,16 @@ static void cpu_timers(int burn) {
                 sink = sink * 1.000001 + 1.0;
             }
         }
-        printf("itimer_virtual.available=1\n");
-        printf("itimer_virtual.fake=%lld\n", CPU_BASE_NS);
-        printf("itimer_virtual.genuine=%lld\n", genuine_cpu() - consumed);
-        printf("itimer_virtual.rc=0\n");
-        fflush(stdout);
+        say("itimer_virtual.available=1\n");
+        say("itimer_virtual.fake=%lld\n", CPU_BASE_NS);
+        say("itimer_virtual.genuine=%lld\n", genuine_cpu() - consumed);
+        say("itimer_virtual.rc=0\n");
     }
 
     new_value.it_value = val_of(CPU_BASE_NS);
-    printf("itimer_prof.armed=%d\n", setitimer(ITIMER_PROF, &new_value, NULL));
+    say("itimer_prof.armed=%d\n", setitimer(ITIMER_PROF, &new_value, NULL));
     memset(&new_value, 0, sizeof new_value);
     setitimer(ITIMER_PROF, &new_value, NULL);
-    fflush(stdout);
 }
 
 /* ---- the alarm ---- */
@@ -419,11 +442,10 @@ static void sleep_and_timer(void) {
     timer_delete(together);
 #endif
 
-    printf("together.available=1\n");
-    printf("together.fake=%lld\n", base_ns);
-    printf("together.sleep=%lld\n", woke);
-    printf("together.timer=%lld\n", fired);
-    fflush(stdout);
+    say("together.available=1\n");
+    say("together.fake=%lld\n", base_ns);
+    say("together.sleep=%lld\n", woke);
+    say("together.timer=%lld\n", fired);
 }
 
 int main(int argc, char **argv) {
@@ -457,7 +479,6 @@ int main(int argc, char **argv) {
     cpu_timers(argc > 2 && strcmp(argv[2], "cpu") == 0);
 
     shared = getenv("LIBTIMEWARP__SHARED_FILE");
-    printf("shared=%s\n", shared ? shared : "");
-    fflush(stdout);
+    say("shared=%s\n", shared ? shared : "");
     return 0;
 }

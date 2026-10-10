@@ -15,7 +15,11 @@
 
    Each wait reports three facts: `<key>.fake`, the nanoseconds of faketime it asked for,
    `<key>.genuine`, the nanoseconds of genuine time it blocked, and `<key>.rc`, what it answered. A
-   wait this system does not have reports `<key>.available=0` instead. */
+   wait this system does not have reports `<key>.available=0` instead.
+
+   Each line goes straight to the descriptor. libSystem's own calls reach the library's rows as the
+   program's do, and a buffered stream stats its descriptor before its first write, which the hook
+   case would count as a call of this target's. */
 #define _GNU_SOURCE
 #include <aio.h>
 #include <errno.h>
@@ -23,6 +27,7 @@
 #include <poll.h>
 #include <pthread.h>
 #include <signal.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -92,23 +97,44 @@ static struct timespec spec_of(long long ns) {
 /* The deadline one base duration past what `id` shows the program now. */
 static struct timespec deadline_on(clockid_t id) { return spec_of(faked(id) + base_ns); }
 
+/* Writes one formatted line to stdout. */
+static void say(const char *format, ...) {
+    char line[4200];
+    const char *next = line;
+    size_t left;
+    va_list args;
+    int length;
+
+    va_start(args, format);
+    length = vsnprintf(line, sizeof line, format, args);
+    va_end(args);
+    if (length < 0) {
+        return;
+    }
+    left = (size_t)length < sizeof line ? (size_t)length : sizeof line - 1;
+    while (left > 0) {
+        ssize_t wrote = write(STDOUT_FILENO, next, left);
+        if (wrote <= 0) {
+            return;
+        }
+        next += wrote;
+        left -= (size_t)wrote;
+    }
+}
+
 static long long started;
 
 static void begin(void) { started = genuine_mono(); }
 
 static void done(const char *key, long long fake, long long rc) {
     long long elapsed = genuine_mono() - started;
-    printf("%s.available=1\n", key);
-    printf("%s.fake=%lld\n", key, fake);
-    printf("%s.genuine=%lld\n", key, elapsed);
-    printf("%s.rc=%lld\n", key, rc);
-    fflush(stdout);
+    say("%s.available=1\n", key);
+    say("%s.fake=%lld\n", key, fake);
+    say("%s.genuine=%lld\n", key, elapsed);
+    say("%s.rc=%lld\n", key, rc);
 }
 
-static void skipped(const char *key) {
-    printf("%s.available=0\n", key);
-    fflush(stdout);
-}
+static void skipped(const char *key) { say("%s.available=0\n", key); }
 
 /* Burns `ns` of genuine time, for a helper that must pace itself against the clock the faking
    never reaches. */
@@ -192,6 +218,7 @@ static void interrupted_sleep(void) {
     struct timespec request = spec_of(base_ns);
     struct timespec remaining = {0, 0};
     long long rc;
+    int failure;
 
     memset(&action, 0, sizeof action);
     action.sa_handler = woken;
@@ -204,10 +231,10 @@ static void interrupted_sleep(void) {
     }
     begin();
     rc = nanosleep(&request, &remaining);
+    failure = errno;
     done("nanosleep_interrupted", base_ns, rc);
-    printf("nanosleep_interrupted.remaining=%lld\n", nanos(&remaining));
-    printf("nanosleep_interrupted.errno=%d\n", errno);
-    fflush(stdout);
+    say("nanosleep_interrupted.remaining=%lld\n", nanos(&remaining));
+    say("nanosleep_interrupted.errno=%d\n", failure);
     pthread_join(helper, NULL);
 }
 
@@ -271,27 +298,32 @@ static void relative_timeouts(void) {
 #endif
 #if defined(__FreeBSD__) || defined(__APPLE__)
     /* The platform's own wait on a set of events, which nothing ever posts to here, so it runs its
-       timeout out. macOS carries a wider event beside it, which is a function of its own. */
+       timeout out. */
     {
         struct kevent event;
         int kq = kqueue();
         if (kq < 0) {
             skipped("kevent");
-#ifdef __APPLE__
-            skipped("kevent64");
-#endif
         } else {
             timeout = spec_of(base_ns);
             begin();
             done("kevent", base_ns, kevent(kq, NULL, 0, &event, 1, &timeout));
-#ifdef __APPLE__
-            {
-                struct kevent64_s wide;
-                timeout = spec_of(base_ns);
-                begin();
-                done("kevent64", base_ns, kevent64(kq, NULL, 0, &wide, 1, 0, &timeout));
-            }
+            close(kq);
+        }
+    }
 #endif
+#ifdef __APPLE__
+    /* The wider event macOS carries beside it, which is a function of its own. It gets a queue of
+       its own too: the kernel refuses with EINVAL a queue the plain call has already used. */
+    {
+        struct kevent64_s wide;
+        int kq = kqueue();
+        if (kq < 0) {
+            skipped("kevent64");
+        } else {
+            timeout = spec_of(base_ns);
+            begin();
+            done("kevent64", base_ns, kevent64(kq, NULL, 0, &wide, 1, 0, &timeout));
             close(kq);
         }
     }
@@ -656,7 +688,6 @@ int main(int argc, char **argv) {
 #endif
 
     shared = getenv("LIBTIMEWARP__SHARED_FILE");
-    printf("shared=%s\n", shared ? shared : "");
-    fflush(stdout);
+    say("shared=%s\n", shared ? shared : "");
     return 0;
 }
