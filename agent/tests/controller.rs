@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
-use common::platform::{clock, genuine_nanos};
+use common::platform::{clock, default_timebase, genuine_nanos};
 use common::session::layout::{FaultCode, Header, Keeper, Params};
 use common::session::{self, Setup};
 use common::sync::read;
@@ -55,10 +55,15 @@ fn a_program_reading_its_clocks_follows_every_transaction_and_never_steps_back()
     // A day ahead, so nothing but the last transaction reaches it and the program stops exactly
     // when that one lands.
     let deadline = harness::genuine_now() + DAY;
+    // The clock each elapsed family tracks here, which is what the program reads for it.
+    let [monotonic, boottime] = [Family::Monotonic, Family::Boottime]
+        .map(|family| default_timebase(family).expect("an elapsed family has a timebase"));
 
     let mut child = Command::new(harness::program("ticking"))
         .arg(deadline.to_string())
         .arg(BUDGET.to_string())
+        .arg(monotonic.to_string())
+        .arg(boottime.to_string())
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
         .env(harness::PRELOAD, harness::library())
