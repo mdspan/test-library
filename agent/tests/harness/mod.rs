@@ -414,11 +414,12 @@ impl Run {
     pub(crate) fn run(self) -> Report {
         let program = self.program.clone();
         let report = self.run_unchecked();
+        // The status itself rather than its code, which a target killed by a signal has none of.
         assert!(
             report.status.success(),
-            "{} exited {:?}\nstdout:\n{}\nstderr:\n{}",
+            "{} ended with {}\nstdout:\n{}\nstderr:\n{}",
             program.display(),
-            report.status.code(),
+            report.status,
             report.stdout,
             report.stderr,
         );

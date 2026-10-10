@@ -12,6 +12,10 @@
    so a case comparing one against its `clock_gettime` counterpart is comparing our round trip
    through the timebase against the program's own.
 
+   Each line goes straight to the descriptor. libSystem's own calls reach the library's rows as the
+   program's do, and a buffered stream stats its descriptor before its first write, which the hook
+   case would count as a call of this target's.
+
    argv[1], when given, is the fake duration in milliseconds that `mach_wait_until` is asked to
    sleep; without it that wait is skipped. */
 #include <dlfcn.h>
@@ -21,6 +25,7 @@
 #include <mach/mach_time.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -36,7 +41,24 @@ static mach_timebase_info_data_t timebase;
 static mach_port_t calendar_port = MACH_PORT_NULL;
 static mach_port_t system_port = MACH_PORT_NULL;
 
-static void say(const char *key, long long value) { printf("%s=%lld\n", key, value); }
+/* Writes all of `text` to stdout. */
+static void put(const char *text) {
+    size_t left = strlen(text);
+    while (left > 0) {
+        ssize_t wrote = write(STDOUT_FILENO, text, left);
+        if (wrote <= 0) {
+            return;
+        }
+        text += wrote;
+        left -= (size_t)wrote;
+    }
+}
+
+static void say(const char *key, long long value) {
+    char line[96];
+    snprintf(line, sizeof line, "%s=%lld\n", key, value);
+    put(line);
+}
 
 static long long nanos(const struct timespec *ts) {
     return (long long)ts->tv_sec * NS_PER_S + ts->tv_nsec;
@@ -177,7 +199,8 @@ int main(int argc, char **argv) {
     }
 
     shared = getenv("LIBTIMEWARP__SHARED_FILE");
-    printf("shared=%s\n", shared ? shared : "");
-    fflush(stdout);
+    put("shared=");
+    put(shared ? shared : "");
+    put("\n");
     return 0;
 }
