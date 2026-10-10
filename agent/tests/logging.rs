@@ -146,7 +146,9 @@ fn assert_two_lines(written: &str, report: &harness::Report) {
 fn a_level_names_how_much_of_the_log_is_kept() {
     let dir = tempfile::tempdir().unwrap();
     // `error` is the most severe level, so every setting keeps it, and one nobody can read falls
-    // back to the default, which keeps it too.
+    // back to the default, which keeps it too. A level that keeps detail keeps the detail lines
+    // beside it, such as the `debug` line the library writes on FreeBSD for a target Go did not
+    // build.
     for level in ["error", "trace", "chatty"] {
         let log = dir.path().join(format!("{level}.log"));
         Run::prog("probe")
@@ -156,6 +158,14 @@ fn a_level_names_how_much_of_the_log_is_kept() {
             .env(A_BAD_VALUE.0, A_BAD_VALUE.1)
             .run();
 
-        assert_eq!(log_of(&log).lines().count(), 1, "at level {level}");
+        let written = log_of(&log);
+        let errors = written
+            .lines()
+            .filter(|line| line.contains("] error: "))
+            .count();
+        assert_eq!(errors, 1, "at level {level}: {written}");
     }
+    // And a level that keeps only errors keeps nothing else.
+    let only_errors = log_of(&dir.path().join("error.log"));
+    assert_eq!(only_errors.lines().count(), 1, "{only_errors}");
 }
