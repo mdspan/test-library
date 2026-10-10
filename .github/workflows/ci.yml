@@ -286,7 +286,9 @@ jobs:
   # The aarch64 row runs 15.1 because its Rust comes from the package repository, whose FreeBSD 15
   # packages are built on 15.1 and link against libc symbols that 15.0 lacks.
   freebsd:
-    name: freebsd ${{ matrix.arch }} ${{ matrix.release }}
+    # Several rows share a release, so the Go release and the stress a row adds are in the name.
+    name: >-
+      freebsd ${{ matrix.arch }} ${{ matrix.release }} ${{ matrix.go }}${{ matrix.allow_wx && ' no-wx' || '' }}${{ matrix.profiling && ' profiling' || '' }}
     runs-on: ubuntu-24.04
     # The aarch64 VM is emulated rather than accelerated, so it runs several times slower than the
     # others and carries the longer bound.
@@ -350,7 +352,8 @@ jobs:
             profiling: "1"
             timeout: 60
     env:
-      PLATFORM: freebsd ${{ matrix.arch }} ${{ matrix.release }}
+      PLATFORM: >-
+        freebsd ${{ matrix.arch }} ${{ matrix.release }} ${{ matrix.go }}${{ matrix.allow_wx && ' no-wx' || '' }}${{ matrix.profiling && ' profiling' || '' }}
     steps:
       - uses: actions/checkout@v4
 
