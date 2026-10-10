@@ -1,10 +1,10 @@
 /* Every function of the clock group, faked and genuine, in one process.
 
    Linked against the library rather than preloading it, so the genuine reading of a clock comes
-   from the library's own symbol and the two can be compared here. The genuine `times` and
-   `getrusage` come through `syscall()` where the library leaves that function alone, and on macOS,
-   which has no such call to make, through the loader: the library exports private names there, so
-   `RTLD_NEXT` finds libSystem's own definition and not ours.
+   from the library's own symbol and the two can be compared here. The genuine `getrusage` comes
+   through `syscall()`, which hands that number to the kernel untouched on every platform. The
+   genuine `times` does too where the kernel has a call for it, and elsewhere is built out of the
+   genuine `getrusage` and a genuine clock read, the way that libc builds it.
 
    What only Linux has is behind `__linux__`: glibc's internal aliases, the numbers a program can
    ask `syscall()` for, dynamic clock ids, and `adjtimex`. `ftime`, which FreeBSD has not, is behind
@@ -27,9 +27,7 @@
 #include <sys/times.h>
 #include <time.h>
 #include <unistd.h>
-#ifdef __APPLE__
-#include <dlfcn.h>
-#else
+#ifndef __APPLE__
 #include <sys/timex.h>
 #endif
 
@@ -59,27 +57,16 @@ extern time_t __time(time_t *t);
 #define FD_TO_CLOCKID(fd) ((clockid_t)((~(unsigned int)(fd) << 3) | 3u))
 #endif
 
+/* libSystem declares `syscall()` deprecated, and still makes the call. */
 #ifdef __APPLE__
-/* The definition past ours, which on macOS is libSystem's own: the library exports
-   `libtimewarp_getrusage` and puts it in front of the program through the interpose table, so the
-   libc name is one nothing of ours defines and `RTLD_NEXT` finds the genuine function. */
-static void *genuine_symbol(const char *name) {
-    void *found = dlsym(RTLD_NEXT, name);
-    if (found == NULL) {
-        fprintf(stderr, "no genuine %s\n", name);
-        exit(1);
-    }
-    return found;
-}
-
-static int genuine_getrusage(int who, struct rusage *usage) {
-    int (*fn)(int, struct rusage *) = (int (*)(int, struct rusage *))genuine_symbol("getrusage");
-    return fn(who, usage);
-}
-#else
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+#endif
 static int genuine_getrusage(int who, struct rusage *usage) {
     return (int)syscall(SYS_getrusage, who, usage);
 }
+#ifdef __APPLE__
+#pragma clang diagnostic pop
 #endif
 
 #define NS_PER_S 1000000000LL
@@ -169,24 +156,31 @@ static void wall_clocks(void) {
     say("monotonic.genuine", genuine(CLOCK_MONOTONIC));
 }
 
-/* The genuine `times`, through whatever the library leaves alone here. Linux has a system call for
-   it. macOS has the function and no such number, so the loader answers instead. FreeBSD has
-   neither: its libc builds the answer out of two `getrusage` calls and one clock read, and so does
-   this. */
+#if !defined(SYS_times)
+/* The clock the elapsed time of `times` counts on, read genuinely: libSystem's `times` reads the
+   wall clock and FreeBSD's the monotonic one. */
+static int genuine_elapsed(struct timespec *ts) {
+#ifdef __APPLE__
+    return libtimewarp_genuine_clock_gettime(CLOCK_REALTIME, ts);
+#else
+    return (int)syscall(SYS_clock_gettime, CLOCK_MONOTONIC, ts);
+#endif
+}
+#endif
+
+/* The genuine `times`. Linux has a system call for it. FreeBSD and macOS have none: their libc
+   builds the answer out of two `getrusage` calls and one clock read, and so does this, out of the
+   genuine ones. */
 static clock_t genuine_times(struct tms *out) {
 #if defined(SYS_times)
     return (clock_t)syscall(SYS_times, out);
-#elif defined(__APPLE__)
-    clock_t (*fn)(struct tms *) = (clock_t (*)(struct tms *))genuine_symbol("times");
-    return fn(out);
 #else
     long hz = sysconf(_SC_CLK_TCK);
     struct rusage mine, theirs;
     struct timespec ts;
 
     if (genuine_getrusage(RUSAGE_SELF, &mine) != 0
-        || genuine_getrusage(RUSAGE_CHILDREN, &theirs) != 0
-        || syscall(SYS_clock_gettime, CLOCK_MONOTONIC, &ts) != 0) {
+        || genuine_getrusage(RUSAGE_CHILDREN, &theirs) != 0 || genuine_elapsed(&ts) != 0) {
         return (clock_t)-1;
     }
     out->tms_utime = (clock_t)(mine.ru_utime.tv_sec * hz + mine.ru_utime.tv_usec / (1000000 / hz));
@@ -200,8 +194,8 @@ static clock_t genuine_times(struct tms *out) {
 }
 
 /* `clock`, `times` and `getrusage`: consumption follows the Cpu family, and `times`' elapsed return
-   follows Monotonic. The genuine side of each comes from a pass-through system call, or on macOS
-   from the loader. */
+   follows Monotonic. The genuine side of each comes from a system call the library passes through,
+   or is built out of genuine readings. */
 static void cpu_group(const char *tag) {
     struct tms faked_tms, real_tms;
     struct rusage faked_ru, real_ru, faked_thread, real_thread;
