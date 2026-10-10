@@ -13,10 +13,15 @@
 //! So it is found in the constructor, before anything of ours or of the program's can move
 //! `environ` off the stack it started on, and what is found is checked against the value libc
 //! itself answers for the same entry.
+//!
+//! On FreeBSD the walk also keeps `AT_PHDR`, `AT_PHENT`, and `AT_PHNUM`, which locate the Go
+//! fallback routines in the program's own text: `elf_aux_info` answers none of the three.
 
 use std::ffi::c_char;
 use std::ptr;
 use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
+
+use common::elf::{AT_PHDR, AT_PHENT, AT_PHNUM};
 
 unsafe extern "C" {
     /// The environment as libc keeps it: the array the kernel left on the stack, until a libc that
@@ -65,16 +70,30 @@ static SLOT: AtomicPtr<Entry> = AtomicPtr::new(ptr::null_mut());
 /// What the kernel left in that entry, or zero when this process has nothing there.
 static GENUINE: AtomicUsize = AtomicUsize::new(0);
 
+/// This process's `AT_PHDR`, `AT_PHENT`, and `AT_PHNUM`, in that order, as the walk found them, or
+/// zero for any the walk did not find.
+#[cfg(target_os = "freebsd")]
+static PROGRAM_HEADERS: [AtomicUsize; 3] = [const { AtomicUsize::new(0) }; 3];
+
 /// Finds the entry, before the program or we can move the environment it sits behind.
 ///
 /// Called once, from the constructor. Relaxed stores, because the constructor is the whole of this
 /// process at the time and every later reader is a thread it started afterwards.
 pub(super) fn prime() {
-    let Some(entry) = find() else {
+    let Some(vector) = find() else {
+        return;
+    };
+    let Some(entry) = entry_of(vector, TAG) else {
         return;
     };
     GENUINE.store(entry.value.load(Ordering::Relaxed), Ordering::Relaxed);
     SLOT.store(ptr::from_ref(entry).cast_mut(), Ordering::Relaxed);
+    #[cfg(target_os = "freebsd")]
+    for (kept, tag) in PROGRAM_HEADERS.iter().zip([AT_PHDR, AT_PHENT, AT_PHNUM]) {
+        if let Some(entry) = entry_of(vector, tag) {
+            kept.store(entry.value.load(Ordering::Relaxed), Ordering::Relaxed);
+        }
+    }
 }
 
 /// What the kernel left in the entry, or `None` when this process has nothing there to pose as or
@@ -125,9 +144,8 @@ pub(super) fn withhold_timekeep() -> bool {
 /// This process's `AT_PHDR`, `AT_PHENT`, and `AT_PHNUM`: where its program header array is, how
 /// long one entry is, and how many there are. `None` when any is absent.
 ///
-/// Read through libc's own reader rather than from the vector walked above, which finds the one
-/// entry the platform names the clock in and nothing else. A target that reads the clock without
-/// libc carries that code in the segments these headers describe.
+/// A target that reads the clock without libc carries that code in the segments these headers
+/// describe.
 #[cfg_attr(
     not(any(test, all(target_os = "freebsd", feature = "vdso"))),
     expect(
@@ -137,54 +155,29 @@ pub(super) fn withhold_timekeep() -> bool {
     )
 )]
 pub(super) fn program_headers() -> Option<(usize, usize, usize)> {
-    let phdr = aux_ptr(common::elf::AT_PHDR);
-    let phent = aux_count(common::elf::AT_PHENT);
-    let phnum = aux_count(common::elf::AT_PHNUM);
+    let [phdr, phent, phnum] = program_header_entries();
     (phdr != 0 && phent != 0 && phnum != 0).then_some((phdr, phent, phnum))
 }
 
-/// The pointer-valued auxiliary-vector entry `tag` carries, or zero when there is none.
+/// The three values through libc's own reader, zero for any it does not answer.
 #[cfg(target_os = "linux")]
-fn aux_ptr(tag: libc::c_ulong) -> usize {
-    // Safety: `getauxval` takes a tag and answers a number, touching nothing of ours.
-    usize::try_from(unsafe { libc::getauxval(tag) }).unwrap_or(0)
+fn program_header_entries() -> [usize; 3] {
+    [AT_PHDR, AT_PHENT, AT_PHNUM].map(|tag| {
+        // Safety: `getauxval` takes a tag and answers a number, touching nothing of ours.
+        usize::try_from(unsafe { libc::getauxval(tag) }).unwrap_or(0)
+    })
 }
 
-/// The count-valued auxiliary-vector entry `tag` carries, which Linux answers the same way.
-#[cfg(target_os = "linux")]
-fn aux_count(tag: libc::c_ulong) -> usize {
-    aux_ptr(tag)
-}
-
-/// The pointer-valued auxiliary-vector entry `tag` carries, read in a pointer's width.
+/// The three values as the constructor's walk kept them.
 #[cfg(target_os = "freebsd")]
-fn aux_ptr(tag: libc::c_ulong) -> usize {
-    let tag = libc::c_int::try_from(tag).unwrap_or(0);
-    let mut at: *mut libc::c_void = ptr::null_mut();
-    let len = libc::c_int::try_from(size_of::<*mut libc::c_void>()).unwrap_or(0);
-    // Safety: the buffer is a live pointer-sized word, which is what this entry answers in.
-    if unsafe { libc::elf_aux_info(tag, (&raw mut at).cast(), len) } != 0 {
-        return 0;
-    }
-    at.addr()
+fn program_header_entries() -> [usize; 3] {
+    PROGRAM_HEADERS
+        .each_ref()
+        .map(|kept| kept.load(Ordering::Relaxed))
 }
 
-/// The count-valued auxiliary-vector entry `tag` carries, read in an int's width.
-#[cfg(target_os = "freebsd")]
-fn aux_count(tag: libc::c_ulong) -> usize {
-    let tag = libc::c_int::try_from(tag).unwrap_or(0);
-    let mut value: libc::c_int = 0;
-    let len = libc::c_int::try_from(size_of::<libc::c_int>()).unwrap_or(0);
-    // Safety: the buffer is a live int, which is what this entry answers in.
-    if unsafe { libc::elf_aux_info(tag, (&raw mut value).cast(), len) } != 0 {
-        return 0;
-    }
-    usize::try_from(value).unwrap_or(0)
-}
-
-/// The [`TAG`] entry of this process's vector, or `None` when the vector cannot be reached or
-/// carries no such entry.
-fn find() -> Option<&'static Entry> {
+/// This process's vector, or `None` when it cannot be reached or carries no [`TAG`] entry.
+fn find() -> Option<&'static [Entry]> {
     // A raw pointer, because libc may replace what it points at, and read from the constructor
     // because that is before the program has run a line that could.
     let held = &raw const environ;
@@ -200,9 +193,9 @@ fn find() -> Option<&'static Entry> {
     walk(strings, wanted)
 }
 
-/// The entry past the environment `strings` holds, or `None` when what follows it is not a vector
-/// carrying `wanted`.
-fn walk(strings: *mut *mut c_char, wanted: usize) -> Option<&'static Entry> {
+/// The vector past the environment `strings` holds, up to its terminator, or `None` when what
+/// follows the environment is not a vector whose [`TAG`] entry carries `wanted`.
+fn walk(strings: *mut *mut c_char, wanted: usize) -> Option<&'static [Entry]> {
     let mut strings = strings;
     // Past the environment's own terminator is where the vector starts.
     loop {
@@ -224,14 +217,23 @@ fn walk(strings: *mut *mut c_char, wanted: usize) -> Option<&'static Entry> {
         let at = unsafe { entries.add(index) };
         // Safety: as above.
         let entry = unsafe { &*at };
-        if entry.tag == AT_NULL || entry.tag > MAX_TAG {
+        if entry.tag > MAX_TAG {
             return None;
         }
-        if entry.tag == TAG && entry.value.load(Ordering::Relaxed) == wanted {
-            return Some(entry);
+        if entry.tag == AT_NULL {
+            // Safety: every entry ahead of the terminator was read above as one of the vector's.
+            let vector = unsafe { std::slice::from_raw_parts(entries, index) };
+            return entry_of(vector, TAG)
+                .is_some_and(|found| found.value.load(Ordering::Relaxed) == wanted)
+                .then_some(vector);
         }
     }
     None
+}
+
+/// The entry of `vector` under `tag`.
+fn entry_of(vector: &'static [Entry], tag: libc::c_ulong) -> Option<&'static Entry> {
+    vector.iter().find(|entry| entry.tag == tag)
 }
 
 /// What libc says the entry carries, or zero when this process has nothing there.
@@ -290,10 +292,35 @@ mod tests {
         assert!(walk(planted.as_ptr().cast_mut(), 0).is_none());
     }
 
+    /// A walk that lands on a vector carrying the entry keeps every entry up to the terminator,
+    /// those after the entry included.
+    #[test]
+    fn a_walk_that_lands_on_a_vector_keeps_all_of_it() {
+        let word = |value: libc::c_ulong| {
+            ptr::without_provenance_mut::<c_char>(usize::try_from(value).unwrap())
+        };
+        // One variable and the environment's terminator, then two entries and the terminator.
+        let planted = [
+            word(0x4000_0000),
+            word(0),
+            word(TAG),
+            word(0x5000),
+            word(AT_PHNUM),
+            word(9),
+            word(AT_NULL),
+            word(0),
+        ];
+        let vector = walk(planted.as_ptr().cast_mut(), 0x5000).expect("the entry is there");
+        assert_eq!(vector.len(), 2);
+        let phnum = entry_of(vector, AT_PHNUM).expect("the entry after it is kept");
+        assert_eq!(phnum.value.load(Ordering::Relaxed), 9);
+
+        assert!(walk(planted.as_ptr().cast_mut(), 0x6000).is_none());
+    }
+
     /// The program headers this process reports locate an image that covers its own code, which is
     /// what the scan for the Go fallback routines runs over.
     #[test]
-    #[cfg(target_os = "linux")]
     fn the_program_headers_are_found_and_describe_this_image() {
         let (phdr, phent, phnum) = program_headers().expect("a program the kernel started");
         assert_eq!(phent, size_of::<common::elf::Phdr>());
