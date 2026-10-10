@@ -65,9 +65,15 @@ fn two_pages(dir: &Path) -> PathBuf {
     path
 }
 
+/// The program that reports every function of the group. FreeBSD keeps `pthread_getcpuclockid` in
+/// libthr rather than libc, so the program names the threads library.
+fn clocks_program() -> PathBuf {
+    harness::program_linked_with("clocks", &["-pthread"])
+}
+
 /// One run of `clocks`, which reports every function of the group, faked and genuine.
 fn clocks(dir: &Path, env: &[(&str, &str)]) -> Report {
-    let mut run = Run::new(harness::program_linked_to_library("clocks"))
+    let mut run = Run::new(clocks_program())
         .without_library()
         .session_dir(dir)
         .arg(two_pages(dir).to_string_lossy());
@@ -259,7 +265,7 @@ fn the_calls_that_must_stay_genuine_stay_genuine() {
         dir.path(),
         &[("LIBTIMEWARP_RATE", "10"), ("LIBTIMEWARP_CPU_RATE", "8")],
     );
-    let plain = Run::new(harness::program_linked_to_library("clocks"))
+    let plain = Run::new(clocks_program())
         .without_library()
         .session_dir(dir.path())
         .env("LIBTIMEWARP_KEEPER", "null")
