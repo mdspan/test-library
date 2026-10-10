@@ -167,26 +167,65 @@ fn assert_the_machine_is_untouched(report: &Report) {
     );
 }
 
-/// Every call the kernel refuses before privilege is ever in question, with the errno it refuses it
-/// with. None of these depend on what this process holds.
+/// Whether the kernel asks for privilege before it looks at the value a set carries. Linux looks
+/// at the value first; macOS and FreeBSD ask first, so a process that may not set the clock hears
+/// `EPERM` for a malformed value.
+const PRIVILEGE_BEFORE_VALUE: bool = !cfg!(target_os = "linux");
+
+/// Whether it asks before it looks at the clock id too, which FreeBSD alone does: macOS's libc
+/// refuses a clock it cannot set before it calls the kernel at all.
+const PRIVILEGE_BEFORE_CLOCK: bool = cfg!(target_os = "freebsd");
+
+/// What a malformed call is refused with in a run that may or may not set the clock: `EINVAL`, or
+/// `EPERM` where the kernel asks for privilege before it finds what is wrong.
+const fn malformed(privilege_first: bool, privileged: bool) -> libc::c_int {
+    if privilege_first && !privileged {
+        libc::EPERM
+    } else {
+        libc::EINVAL
+    }
+}
+
+/// Every malformed call, with the errno it is refused with, which depends on the order the kernel
+/// checks a set in and, through that, on whether this run may set the clock.
 fn assert_the_malformed_calls_are_refused(report: &Report) {
+    let privileged = allowed(report);
     // A clock the kernel keeps but will not set, and one it has never heard of. A platform with no
     // TAI clock has no such id to name, which the target says rather than passing quietly.
     for tag in settable_refusals(report) {
-        assert_refused(report, tag, libc::EINVAL);
+        assert_refused(report, tag, malformed(PRIVILEGE_BEFORE_CLOCK, privileged));
     }
     // A field outside what the call may carry: a fraction wider than a second, a date before the
     // epoch, and a delta wider than libc's own `adjtime` takes.
     for tag in ["bad_nanos", "before_epoch", "bad_micros", "bad_delta"] {
-        assert_refused(report, tag, libc::EINVAL);
+        assert_refused(report, tag, malformed(PRIVILEGE_BEFORE_VALUE, privileged));
     }
-    // A pointer the call cannot read, after the clock it names has been found good, and the
-    // question a null delta asks, which needs no privilege: an adjustment here lands at once rather
-    // than slewed, so there is never one still under way to report.
+    // A pointer the call cannot read, and the question a null delta asks. Linux and macOS look at
+    // the clock before the pointer and FreeBSD reads the pointer first; macOS asks for privilege
+    // before it reads one. A null delta needs no privilege where it is a question, on Linux and
+    // FreeBSD: an adjustment there lands at once rather than slewed, so there is never one still
+    // under way to report. macOS reads the delta, after asking for privilege.
     if report.nanos("nulls.available") == 1 {
-        assert_refused(report, "null_realtime", libc::EFAULT);
-        assert_refused(report, "null_monotonic", libc::EINVAL);
-        assert_succeeded(report, "no_delta");
+        let unread = if cfg!(target_os = "macos") && !privileged {
+            libc::EPERM
+        } else {
+            libc::EFAULT
+        };
+        assert_refused(report, "null_realtime", unread);
+        assert_refused(
+            report,
+            "null_monotonic",
+            if cfg!(target_os = "freebsd") {
+                libc::EFAULT
+            } else {
+                libc::EINVAL
+            },
+        );
+        if cfg!(target_os = "macos") {
+            assert_refused(report, "no_delta", unread);
+        } else {
+            assert_succeeded(report, "no_delta");
+        }
     }
 }
 
@@ -422,10 +461,24 @@ fn a_handled_setter_means_success_and_the_keeper_never_moves() {
         assert_succeeded(&report, tag);
     }
     // A clock the kernel will not read never reaches the hook, and neither does a call with no
-    // instant to hand it: a malformed one, or a bare probe for privilege.
-    assert_refused(&report, "bogus", libc::EINVAL);
-    assert_refused(&report, "bad_nanos", libc::EINVAL);
-    assert_refused(&report, "probe", libc::EPERM);
+    // instant to hand it: a malformed one, or a bare probe for privilege. Each is refused as it
+    // would be without a hook.
+    let privileged = may_set_the_clock();
+    assert_refused(
+        &report,
+        "bogus",
+        malformed(PRIVILEGE_BEFORE_CLOCK, privileged),
+    );
+    assert_refused(
+        &report,
+        "bad_nanos",
+        malformed(PRIVILEGE_BEFORE_VALUE, privileged),
+    );
+    if privileged {
+        assert_succeeded(&report, "probe");
+    } else {
+        assert_refused(&report, "probe", libc::EPERM);
+    }
 
     // The keeper never ran a set, so the wall clock is where the session's own shift put it.
     for key in ["before", "after_clock_settime", "after_settimeofday"] {

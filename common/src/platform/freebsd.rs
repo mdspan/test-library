@@ -560,6 +560,22 @@ pub unsafe fn genuine_adjtime(
 /// the range an instant holds rather than anything libc imposes.
 pub const ADJTIME_SECONDS: i64 = i64::MAX / 1_000_000_000;
 
+/// The order the kernel checks a set of the clock in.
+///
+/// It copies the value in, then asks for privilege, and only then looks at the clock id and at the
+/// value. A process without privilege hears `EPERM` for any set it can name, a clock that cannot be
+/// set included.
+pub const SET_ORDER: [super::SetCheck; 4] = [
+    super::SetCheck::Pointer,
+    super::SetCheck::Privilege,
+    super::SetCheck::Clock,
+    super::SetCheck::Value,
+];
+
+/// Whether `adjtime` with no delta is a question that needs no privilege: it is, and the kernel
+/// answers it before it asks for any.
+pub const ADJTIME_NULL_ASKS: bool = true;
+
 /// Whether the kernel would let this process set the clock: an effective uid of 0 here, since
 /// FreeBSD gates the call on the superuser rather than on a capability.
 #[must_use]

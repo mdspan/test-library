@@ -517,6 +517,21 @@ struct CapData {
 /// bound is libc's rather than the kernel's, and it is what a program sees without us.
 pub const ADJTIME_SECONDS: i64 = libc::c_int::MAX as i64 / 1_000_000 - 2;
 
+/// The order the kernel checks a set of the clock in.
+///
+/// The clock id, then the pointer, then the value, and only then the capability. A malformed set is
+/// `EINVAL` here whatever the caller holds.
+pub const SET_ORDER: [super::SetCheck; 4] = [
+    super::SetCheck::Clock,
+    super::SetCheck::Pointer,
+    super::SetCheck::Value,
+    super::SetCheck::Privilege,
+];
+
+/// Whether `adjtime` with no delta is a question that needs no privilege: it is, since libc makes
+/// it an `adjtimex` that sets nothing.
+pub const ADJTIME_NULL_ASKS: bool = true;
+
 /// Whether the kernel would let this process set the clock: `CAP_SYS_TIME` in its effective set.
 ///
 /// The effective set rather than the uid, because root in a container often lacks the capability

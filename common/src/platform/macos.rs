@@ -327,6 +327,22 @@ pub unsafe fn genuine_adjtime(
 /// the range an instant holds rather than anything libc imposes.
 pub const ADJTIME_SECONDS: i64 = i64::MAX / 1_000_000_000;
 
+/// The order a set of the clock is checked in here.
+///
+/// libSystem's `clock_settime` refuses any clock but the wall clock before it makes a call, and the
+/// kernel then asks for privilege before it copies the value in or looks at it. A process without
+/// privilege hears `EPERM` for any set of the wall clock, malformed or not.
+pub const SET_ORDER: [super::SetCheck; 4] = [
+    super::SetCheck::Clock,
+    super::SetCheck::Privilege,
+    super::SetCheck::Pointer,
+    super::SetCheck::Value,
+];
+
+/// Whether `adjtime` with no delta is a question that needs no privilege: it is not, since the
+/// kernel asks for privilege first and then reads the delta, which a null pointer makes `EFAULT`.
+pub const ADJTIME_NULL_ASKS: bool = false;
+
 /// Whether the kernel would let this process set the clock: an effective uid of 0 here, since
 /// macOS gates the call on the superuser rather than on a capability.
 #[must_use]

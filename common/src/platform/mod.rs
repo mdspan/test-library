@@ -13,6 +13,8 @@
 //! | `genuine_getrusage` | Reads the genuine `rusage` of a target, libc's convention. Never routed through a symbol we interpose. |
 //! | `genuine_settimeofday`, `genuine_clock_settime`, `genuine_adjtime` | Set the genuine clock, libc's convention, for a process this library is not faking. |
 //! | `may_set_the_clock` | Whether the kernel would let this process set the clock genuinely. |
+//! | `SET_ORDER` | The order the kernel makes the four checks of a set of the clock in. |
+//! | `ADJTIME_NULL_ASKS` | Whether `adjtime` with no delta is a question that needs no privilege. |
 //! | `ADJTIME_SECONDS` | The widest delta the platform's own `adjtime` takes before it refuses. |
 //! | `set_errno` | Sets this thread's `errno`, which is how a refused call reports itself. |
 //! | `thread_id` | The id the kernel gives the calling thread, taking no thread-local storage to answer. |
@@ -116,6 +118,22 @@ pub fn timebase_allowed(family: Family, clock: libc::clockid_t) -> bool {
 #[must_use]
 pub const fn settable(clock: libc::clockid_t) -> bool {
     clock == clock::REALTIME
+}
+
+/// One of the things a kernel checks a set of the clock for.
+///
+/// All three check the same four, each in an order of its own, [`SET_ORDER`], and a call that
+/// fails more than one is refused for whichever comes first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SetCheck {
+    /// The clock is one that can be set at all, `EINVAL` when it is not: [`settable`].
+    Clock,
+    /// The new value is somewhere the kernel can read it, `EFAULT` when it is not.
+    Pointer,
+    /// This process may set the clock, `EPERM` when it may not: [`may_set_the_clock`].
+    Privilege,
+    /// The new value is one the call may carry, `EINVAL` when it is not.
+    Value,
 }
 
 /// The loader's name for "the definition after the one asking": all ones on Linux, macOS, and

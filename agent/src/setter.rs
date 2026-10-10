@@ -11,9 +11,13 @@
 //! the affine keeper runs the set, and the null keeper answers as an unprivileged process would
 //! see. A process with no session has nothing of ours to move, so there the genuine function is
 //! the whole of the answer.
+//!
+//! A refusal is the one the kernel would have made. A call can fail several of the kernel's checks
+//! at once, a malformed value from a process without privilege for one, and each platform makes
+//! them in its own order, so the errno is that of the first failure in [`platform::SET_ORDER`].
 
 use common::hook::{Func, Status};
-use common::platform::{self, clock};
+use common::platform::{self, SetCheck, clock};
 use common::session::clock_now;
 use common::session::layout::{Header, Keeper};
 use common::time::{Family, Nanos};
@@ -65,6 +69,49 @@ impl From<controller::Error> for Refused {
     }
 }
 
+impl From<SetCheck> for Refused {
+    /// The `errno` a failed check of the kernel's reports.
+    fn from(check: SetCheck) -> Self {
+        match check {
+            SetCheck::Clock | SetCheck::Value => Self::Invalid,
+            SetCheck::Pointer => Self::Fault,
+            SetCheck::Privilege => Self::Denied,
+        }
+    }
+}
+
+/// What a set carries for the kernel to check, beside the clock it names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Carried {
+    /// A value the call may carry.
+    Good,
+    /// No value at all: a null pointer.
+    Nothing,
+    /// A value outside what the call may carry.
+    Malformed,
+}
+
+/// The refusal a kernel that checks in `order` makes of a call failing the checks `fails` names:
+/// the first of them, or `None` when the call fails none.
+fn first_refusal(order: &[SetCheck], fails: impl Fn(SetCheck) -> bool) -> Option<Refused> {
+    order
+        .iter()
+        .copied()
+        .find(|&check| fails(check))
+        .map(Refused::from)
+}
+
+/// The refusal this platform's kernel makes of a set of `clock` carrying `carried`, by this
+/// process under this session, or `None` when it would let the set through.
+fn refusal(header: &Header, clock: libc::clockid_t, carried: Carried) -> Option<Refused> {
+    first_refusal(&platform::SET_ORDER, |check| match check {
+        SetCheck::Clock => !platform::settable(clock),
+        SetCheck::Pointer => carried == Carried::Nothing,
+        SetCheck::Privilege => permitted(header).is_err(),
+        SetCheck::Value => carried == Carried::Malformed,
+    })
+}
+
 /// libc's convention for a setter: 0, or -1 with `errno` set to what refused it.
 fn report(outcome: Result<(), Refused>) -> libc::c_int {
     match outcome {
@@ -105,7 +152,8 @@ pub(crate) unsafe fn settimeofday(
     }
     // Safety: `tv` is non-null, so the caller's guarantee makes it valid for this read.
     let Some(at) = instant_of(unsafe { &*tv }) else {
-        return report(Err(Refused::Invalid));
+        let why = refusal(header, clock::REALTIME, Carried::Malformed);
+        return report(Err(why.unwrap_or(Refused::Invalid)));
     };
     report(set(
         header,
@@ -126,18 +174,14 @@ pub(crate) unsafe fn clock_settime(
         return unsafe { platform::genuine_clock_settime(clock, tp) };
     };
     if tp.is_null() {
-        // The kernel refuses a clock it cannot set before it ever reads the pointer, and a pointer
-        // it cannot read after, so the order the two are found in decides which one is reported.
-        return report(Err(if platform::settable(clock) {
-            Refused::Fault
-        } else {
-            Refused::Invalid
-        }));
+        let why = refusal(header, clock, Carried::Nothing);
+        return report(Err(why.unwrap_or(Refused::Fault)));
     }
     // Safety: `tp` is non-null, so the caller's guarantee makes it valid for this read.
     let ts = unsafe { &*tp };
     let Some(at) = whole(ts.tv_sec, ts.tv_nsec) else {
-        return report(Err(Refused::Invalid));
+        let why = refusal(header, clock, Carried::Malformed);
+        return report(Err(why.unwrap_or(Refused::Invalid)));
     };
     report(set(header, Func::ClockSettime, clock, Motion::To(at)))
 }
@@ -154,14 +198,23 @@ pub(crate) unsafe fn adjtime(
         return unsafe { platform::genuine_adjtime(delta, olddelta) };
     };
     let outcome = if delta.is_null() {
-        // A question rather than a set, which needs no privilege: an adjustment here lands at once
-        // rather than slewed, so there is never one still under way to report.
-        Ok(())
+        if platform::ADJTIME_NULL_ASKS {
+            // A question rather than a set, which needs no privilege: an adjustment here lands at
+            // once rather than slewed, so there is never one still under way to report.
+            Ok(())
+        } else {
+            let why = refusal(header, clock::REALTIME, Carried::Nothing);
+            Err(why.unwrap_or(Refused::Fault))
+        }
     } else {
         // Safety: `delta` is non-null, so the caller's guarantee makes it valid for this read.
-        duration_of(unsafe { &*delta })
-            .ok_or(Refused::Invalid)
-            .and_then(|by| set(header, Func::Adjtime, clock::REALTIME, Motion::By(by)))
+        duration_of(unsafe { &*delta }).map_or_else(
+            || {
+                let why = refusal(header, clock::REALTIME, Carried::Malformed);
+                Err(why.unwrap_or(Refused::Invalid))
+            },
+            |by| set(header, Func::Adjtime, clock::REALTIME, Motion::By(by)),
+        )
     };
     if outcome.is_ok() && !olddelta.is_null() {
         // Safety: `olddelta` is non-null, so the caller's guarantee makes it valid for this write.
@@ -194,10 +247,9 @@ fn set(header: &Header, func: Func, clock: libc::clockid_t, motion: Motion) -> R
             return Ok(());
         }
     }
-    if !platform::settable(clock) {
-        return Err(Refused::Invalid);
+    if let Some(why) = refusal(header, clock, Carried::Good) {
+        return Err(why);
     }
-    permitted(header)?;
     transact(header, motion)
 }
 
@@ -369,6 +421,54 @@ mod tests {
             std::io::Error::last_os_error().raw_os_error(),
             Some(libc::EPERM)
         );
+    }
+
+    #[test]
+    fn a_call_failing_several_checks_is_refused_for_the_first_the_kernel_makes() {
+        use SetCheck::{Clock, Pointer, Privilege, Value};
+
+        // The orders Linux, macOS and FreeBSD check in.
+        let linux = [Clock, Pointer, Value, Privilege];
+        let macos = [Clock, Privilege, Pointer, Value];
+        let freebsd = [Pointer, Privilege, Clock, Value];
+
+        // A malformed value from a process without privilege: the value is looked at first on
+        // Linux, and privilege on the other two.
+        let malformed = |check| matches!(check, Privilege | Value);
+        assert_eq!(first_refusal(&linux, malformed), Some(Refused::Invalid));
+        assert_eq!(first_refusal(&macos, malformed), Some(Refused::Denied));
+        assert_eq!(first_refusal(&freebsd, malformed), Some(Refused::Denied));
+        // A clock that cannot be set, named by a process without privilege.
+        let unsettable = |check| matches!(check, Clock | Privilege);
+        assert_eq!(first_refusal(&linux, unsettable), Some(Refused::Invalid));
+        assert_eq!(first_refusal(&macos, unsettable), Some(Refused::Invalid));
+        assert_eq!(first_refusal(&freebsd, unsettable), Some(Refused::Denied));
+        // A null pointer beside a clock that cannot be set.
+        let unread = |check| matches!(check, Clock | Pointer);
+        assert_eq!(first_refusal(&linux, unread), Some(Refused::Invalid));
+        assert_eq!(first_refusal(&macos, unread), Some(Refused::Invalid));
+        assert_eq!(first_refusal(&freebsd, unread), Some(Refused::Fault));
+        // And a call that fails nothing is not refused at all.
+        assert_eq!(first_refusal(&platform::SET_ORDER, |_| false), None);
+    }
+
+    #[test]
+    fn this_platforms_order_makes_every_check_once() {
+        for check in [
+            SetCheck::Clock,
+            SetCheck::Pointer,
+            SetCheck::Privilege,
+            SetCheck::Value,
+        ] {
+            assert_eq!(
+                platform::SET_ORDER
+                    .iter()
+                    .filter(|made| **made == check)
+                    .count(),
+                1,
+                "{check:?}"
+            );
+        }
     }
 
     #[test]
