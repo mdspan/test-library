@@ -18,8 +18,9 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
+use common::platform;
 use common::session::layout::Keeper;
-use common::time::Nanos;
+use common::time::{Family, Nanos};
 
 use fixture::{Fixture, library, one_at_a_time, repository};
 
@@ -149,6 +150,17 @@ impl Drop for Member {
     }
 }
 
+/// The name the family table gives a family's default timebase here: the first of the names its id
+/// goes by, since FreeBSD spells some ids twice.
+fn timebase_name(family: Family) -> &'static str {
+    let id = platform::default_timebase(family).expect("a family with a timebase");
+    platform::clock::named()
+        .iter()
+        .find(|&&(_, known)| known == id)
+        .map(|&(name, _)| name)
+        .expect("a name for every default timebase")
+}
+
 fn tool(session: &Fixture) -> Tool {
     let state = session.dir.path().join("tool-state");
     Tool {
@@ -232,7 +244,16 @@ fn the_tool_reads_and_changes_a_session() {
     tool.run(&["set-rate", "monotonic", "4"]).ok();
     let info = tool.run(&["info"]).ok();
     assert_eq!(info.get("monotonic.rate"), "4.000000000");
-    assert_eq!(info.get("monotonic.timebase"), "CLOCK_MONOTONIC");
+    for (label, family) in [
+        ("realtime", Family::Realtime),
+        ("monotonic", Family::Monotonic),
+        ("boottime", Family::Boottime),
+    ] {
+        assert_eq!(
+            info.get(&format!("{label}.timebase")),
+            timebase_name(family)
+        );
+    }
     assert_eq!(info.get("cpu.timebase"), "", "Cpu tracks no timebase");
 
     // Refused where the chapter says, with the code named on stderr.

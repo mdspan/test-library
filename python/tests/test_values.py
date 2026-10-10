@@ -78,6 +78,16 @@ class ClockNames(unittest.TestCase):
         self.assertEqual(values.clock_name(None), "")
         self.assertEqual(values.clock_name(0x7FFFFFFF), str(0x7FFFFFFF))
 
+    def test_an_id_with_two_names_goes_by_the_one_that_is_not_an_alias(self):
+        import time
+
+        # FreeBSD spells `CLOCK_BOOTTIME` as `CLOCK_UPTIME` through 14.x and as `CLOCK_MONOTONIC`
+        # from 15.0. Elsewhere it is a clock of its own, or absent, and this checks nothing.
+        boottime = getattr(time, "CLOCK_BOOTTIME", None)
+        for name in ["CLOCK_UPTIME", "CLOCK_MONOTONIC"]:
+            if boottime is not None and getattr(time, name, None) == boottime:
+                self.assertEqual(values.clock_name(boottime), name)
+
 
 if __name__ == "__main__":
     unittest.main()

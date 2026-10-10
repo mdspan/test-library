@@ -96,10 +96,18 @@ def parse_rate(text: str) -> float:
     return rate
 
 
+#: Names the headers may spell as another clock's id. FreeBSD's `CLOCK_BOOTTIME` is `CLOCK_UPTIME`
+#: through 14.x and `CLOCK_MONOTONIC` from 15.0, and the library calls that id by the other name.
+_ALIASES = frozenset({"CLOCK_BOOTTIME"})
+
+
 def _clock_names() -> dict[int, str]:
-    """Every clock id this interpreter knows a name for, which is the platform's own table."""
+    """Every clock id this interpreter knows a name for, which is the platform's own table.
+
+    An id with two names goes by the one that is not an alias.
+    """
     names: dict[int, str] = {}
-    for name in dir(time):
+    for name in sorted(dir(time), key=lambda name: name in _ALIASES):
         if not name.startswith("CLOCK_"):
             continue
         value = getattr(time, name)
