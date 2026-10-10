@@ -800,6 +800,16 @@ mod tests {
         for &(name, id) in clock::named() {
             // Safety: as above, for every clock this kernel's column names.
             let read = unsafe { genuine_clock_gettime(id, &raw mut ts) };
+            // The TAI clock is refused with `EINVAL` until a time daemon has told the kernel the
+            // TAI offset.
+            if id == clock::TAI && read != 0 {
+                assert_eq!(
+                    io::Error::last_os_error().raw_os_error(),
+                    Some(libc::EINVAL),
+                    "{name}"
+                );
+                continue;
+            }
             assert_eq!(read, 0, "{name}");
         }
     }

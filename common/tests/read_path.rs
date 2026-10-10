@@ -101,24 +101,28 @@ fn reading_the_clock_allocates_nothing() {
     let session = session::create(&setup).unwrap();
     let header = session.header();
 
-    // Every family, because each takes a different arm of the keeper's match.
-    let clocks = [
+    // Every family, because each takes a different arm of the keeper's match, and TAI where a
+    // family holds it: FreeBSD before 15.0 has no TAI clock.
+    let clocks: Vec<libc::clockid_t> = [
         clock::REALTIME,
         clock::TAI,
         timebase_of(Family::Monotonic),
         timebase_of(Family::Boottime),
         clock::PROCESS_CPUTIME,
         clock::THREAD_CPUTIME,
-    ];
+    ]
+    .into_iter()
+    .filter(|&id| clock::family_of(id).is_some())
+    .collect();
 
     // Warm anything the first call might touch, then measure.
-    for id in clocks {
+    for &id in &clocks {
         assert!(clock_now(header, id).is_some());
     }
     let counted = allocations_in(|| {
         let mut last = Nanos::ZERO;
         for _ in 0..1_000 {
-            for id in clocks {
+            for &id in &clocks {
                 assert!(clock_now(header, id).is_some());
             }
             let now = clock_now(header, clock::REALTIME).unwrap();

@@ -21,7 +21,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 use common::hook::{Func, Kind};
-use common::platform::{clock, may_set_the_clock};
+use common::platform::{clock, genuine_nanos, may_set_the_clock};
 use common::session::Session;
 use harness::{Report, Run, arena_words, only_session};
 
@@ -448,15 +448,17 @@ fn a_handled_setter_means_success_and_the_keeper_never_moves() {
         ],
     );
 
+    // The clocks the kernel will not read: the bogus one, and on FreeBSD CLOCK_TAI until a time
+    // daemon has told the kernel the TAI offset.
+    let (unread, read): (Vec<_>, Vec<_>) = settable_refusals(&report)
+        .into_iter()
+        .partition(|&tag| tag == "bogus" || (tag == "tai" && genuine_nanos(clock::TAI).is_none()));
+
     // Handled, so the program sees success whatever privilege it holds and whichever clock it
     // named. The number the hook wrote into `*out` is ignored, because a setter wants neither.
     for tag in ["clock_settime", "settimeofday", "adjtime"]
         .into_iter()
-        .chain(
-            settable_refusals(&report)
-                .into_iter()
-                .filter(|tag| *tag != "bogus"),
-        )
+        .chain(read)
     {
         assert_succeeded(&report, tag);
     }
@@ -464,11 +466,9 @@ fn a_handled_setter_means_success_and_the_keeper_never_moves() {
     // instant to hand it: a malformed one, or a bare probe for privilege. Each is refused as it
     // would be without a hook.
     let privileged = may_set_the_clock();
-    assert_refused(
-        &report,
-        "bogus",
-        malformed(PRIVILEGE_BEFORE_CLOCK, privileged),
-    );
+    for tag in unread {
+        assert_refused(&report, tag, malformed(PRIVILEGE_BEFORE_CLOCK, privileged));
+    }
     assert_refused(
         &report,
         "bad_nanos",

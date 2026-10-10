@@ -311,15 +311,18 @@ mod tests {
     #[test]
     fn every_named_clock_belongs_to_a_family_and_reads() {
         // Linux's two alarm clocks need CAP_WAKE_ALARM; without it the kernel refuses the id
-        // outright, so a reading is only demanded of the clocks any process may ask.
+        // outright. FreeBSD refuses CLOCK_TAI until a time daemon has told the kernel the TAI
+        // offset. So a reading is only demanded of the clocks the kernel always answers.
         #[cfg(target_os = "linux")]
-        let capability_gated = [clock::REALTIME_ALARM, clock::BOOTTIME_ALARM];
-        #[cfg(not(target_os = "linux"))]
-        let capability_gated: [libc::clockid_t; 0] = [];
+        let may_refuse = [clock::REALTIME_ALARM, clock::BOOTTIME_ALARM];
+        #[cfg(target_os = "freebsd")]
+        let may_refuse = [clock::TAI];
+        #[cfg(target_os = "macos")]
+        let may_refuse: [libc::clockid_t; 0] = [];
         for &(name, id) in clock::named() {
             assert_eq!(clock_named(name), Some(id));
             assert!(clock::family_of(id).is_some(), "{name}");
-            if !capability_gated.contains(&id) {
+            if !may_refuse.contains(&id) {
                 assert!(genuine_nanos(id).is_some(), "{name}");
             }
         }

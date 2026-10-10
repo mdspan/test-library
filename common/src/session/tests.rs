@@ -189,14 +189,17 @@ fn every_family_starts_on_its_own_default_timebase() {
         assert!(line.load().timebase_anchor > Nanos::ZERO);
     }
     assert_eq!(params.cpu_rate.load(Ordering::Relaxed), Rate::UNITY.0);
-    // Whole seconds, so exact; a container whose host never set the offset reports 0.
-    let tai = platform::genuine_nanos(clock::TAI).unwrap();
+    // Whole seconds, so exact; a container whose host never set the offset reports 0. A kernel
+    // that refuses the clock leaves 0 as well: FreeBSD before 15.0 has none, and 15.0 refuses it
+    // until a time daemon has told the kernel the offset.
     let realtime = platform::genuine_nanos(clock::REALTIME).unwrap();
     let offset = params.tai_offset.load(Ordering::Relaxed);
     assert!((0..=60).contains(&offset), "{offset}");
     assert_eq!(
         offset,
-        (tai.0 - realtime.0 + Nanos::SECOND / 2) / Nanos::SECOND
+        platform::genuine_nanos(clock::TAI)
+            .map_or(0, |tai| (tai.0 - realtime.0 + Nanos::SECOND / 2)
+                / Nanos::SECOND)
     );
     assert_eq!(params.epoch.load(Ordering::Relaxed), 0);
 }
@@ -786,6 +789,11 @@ fn every_clock_of_a_family_reads_the_family_value() {
 
 #[test]
 fn the_tai_clock_reads_the_realtime_line_plus_the_offset() {
+    if clock::family_of(clock::TAI).is_none() {
+        // FreeBSD grew a TAI clock at 15.0, so a kernel below that has none to read.
+        eprintln!("this kernel has no TAI clock, so that case went unexercised");
+        return;
+    }
     let tmp = tempfile::tempdir().unwrap();
     let mut setup = setup_in(tmp.path());
     setup.realtime_at = Some(Nanos(631_152_000 * Nanos::SECOND));
@@ -1222,7 +1230,11 @@ fn the_keeper_computation_survives_garbage_parameters() {
                 params.tai_offset.store(i64::MIN, Ordering::Relaxed);
                 params.cpu_rate.store(u64::MAX, Ordering::Relaxed);
                 assert!(clock_now(session.header(), clock::REALTIME).is_some());
-                assert!(clock_now(session.header(), clock::TAI).is_some());
+                // Where a family holds a TAI clock: FreeBSD before 15.0 has none.
+                assert_eq!(
+                    clock_now(session.header(), clock::TAI).is_some(),
+                    clock::family_of(clock::TAI).is_some()
+                );
                 assert!(clock_now(session.header(), clock::THREAD_CPUTIME).is_some());
             }
         }

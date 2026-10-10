@@ -602,6 +602,11 @@ fn the_tai_clock_keeps_its_offset_from_the_wall_clock() {
         eprintln!("this platform has no TAI clock, so that case went unexercised");
         return;
     }
+    if report.nanos("a.tai.genuine") < 0 {
+        // FreeBSD refuses CLOCK_TAI until a time daemon has told the kernel the TAI offset.
+        eprintln!("the kernel does not know the TAI offset, so that case went unexercised");
+        return;
+    }
 
     let genuine_offset =
         report.nanos("a.tai.genuine") - report.nanos("a.realtime.genuine") + HOUR / 3_600 / 2;
