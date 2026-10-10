@@ -162,6 +162,13 @@ jobs:
             echo "::endgroup::"
           done
 
+      # The FreeBSD build without the Go fallback interposition, which the step above never
+      # compiles since it turns every feature on.
+      - name: Clippy for FreeBSD without the vdso feature
+        run: >-
+          cargo clippy --locked -p agent --no-default-features --all-targets
+          --target x86_64-unknown-freebsd -- -D warnings
+
       - name: Clippy for macOS with every probed row present
         run: |
           for target in aarch64-apple-darwin x86_64-apple-darwin; do
