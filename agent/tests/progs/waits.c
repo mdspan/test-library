@@ -640,6 +640,15 @@ static void message_queues(void) {
     char received[8];
     mqd_t queue;
 
+#ifdef __FreeBSD__
+    /* The queues live in the mqueuefs module here, and a call into a module that is not loaded
+       ends the process with SIGSYS rather than failing. */
+    if (!feature_present("p1003_1b_mqueue")) {
+        skipped("mq_timedreceive");
+        skipped("mq_timedsend");
+        return;
+    }
+#endif
     memset(&attributes, 0, sizeof attributes);
     attributes.mq_maxmsg = 1;
     attributes.mq_msgsize = sizeof message;
