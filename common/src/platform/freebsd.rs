@@ -281,7 +281,8 @@ unsafe fn raw_syscall(number: libc::c_long, args: [libc::c_long; SYSCALL_ARGS]) 
     #[cfg(target_arch = "x86_64")]
     // Safety: the caller guarantees the call. The kernel takes the number in `rax` and the
     // arguments in these six registers, answers in `rax` with the carry flag set on a refusal, and
-    // clobbers `rdx`, `rcx` and `r11`. `setc` reads the flag before anything else can move it.
+    // clobbers `rdx`, `rcx` and `r11`. It zeroes `r8`, `r9` and `r10` on the way back, so those
+    // are spent too. `setc` reads the flag before anything else can move it.
     unsafe {
         std::arch::asm!(
             "syscall",
@@ -291,9 +292,9 @@ unsafe fn raw_syscall(number: libc::c_long, args: [libc::c_long; SYSCALL_ARGS]) 
             in("rdi") a0,
             in("rsi") a1,
             inlateout("rdx") a2 => _,
-            in("r10") a3,
-            in("r8") a4,
-            in("r9") a5,
+            inlateout("r10") a3 => _,
+            inlateout("r8") a4 => _,
+            inlateout("r9") a5 => _,
             lateout("rcx") _,
             lateout("r11") _,
             options(nostack),
