@@ -1,0 +1,31 @@
+/* TikZ figures: block-centered, and recolored on the dark themes, where the
+   transparent SVGs' black strokes would otherwise vanish into the background. */
+main img[src^="figures/"] {
+    display: block;
+    margin: 0 auto;
+    max-width: 100%;
+}
+
+.navy main img[src^="figures/"],
+.coal main img[src^="figures/"],
+.ayu main img[src^="figures/"] {
+    filter: invert(0.85) hue-rotate(180deg);
+}
+
+/* Glossary links: dotted underline so a term-definition link reads differently
+   from an ordinary link. */
+main a[href^="GLOSSARY"] {
+    text-decoration: underline dotted;
+    text-underline-offset: 2px;
+}
+
+/* Design-choice callouts are written as blockquotes. The colors come from the
+   theme's own quote variables, so every theme keeps them readable. */
+main blockquote {
+    border: none;
+    border-left: 4px solid var(--quote-border);
+    border-radius: 4px;
+    background: var(--quote-bg);
+    padding: 0.6em 1em;
+    margin: 1em 0;
+}

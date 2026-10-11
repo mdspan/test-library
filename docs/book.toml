@@ -1,0 +1,8 @@
+[book]
+title = "libtimewarp: User Guide"
+description = "Running programs on a clock you control."
+src = "src"
+language = "en"
+
+[output.html]
+additional-css = ["custom.css"]
