@@ -22,6 +22,7 @@ mod harness;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use common::platform::{clock, default_timebase, genuine_nanos};
@@ -165,9 +166,44 @@ const GENERATIONS: [[f64; 3]; 2] = [[2.0, 3.0, 4.0], [5.0, 6.0, 7.0]];
 /// Readers per case, enough to have several in flight at once on any machine that runs the tests.
 const READERS: usize = 6;
 
-/// How long the readers keep reading, and how long the controller keeps publishing inside that.
-const RUN_NS: i64 = 400 * 1_000_000;
+/// Reads each reader makes while the controller publishes. The controller publishes for at least
+/// `WRITE_NS`, then until every reader has made its reads, and gives up at `CAP_NS`.
+const MIN_READS: u64 = 1_000;
 const WRITE_NS: i64 = 200 * 1_000_000;
+const CAP_NS: i64 = 60 * SECOND;
+
+/// What the controller and its forked readers share: how many readers have made `MIN_READS`, and
+/// whether the controller has stopped publishing.
+#[repr(C)]
+struct Progress {
+    ready: AtomicUsize,
+    stopped: AtomicBool,
+}
+
+impl Progress {
+    /// A `Progress` in an anonymous shared mapping, so every child forked afterwards shares it.
+    fn shared() -> &'static Self {
+        // Safety: a fresh anonymous mapping overlaps nothing.
+        let at = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                size_of::<Self>(),
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_SHARED | libc::MAP_ANON,
+                -1,
+                0,
+            )
+        };
+        assert_ne!(
+            at,
+            libc::MAP_FAILED,
+            "mmap: {}",
+            std::io::Error::last_os_error()
+        );
+        // Safety: the mapping is never unmapped, and its zeroed bytes are a valid `Progress`.
+        unsafe { &*at.cast::<Self>() }
+    }
+}
 
 /// What a reader answers with, so a failure names itself without allocating or unwinding.
 mod verdict {
@@ -197,14 +233,15 @@ fn a_three_family_transaction_is_observed_whole() {
         GENERATIONS[1].map(rate),
     ];
 
-    let until = deadline(RUN_NS);
+    let progress = Progress::shared();
+    let cap = deadline(CAP_NS);
     let readers: Vec<_> = (0..READERS)
-        .map(|_| fork_child(|| watching(header, &whole, until)))
+        .map(|_| fork_child(|| watching(header, &whole, progress, cap)))
         .collect();
 
     let stop = deadline(WRITE_NS);
     let mut published = 0;
-    while now() < stop {
+    while (now() < stop || progress.ready.load(Ordering::Relaxed) < READERS) && now() < cap {
         let mut transaction = controller.begin().unwrap();
         for (family, &value) in [Family::Realtime, Family::Monotonic, Family::Boottime]
             .into_iter()
@@ -215,6 +252,7 @@ fn a_three_family_transaction_is_observed_whole() {
         transaction.commit().unwrap();
         published += 1;
     }
+    progress.stopped.store(true, Ordering::Relaxed);
     assert!(published > 10, "only {published} transactions got through");
 
     for pid in readers {
@@ -222,11 +260,11 @@ fn a_three_family_transaction_is_observed_whole() {
     }
 }
 
-/// Reads the three families' rates through the seqlock until `until`, and answers whether every
-/// copy it saw was one somebody published.
-fn watching(header: &Header, whole: &[[Rate; 3]; 3], until: Nanos) -> i32 {
+/// Reads the three families' rates through the seqlock until the controller stops publishing or
+/// `cap` passes, and answers whether every copy it saw was one somebody published.
+fn watching(header: &Header, whole: &[[Rate; 3]; 3], progress: &Progress, cap: Nanos) -> i32 {
     let mut reads: u64 = 0;
-    loop {
+    while !progress.stopped.load(Ordering::Relaxed) {
         let params = read(header, Params::load);
         let seen = [
             params.realtime.line.rate,
@@ -237,12 +275,15 @@ fn watching(header: &Header, whole: &[[Rate; 3]; 3], until: Nanos) -> i32 {
             return verdict::MIXED;
         }
         reads += 1;
-        if reads.is_multiple_of(32) && now() >= until {
+        if reads == MIN_READS {
+            progress.ready.fetch_add(1, Ordering::Relaxed);
+        }
+        if reads.is_multiple_of(32) && now() >= cap {
             break;
         }
     }
     // A reader that never got going would pass every check above without checking anything.
-    if reads < 1_000 {
+    if reads < MIN_READS {
         return verdict::TOO_FEW_READS;
     }
     verdict::WHOLE
