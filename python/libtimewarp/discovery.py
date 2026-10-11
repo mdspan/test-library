@@ -12,6 +12,7 @@ import os
 import re
 import subprocess
 import sys
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping, Optional
@@ -30,43 +31,37 @@ SESSION_DIR = "LIBTIMEWARP_SESSION_DIR"
 #: The variable naming the configuration file.
 CONFIG = "LIBTIMEWARP_CONFIG"
 
-#: The per-user configuration file, under ``$HOME``, and the system-wide one.
-USER_FILE = ".libtimewarprc"
-SYSTEM_FILE = "/etc/libtimewarprc"
+#: The user's configuration file, under ``$XDG_CONFIG_HOME``, and the system-wide one.
+USER_FILE = "libtimewarp/config.toml"
+SYSTEM_FILE = "/etc/libtimewarp/config.toml"
 
 
-def config_file_value(name: str, env: Mapping[str, str] = os.environ) -> Optional[str]:
-    """The value the library's configuration file gives ``name``, or ``None``.
+def config_file_session_dir(env: Mapping[str, str] = os.environ) -> Optional[str]:
+    """The ``session_dir`` of the library's configuration file, or ``None``.
 
-    The file is found the way the library finds it, and a line that is not ``NAME=VALUE`` makes the
-    whole file set nothing, as it does for the library.
+    The file is found the way the library finds it. A file that is not TOML, or whose
+    ``session_dir`` is not a string, sets nothing here; the library refuses the whole file then.
     """
     named = env.get(CONFIG)
     if named:
         candidates = [Path(named)]
     else:
-        home = env.get("HOME")
-        candidates = ([Path(home) / USER_FILE] if home else []) + [Path(SYSTEM_FILE)]
+        base = env.get("XDG_CONFIG_HOME") or (
+            os.path.join(env["HOME"], ".config") if env.get("HOME") else None
+        )
+        candidates = ([Path(base) / USER_FILE] if base else []) + [Path(SYSTEM_FILE)]
     for path in candidates:
         try:
-            text = path.read_bytes()
+            with open(path, "rb") as file:
+                document = tomllib.load(file)
         except FileNotFoundError:
             if named:
                 return None
             continue
-        except OSError:
+        except (OSError, tomllib.TOMLDecodeError):
             return None
-        found = None
-        for line in text.split(b"\n"):
-            line = line.strip()
-            if not line or line.startswith(b"#"):
-                continue
-            key, equals, value = line.partition(b"=")
-            if not equals:
-                return None
-            if key.strip() == name.encode():
-                found = os.fsdecode(value.strip())
-        return found
+        found = document.get("session_dir")
+        return found if isinstance(found, str) else None
     return None
 
 
@@ -76,7 +71,7 @@ def session_dir(env: Mapping[str, str] = os.environ, euid: Optional[int] = None)
     The same three rules the library follows, so both sides compute the same path. The session
     directory variable is taken from the configuration file when the environment does not set it.
     """
-    named = env[SESSION_DIR] if SESSION_DIR in env else config_file_value(SESSION_DIR, env)
+    named = env[SESSION_DIR] if SESSION_DIR in env else config_file_session_dir(env)
     if named:
         return Path(named) / "libtimewarp"
     runtime = env.get("XDG_RUNTIME_DIR")

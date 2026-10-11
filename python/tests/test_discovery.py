@@ -40,32 +40,41 @@ class SessionDirectory(unittest.TestCase):
 
 
 class ConfigurationFile(unittest.TestCase):
-    """The session directory variable from the file the library reads underneath the environment."""
+    """The session directory from the file the library reads underneath the environment."""
 
     def setUp(self):
         self.dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.dir.cleanup)
-        self.rc = Path(self.dir.name) / "rc"
+        self.config = Path(self.dir.name) / "timewarp.toml"
 
     def test_the_named_file_places_the_directory(self):
-        self.rc.write_text("# sessions\nLIBTIMEWARP_SESSION_DIR = /from/file\n")
-        env = {"LIBTIMEWARP_CONFIG": str(self.rc), "XDG_RUNTIME_DIR": "/xdg"}
+        self.config.write_text('# sessions\nsession_dir = "/from/file"\n')
+        env = {"LIBTIMEWARP_CONFIG": str(self.config), "XDG_RUNTIME_DIR": "/xdg"}
         self.assertEqual(str(discovery.session_dir(env)), "/from/file/libtimewarp")
 
-    def test_the_user_file_is_read_from_home(self):
-        (Path(self.dir.name) / ".libtimewarprc").write_text("LIBTIMEWARP_SESSION_DIR=/home/file\n")
+    def test_the_user_file_is_under_the_config_home(self):
+        path = Path(self.dir.name) / "xdg" / "libtimewarp" / "config.toml"
+        path.parent.mkdir(parents=True)
+        path.write_text("session_dir = '/xdg/file'\n")
+        env = {"XDG_CONFIG_HOME": str(Path(self.dir.name) / "xdg")}
+        self.assertEqual(str(discovery.session_dir(env)), "/xdg/file/libtimewarp")
+
+    def test_without_a_config_home_the_user_file_is_under_home(self):
+        path = Path(self.dir.name) / ".config" / "libtimewarp" / "config.toml"
+        path.parent.mkdir(parents=True)
+        path.write_text("session_dir = '/home/file'\n")
         self.assertEqual(
             str(discovery.session_dir({"HOME": self.dir.name})), "/home/file/libtimewarp"
         )
 
     def test_the_environment_wins_even_when_empty(self):
-        self.rc.write_text("LIBTIMEWARP_SESSION_DIR=/from/file\n")
-        env = {"LIBTIMEWARP_CONFIG": str(self.rc), "LIBTIMEWARP_SESSION_DIR": ""}
+        self.config.write_text('session_dir = "/from/file"\n')
+        env = {"LIBTIMEWARP_CONFIG": str(self.config), "LIBTIMEWARP_SESSION_DIR": ""}
         self.assertEqual(str(discovery.session_dir(env, euid=5)), "/tmp/libtimewarp-5")
 
-    def test_a_file_the_library_would_refuse_sets_nothing(self):
-        self.rc.write_text("LIBTIMEWARP_SESSION_DIR=/from/file\nnonsense\n")
-        env = {"LIBTIMEWARP_CONFIG": str(self.rc)}
+    def test_a_file_that_is_not_toml_sets_nothing(self):
+        self.config.write_text('session_dir = "/from/file"\nnonsense\n')
+        env = {"LIBTIMEWARP_CONFIG": str(self.config)}
         self.assertEqual(str(discovery.session_dir(env, euid=5)), "/tmp/libtimewarp-5")
 
 

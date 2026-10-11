@@ -16,6 +16,7 @@ vdso = []
 [dependencies]
 cfg-if = { workspace = true }
 libc = { workspace = true }
+toml = { version = "1.1.8", default-features = false, features = ["parse", "std"] }
 
 [dev-dependencies]
 tempfile = "3.24.0"

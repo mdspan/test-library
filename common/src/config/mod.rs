@@ -5,7 +5,7 @@ mod timestamp;
 
 use std::ffi::OsString;
 
-pub use file::{ConfigFile, ENV_CONFIG, SYSTEM_FILE, Settings, USER_FILE};
+pub use file::{ConfigFile, ENV_CONFIG, FileError, FileReason, SYSTEM_FILE, Settings, USER_FILE};
 pub use timestamp::parse_timestamp;
 
 use crate::time::{Family, Nanos, Rate};
@@ -143,33 +143,6 @@ pub const ENV_SKIP_CMDS: &str = "LIBTIMEWARP_SKIP_CMDS";
 /// way as [`ENV_SKIP_CMDS`], and setting both is a bad value.
 pub const ENV_ONLY_CMDS: &str = "LIBTIMEWARP_ONLY_CMDS";
 
-/// Every variable a user sets, which is every variable the configuration file may hold.
-pub const SETTINGS: &[&str] = &[
-    ENV_SESSION_DIR,
-    ENV_KEEPER,
-    ENV_HOOK,
-    ENV_SHIFT,
-    ENV_TIME,
-    ENV_RATE,
-    ENV_CPU_RATE,
-    ENV_REALTIME_SHIFT,
-    ENV_MONOTONIC_SHIFT,
-    ENV_BOOTTIME_SHIFT,
-    ENV_REALTIME_RATE,
-    ENV_MONOTONIC_RATE,
-    ENV_BOOTTIME_RATE,
-    ENV_REALTIME_TIMEBASE,
-    ENV_MONOTONIC_TIMEBASE,
-    ENV_BOOTTIME_TIMEBASE,
-    ENV_LOG,
-    ENV_LOG_FD,
-    ENV_LOG_LEVEL,
-    ENV_EMULATE_VDSO,
-    ENV_FAIL_CLOSED,
-    ENV_SKIP_CMDS,
-    ENV_ONLY_CMDS,
-];
-
 /// Looks a variable up. Taken as an argument so the rules that read the environment can be tested
 /// without mutating the process's own.
 pub trait EnvLookup {
@@ -235,10 +208,6 @@ pub enum Reason {
     UnknownKeeper,
     /// A hook library the library could not put in front of the keeper.
     Hook(crate::hook::HookError),
-    /// A configuration file that exists, or is named, and cannot be read.
-    Unreadable,
-    /// A configuration file line, by number from 1, that is not a setting the file may hold.
-    Line(u32),
 }
 
 impl std::fmt::Display for Reason {
@@ -255,8 +224,6 @@ impl std::fmt::Display for Reason {
             Self::BelowZero => f.write_str("would put a nondecreasing family below zero"),
             Self::UnknownKeeper => f.write_str("not a timekeeper this library has"),
             Self::Hook(why) => write!(f, "{why}"),
-            Self::Unreadable => f.write_str("cannot be read"),
-            Self::Line(number) => write!(f, "line {number} is not a setting the file may hold"),
         }
     }
 }
@@ -267,10 +234,10 @@ impl From<ParseError> for Reason {
     }
 }
 
-/// A variable whose value the library could not use, or a configuration file it could not read.
+/// A variable whose value the library could not use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BadValue {
-    /// The variable's name, or how the configuration file is shown.
+    /// The variable's name.
     pub variable: &'static str,
     /// What went wrong with its value.
     pub reason: Reason,
