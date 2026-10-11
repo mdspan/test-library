@@ -51,7 +51,7 @@ mod vdso;
 use std::fmt::Display;
 use std::path::{Path, PathBuf};
 
-use common::config::{self, BadValue, ENV_SHARED_FILE, EnvLookup, ProcessEnv};
+use common::config::{self, BadValue, ENV_SHARED_FILE, EnvLookup, ProcessEnv, Settings};
 use common::log::{self, Level};
 use common::platform::genuine_clock_gettime;
 use common::session::layout::{Fault, FaultCode, Header};
@@ -102,17 +102,28 @@ fn constructor() {
 }
 
 fn attach_or_create() {
-    // Before anything that can fail, and read afresh at every exec: the logging variables say
+    // The configuration file holds the logging and exclusion variables as well as the session's,
+    // so nothing can be decided before it is read. A file that cannot be read leaves the
+    // environment alone to say where the failure is logged and whether the process exits over it.
+    let settings = match Settings::load(ProcessEnv) {
+        Ok(settings) => settings,
+        Err(bad) => {
+            log::init(&ProcessEnv);
+            return report_failure(&ProcessEnv, &bad);
+        }
+    };
+
+    // Before anything else that can fail, and read afresh at every exec: the logging variables say
     // where this process writes, not how the session behaves, so a process joining somebody else's
     // session reads them too.
-    log::init(&ProcessEnv);
+    log::init(&settings);
 
     // The decision is per process, made before the session is touched at all, attaching or
     // creating alike, so an excluded command never attaches, never creates, and never faults.
-    match config::excluded(&ProcessEnv, own_command().as_deref()) {
+    match config::excluded(&settings, own_command().as_deref()) {
         Ok(true) => return,
         Ok(false) => {}
-        Err(bad) => return report_failure(&bad),
+        Err(bad) => return report_failure(&settings, &bad),
     }
 
     if let Some(inherited) = ProcessEnv.nonempty(ENV_SHARED_FILE) {
@@ -122,20 +133,20 @@ fn attach_or_create() {
             Ok(session) => join(session),
             // The session the parent named is gone or unusable, so there is none to record the
             // failure in either.
-            Err(reason) => report_failure(&reason),
+            Err(reason) => report_failure(&settings, &reason),
         }
         return;
     }
 
-    let dir = naming::session_dir_from_env();
-    let created = Setup::from_env(&ProcessEnv, dir.clone())
+    let dir = naming::session_dir_from_env(&settings);
+    let created = Setup::from_env(&settings, dir.clone())
         .map_err(SessionError::from)
         .and_then(|setup| session::create(&setup));
     match created {
         Ok(session) => publish(session),
-        Err(SessionError::BadValue(bad)) => fall_back(dir, &bad),
+        Err(SessionError::BadValue(bad)) => fall_back(&settings, dir, &bad),
         // An unusable directory leaves no place for a session file, so nothing can be recorded.
-        Err(reason) => report_failure(&reason),
+        Err(reason) => report_failure(&settings, &reason),
     }
 }
 
@@ -181,11 +192,11 @@ fn join(mut session: session::Session) {
 /// cause, and it runs genuine rather than half-faked: the null keeper, with no hook. The session is
 /// published all the same, carrying the fault, so children attach quietly and a controller can read
 /// what went wrong.
-fn fall_back(dir: PathBuf, bad: &BadValue) {
+fn fall_back(env: &impl EnvLookup, dir: PathBuf, bad: &BadValue) {
     // Nothing is on disk yet, so a creator that leaves here leaves the directory clean.
-    report_failure(bad);
+    report_failure(env, bad);
 
-    let setup = Setup::fallback(&ProcessEnv, dir);
+    let setup = Setup::fallback(env, dir);
     match session::create_faulted(&setup, Fault::new(FaultCode::BadValue, std::process::id())) {
         Ok(session) => publish(session),
         // No place for a file, so the bad value stays in the log alone.
@@ -210,11 +221,10 @@ fn report_failure_in(header: &Header, reason: &dyn Display) {
 /// Reports a failure that has no session to be recorded in: the `error` line, and the exit when
 /// this process fails closed.
 ///
-/// With no header to follow, the variable in the environment decides on its own whether the
-/// process runs on, and a caller this returns to still has whatever it can publish to publish.
-fn report_failure(reason: &dyn Display) {
+/// With no header to follow, the variable in `env` decides on its own whether the process runs on, and a caller this returns to still has whatever it can publish to publish.
+fn report_failure(env: &impl EnvLookup, reason: &dyn Display) {
     common::log!(Level::Error, "{reason}");
-    if session::fails_closed(None, &ProcessEnv) {
+    if session::fails_closed(None, env) {
         fail_closed(reason);
     }
 }

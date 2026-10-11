@@ -27,13 +27,56 @@ SESSION_SUFFIX = ".session"
 #: The variable naming the parent of the session directory.
 SESSION_DIR = "LIBTIMEWARP_SESSION_DIR"
 
+#: The variable naming the configuration file.
+CONFIG = "LIBTIMEWARP_CONFIG"
+
+#: The per-user configuration file, under ``$HOME``, and the system-wide one.
+USER_FILE = ".libtimewarprc"
+SYSTEM_FILE = "/etc/libtimewarprc"
+
+
+def config_file_value(name: str, env: Mapping[str, str] = os.environ) -> Optional[str]:
+    """The value the library's configuration file gives ``name``, or ``None``.
+
+    The file is found the way the library finds it, and a line that is not ``NAME=VALUE`` makes the
+    whole file set nothing, as it does for the library.
+    """
+    named = env.get(CONFIG)
+    if named:
+        candidates = [Path(named)]
+    else:
+        home = env.get("HOME")
+        candidates = ([Path(home) / USER_FILE] if home else []) + [Path(SYSTEM_FILE)]
+    for path in candidates:
+        try:
+            text = path.read_bytes()
+        except FileNotFoundError:
+            if named:
+                return None
+            continue
+        except OSError:
+            return None
+        found = None
+        for line in text.split(b"\n"):
+            line = line.strip()
+            if not line or line.startswith(b"#"):
+                continue
+            key, equals, value = line.partition(b"=")
+            if not equals:
+                return None
+            if key.strip() == name.encode():
+                found = os.fsdecode(value.strip())
+        return found
+    return None
+
 
 def session_dir(env: Mapping[str, str] = os.environ, euid: Optional[int] = None) -> Path:
     """The directory holding session files: the first rule that applies.
 
-    The same three rules the library follows, so both sides compute the same path.
+    The same three rules the library follows, so both sides compute the same path. The session
+    directory variable is taken from the configuration file when the environment does not set it.
     """
-    named = env.get(SESSION_DIR)
+    named = env[SESSION_DIR] if SESSION_DIR in env else config_file_value(SESSION_DIR, env)
     if named:
         return Path(named) / "libtimewarp"
     runtime = env.get("XDG_RUNTIME_DIR")

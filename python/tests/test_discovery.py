@@ -7,7 +7,9 @@ where one can be created.
 import os
 import subprocess
 import sys
+import tempfile
 import unittest
+from pathlib import Path
 
 from libtimewarp import discovery
 
@@ -35,6 +37,36 @@ class SessionDirectory(unittest.TestCase):
             str(discovery.session_dir({"TMPDIR": "/scratch"}, euid=5)),
             "/scratch/libtimewarp-5",
         )
+
+
+class ConfigurationFile(unittest.TestCase):
+    """The session directory variable from the file the library reads underneath the environment."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.rc = Path(self.dir.name) / "rc"
+
+    def test_the_named_file_places_the_directory(self):
+        self.rc.write_text("# sessions\nLIBTIMEWARP_SESSION_DIR = /from/file\n")
+        env = {"LIBTIMEWARP_CONFIG": str(self.rc), "XDG_RUNTIME_DIR": "/xdg"}
+        self.assertEqual(str(discovery.session_dir(env)), "/from/file/libtimewarp")
+
+    def test_the_user_file_is_read_from_home(self):
+        (Path(self.dir.name) / ".libtimewarprc").write_text("LIBTIMEWARP_SESSION_DIR=/home/file\n")
+        self.assertEqual(
+            str(discovery.session_dir({"HOME": self.dir.name})), "/home/file/libtimewarp"
+        )
+
+    def test_the_environment_wins_even_when_empty(self):
+        self.rc.write_text("LIBTIMEWARP_SESSION_DIR=/from/file\n")
+        env = {"LIBTIMEWARP_CONFIG": str(self.rc), "LIBTIMEWARP_SESSION_DIR": ""}
+        self.assertEqual(str(discovery.session_dir(env, euid=5)), "/tmp/libtimewarp-5")
+
+    def test_a_file_the_library_would_refuse_sets_nothing(self):
+        self.rc.write_text("LIBTIMEWARP_SESSION_DIR=/from/file\nnonsense\n")
+        env = {"LIBTIMEWARP_CONFIG": str(self.rc)}
+        self.assertEqual(str(discovery.session_dir(env, euid=5)), "/tmp/libtimewarp-5")
 
 
 class ProcessEnvironment(unittest.TestCase):

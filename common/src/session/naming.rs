@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::config::{ENV_SESSION_DIR, ENV_XDG_RUNTIME_DIR, EnvLookup, ProcessEnv};
+use crate::config::{ENV_SESSION_DIR, ENV_XDG_RUNTIME_DIR, EnvLookup};
 
 /// What a finished session file is called.
 pub const SESSION_SUFFIX: &str = ".session";
@@ -25,12 +25,12 @@ pub fn session_dir(env: &impl EnvLookup, euid: u32, tmp: &Path) -> PathBuf {
     tmp.join(format!("libtimewarp-{euid}"))
 }
 
-/// The directory this process would use.
+/// The directory this process would use, given what `env` says.
 #[must_use]
-pub fn session_dir_from_env() -> PathBuf {
+pub fn session_dir_from_env(env: &impl EnvLookup) -> PathBuf {
     // Safety: `geteuid` reads process state and cannot fail.
     let euid = unsafe { libc::geteuid() };
-    session_dir(&ProcessEnv, euid, &std::env::temp_dir())
+    session_dir(env, euid, &std::env::temp_dir())
 }
 
 /// The session's name: `pid-<pid>-<uuid>`, which the user does not get to pick. The pid alone
