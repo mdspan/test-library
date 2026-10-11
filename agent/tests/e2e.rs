@@ -580,15 +580,17 @@ fn the_cpu_family_scales_each_clock_on_its_own() {
         .unwrap();
     assert!(group.contains(&"process_cpu".to_owned()), "{group:?}");
     for clock in group {
+        let before = report.nanos(&format!("a.{clock}.before"));
         let faked = report.nanos(&format!("a.{clock}"));
-        let genuine = report.nanos(&format!("a.{clock}.genuine"));
-        assert!(genuine > 10_000_000, "{clock} consumed only {genuine} ns");
-        // The faked reading is taken first, so it trails eight times the genuine one by whatever
-        // the process consumed between the two calls.
-        let expected = 8 * genuine;
+        let after = report.nanos(&format!("a.{clock}.genuine"));
+        assert!(before > 10_000_000, "{clock} consumed only {before} ns");
+        // Eight times a genuine reading taken between the two around it. The span can be wide:
+        // FreeBSD splits `CLOCK_VIRTUAL` and `CLOCK_PROF` out of the precise total by statclock
+        // ticks and keeps each slice from falling, so one tick between two readings can step them
+        // by a share of everything consumed so far.
         assert!(
-            (faked - expected).abs() < expected / 100,
-            "{clock} read {faked} against a genuine {genuine}"
+            (8 * before..=8 * after).contains(&faked),
+            "{clock} read {faked}, outside eight times {before}..={after}"
         );
     }
 }

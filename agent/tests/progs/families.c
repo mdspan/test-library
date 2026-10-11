@@ -96,10 +96,15 @@ static void burn(long long ns) {
     }
 }
 
+/* Each faked reading sits between two genuine ones, so a case can bound it by them. */
 static void round_of(const char *tag) {
     for (size_t i = 0; i < sizeof CLOCKS / sizeof CLOCKS[0]; i++) {
-        printf("%s.%s=%lld\n", tag, CLOCKS[i].name, faked(CLOCKS[i].id));
-        printf("%s.%s.genuine=%lld\n", tag, CLOCKS[i].name, genuine(CLOCKS[i].id));
+        long long before = genuine(CLOCKS[i].id);
+        long long reading = faked(CLOCKS[i].id);
+        long long after = genuine(CLOCKS[i].id);
+        printf("%s.%s.before=%lld\n", tag, CLOCKS[i].name, before);
+        printf("%s.%s=%lld\n", tag, CLOCKS[i].name, reading);
+        printf("%s.%s.genuine=%lld\n", tag, CLOCKS[i].name, after);
     }
 }
 
