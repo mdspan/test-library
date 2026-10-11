@@ -384,6 +384,13 @@ jobs:
               sha256 -c af29791be32fd2f926865a983edc97f452078e6d1b4a6037d12ca2f8e67ffa3d \
                 /tmp/rustup-init
               chmod +x /tmp/rustup-init
+              # rustup and cargo link an OpenSSL that, as the program starts, dlopen()s the
+              # program's own file. rtld refuses a PIE there and frees the path it built twice;
+              # where ASLR puts rtld's heap decides whether the second free faults, which on 13.5
+              # is about one start in 170, with nothing on stderr. Without ASLR the layout is
+              # fixed and the second free is ignored. Children such as rustc keep ASLR.
+              # Marked here, the note is in the installed rustup and so in every proxy.
+              elfctl -e +noaslr /tmp/rustup-init
               /tmp/rustup-init -y --no-modify-path --default-toolchain none
               "$HOME/.cargo/bin/rustup" set auto-self-update disable
             fi
@@ -405,6 +412,8 @@ jobs:
             if [ "${{ matrix.arch }}" = x86_64 ]; then
               . "$HOME/.cargo/env"
               rustup toolchain install
+              # The toolchain's cargo carries the same OpenSSL as rustup.
+              elfctl -e +noaslr "$(rustup which cargo)"
             fi
             # The pinned Go, named for the harness the way CC names the C compiler.
             export GO=/usr/local/go/bin/go
