@@ -17,9 +17,12 @@ use crate::time::{Nanos, Rate};
 /// too, so two of these cases running at once would ask about each other's session. Taken for the
 /// length of every case here, poison and all: a case that already failed should not turn the next
 /// one into a second failure.
+///
+/// Creating or attaching to a session names the probe's file too, so a case elsewhere in the crate
+/// that does either takes this around the call.
 static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
 
-fn one_at_a_time() -> MutexGuard<'static, ()> {
+pub(crate) fn one_at_a_time() -> MutexGuard<'static, ()> {
     ONE_AT_A_TIME.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
