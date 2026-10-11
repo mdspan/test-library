@@ -335,6 +335,10 @@ fn pairing(program: &Path, dir: &Path) -> (Reaped, mpsc::Receiver<[i64; 2]>) {
         .env(harness::PRELOAD, harness::library())
         .env("LIBTIMEWARP_SESSION_DIR", dir)
         .stdout(Stdio::piped());
+    // Forwarded as `Run` forwards it, so a profiling row profiles this target too.
+    if let Some(on) = std::env::var_os("TIMEWARP_TEST_GO_PROFILE") {
+        command.env("TIMEWARP_TEST_GO_PROFILE", on);
+    }
     let mut child = command.spawn().unwrap();
     let printing = BufReader::new(child.stdout.take().unwrap());
     let (sender, printed) = mpsc::channel();
