@@ -8,10 +8,10 @@
    Linked against the library rather than preloading it, so the genuine clock comes from the
    library's own symbol and the measurement is not the one under test.
 
-   argv[1] is the fake duration, in milliseconds, every timer is armed for. `alarm` takes whole
-   seconds and so always asks for one; the CPU timers ask for a fixed amount of consumption. argv[2]
-   is `cpu` to run the timer that has to burn that consumption to fire, and anything else to leave
-   it out, because only the runs that measure it are worth the CPU.
+   argv[1] is the fake duration, in milliseconds, every timer that fires is armed for. `alarm` takes
+   whole seconds and so always asks for one; the CPU timers ask for a fixed amount of consumption.
+   argv[2] is `cpu` to run the timer that has to burn that consumption to fire, and anything else to
+   leave it out, because only the runs that measure it are worth the CPU.
 
    Each timer reports three facts: `<key>.fake`, the nanoseconds of faketime it was armed for,
    `<key>.genuine`, the nanoseconds of genuine time it took to fire, and `<key>.rc`, what the arm
@@ -40,8 +40,13 @@ extern int libtimewarp_genuine_clock_gettime(clockid_t clock, struct timespec *t
 
 #define NS_PER_S 1000000000LL
 
-/* The fake duration every timer is armed for, from argv[1]. */
+/* The fake duration every timer that fires is armed for, from argv[1]. */
 static long long base_ns;
+
+/* The fake duration a timer is armed for when it is only queried, and re-armed before it can fire.
+   Long, so that at any rate a case sets the timer is still far from running out when a slow
+   machine gets to the query. */
+#define QUERY_NS (10 * NS_PER_S)
 
 /* The fake consumption the CPU timers are armed for. Fixed, because the Cpu family has a rate of
    its own and a run has to burn every nanosecond of it. */
@@ -167,21 +172,20 @@ static void wait_for(int signo) {
 static void interval_timers(void) {
     struct itimerval new_value, old_value, current;
 
-    /* Armed for twice the base and then re-armed for the base: the old value the second arm
-       reports is the first arm's remaining, in the program's own units. */
+    /* Armed to be queried and then re-armed for the base: the query and the old value the second
+       arm reports are both the first arm's remaining, in the program's own units. */
     memset(&new_value, 0, sizeof new_value);
-    new_value.it_value = val_of(2 * base_ns);
+    new_value.it_value = val_of(QUERY_NS);
     setitimer(ITIMER_REAL, &new_value, NULL);
+    memset(&current, 0, sizeof current);
+    getitimer(ITIMER_REAL, &current);
 
     memset(&old_value, 0, sizeof old_value);
     new_value.it_value = val_of(base_ns);
     begin();
     setitimer(ITIMER_REAL, &new_value, &old_value);
-    queried("setitimer_old", 2 * base_ns, micros(&old_value.it_value));
-
-    memset(&current, 0, sizeof current);
-    getitimer(ITIMER_REAL, &current);
-    queried("getitimer_real", base_ns, micros(&current.it_value));
+    queried("getitimer_real", QUERY_NS, micros(&current.it_value));
+    queried("setitimer_old", QUERY_NS, micros(&old_value.it_value));
 
     wait_for(SIGALRM);
     done("setitimer_real", base_ns, 0);
@@ -275,12 +279,16 @@ static void posix_timers(void) {
     }
 
     memset(&new_value, 0, sizeof new_value);
-    new_value.it_value = spec_of(base_ns);
-    begin();
+    new_value.it_value = spec_of(QUERY_NS);
     timer_settime(steady, 0, &new_value, NULL);
     memset(&current, 0, sizeof current);
     timer_gettime(steady, &current);
-    queried("timer_gettime", base_ns, nanos(&current.it_value));
+    queried("timer_gettime", QUERY_NS, nanos(&current.it_value));
+
+    memset(&new_value, 0, sizeof new_value);
+    new_value.it_value = spec_of(base_ns);
+    begin();
+    timer_settime(steady, 0, &new_value, NULL);
     wait_for(SIGUSR1);
     done("timer_settime", base_ns, 0);
 
@@ -336,12 +344,16 @@ static void timerfds(void) {
     }
 
     memset(&new_value, 0, sizeof new_value);
-    new_value.it_value = spec_of(base_ns);
-    begin();
+    new_value.it_value = spec_of(QUERY_NS);
     timerfd_settime(steady, 0, &new_value, NULL);
     memset(&current, 0, sizeof current);
     timerfd_gettime(steady, &current);
-    queried("timerfd_gettime", base_ns, nanos(&current.it_value));
+    queried("timerfd_gettime", QUERY_NS, nanos(&current.it_value));
+
+    memset(&new_value, 0, sizeof new_value);
+    new_value.it_value = spec_of(base_ns);
+    begin();
+    timerfd_settime(steady, 0, &new_value, NULL);
     done("timerfd_relative", base_ns, expired(steady));
 
     memset(&new_value, 0, sizeof new_value);
