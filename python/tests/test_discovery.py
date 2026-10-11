@@ -7,7 +7,6 @@ where one can be created.
 import os
 import subprocess
 import sys
-import time
 import unittest
 
 from libtimewarp import discovery
@@ -39,34 +38,43 @@ class SessionDirectory(unittest.TestCase):
 
 
 class ProcessEnvironment(unittest.TestCase):
-    def test_a_process_of_the_tree_carries_the_path(self):
-        env = dict(os.environ, LIBTIMEWARP__SHARED_FILE="/tmp/libtimewarp/pid-1-x.session")
-        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], env=env)
-        try:
-            # The environment is the one the process started with, so it is there at once; a moment
-            # is allowed for the process to exist at all.
-            for _ in range(100):
-                try:
-                    found = discovery.shared_file_of(child.pid)
-                    break
-                except LookupError:
-                    time.sleep(0.01)
-            else:
-                self.fail("the child never showed its environment")
-            self.assertEqual(str(found), "/tmp/libtimewarp/pid-1-x.session")
-        finally:
+    def started(self, env):
+        """A child that has reported in from its own code, so it is past exec and its environment
+        is the one it was given."""
+        child = subprocess.Popen(
+            [sys.executable, "-c", "import time; print('up', flush=True); time.sleep(30)"],
+            env=env,
+            stdout=subprocess.PIPE,
+        )
+
+        def stop():
             child.kill()
             child.wait()
+            child.stdout.close()
+
+        self.addCleanup(stop)
+        if child.stdout.readline() != b"up\n":
+            self.fail(f"the child exited with status {child.wait()} before it reported in")
+        return child
+
+    def test_a_process_of_the_tree_carries_the_path(self):
+        child = self.started(
+            dict(os.environ, LIBTIMEWARP__SHARED_FILE="/tmp/libtimewarp/pid-1-x.session")
+        )
+        try:
+            found = discovery.shared_file_of(child.pid)
+        except LookupError as why:
+            status = child.poll()
+            state = "still running" if status is None else f"gone, with status {status}"
+            self.fail(f"{why}; the child is {state}")
+        self.assertEqual(str(found), "/tmp/libtimewarp/pid-1-x.session")
 
     def test_a_process_in_no_session_of_ours_says_so(self):
-        env = {key: value for key, value in os.environ.items() if key != "LIBTIMEWARP__SHARED_FILE"}
-        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], env=env)
-        try:
-            with self.assertRaises(LookupError):
-                discovery.shared_file_of(child.pid)
-        finally:
-            child.kill()
-            child.wait()
+        child = self.started(
+            {key: value for key, value in os.environ.items() if key != "LIBTIMEWARP__SHARED_FILE"}
+        )
+        with self.assertRaises(LookupError):
+            discovery.shared_file_of(child.pid)
 
     def test_a_process_that_is_not_there_says_so(self):
         with self.assertRaises(LookupError):
