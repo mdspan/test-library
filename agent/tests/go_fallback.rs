@@ -27,10 +27,11 @@
 
 mod harness;
 
-use std::io::Read;
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::process::{Child, Command, Stdio};
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 use common::platform::{clock, genuine_nanos};
 use common::session::layout::Keeper;
@@ -45,6 +46,14 @@ const DAY: i64 = 24 * HOUR;
 /// How far apart two readings taken microseconds apart may be before they are not the same clock.
 /// Wide enough for a machine under load, and far below any faked value a case sets.
 const TOGETHER_NS: i64 = 50 * 1_000_000;
+
+/// How long the live-change case waits on `go_pair` for the readings on each side of the change.
+/// The first comes only once the runtime has started and the library has rewritten it, which an
+/// emulated machine under load takes seconds over.
+const PATIENCE: Duration = Duration::from_secs(60);
+
+/// How many pairs the live-change case reads on each side of the change.
+const SIDE: usize = 20;
 
 /// The instant `arena_clock`'s `init` writes into the arena: 2020-01-01T00:00:00Z.
 const ARENA_NS: i64 = 1_577_836_800_000_000_000;
@@ -249,65 +258,108 @@ fn a_live_change_reaches_a_go_reader_and_a_libc_reader_together() {
     // clock past it in one step, and the readings after carry that step.
     let deadline = harness::genuine_now() + DAY;
 
-    let mut child = Command::new(&program)
-        // More pairs than the case has time for, two hundred microseconds of faketime apart.
-        .arg("1000000")
-        .arg("200")
-        .env_clear()
-        .env("PATH", "/usr/bin:/bin")
-        .env(harness::PRELOAD, harness::library())
-        .env("LIBTIMEWARP_SESSION_DIR", dir.path())
-        .stdout(Stdio::piped())
-        .spawn()
-        .unwrap();
-    // Drained as it is printed, so the program keeps reading the clock instead of blocking on a
-    // full pipe while the transaction below lands.
-    let mut printing = child.stdout.take().unwrap();
-    let drained = std::thread::spawn(move || {
-        let mut text = String::new();
-        printing.read_to_string(&mut text).unwrap();
-        text
-    });
+    let (child, printed) = pairing(&program, dir.path());
 
+    // The change lands once the program has been reading a while, so the stream has readings from
+    // before it.
+    let until = Instant::now() + PATIENCE;
+    let mut pairs = Vec::new();
+    while pairs.len() < SIDE {
+        let Some(pair) = next_pair(&printed, until) else {
+            panic!(
+                "the program printed {} readings within {PATIENCE:?}",
+                pairs.len()
+            );
+        };
+        pairs.push(pair);
+    }
+    assert!(
+        pairs.iter().flatten().all(|&nanos| nanos < deadline),
+        "a reading taken before the change carried it",
+    );
     let controller = Controller::attach(&wait_for_session(dir.path())).unwrap();
-    std::thread::sleep(Duration::from_millis(30));
     let mut transaction = controller.begin().unwrap();
     transaction
         .set_time(Family::Realtime, Nanos(deadline + SECOND))
         .unwrap();
     transaction.commit().unwrap();
 
-    // Long enough after the change for many readings to carry it before the program is stopped.
-    std::thread::sleep(Duration::from_millis(500));
-    drop(child.kill());
-    drop(child.wait());
-    let printed = drained.join().unwrap();
+    let until = Instant::now() + PATIENCE;
+    let mut carrying = 0;
+    while carrying < SIDE {
+        let Some(pair) = next_pair(&printed, until) else {
+            panic!(
+                "only {carrying} pairs carried the change within {PATIENCE:?}, the last {:?}",
+                pairs.last(),
+            );
+        };
+        carrying += usize::from(pair.iter().all(|&nanos| nanos >= deadline));
+        pairs.push(pair);
+    }
+    drop(child);
 
-    let pairs = readings(&printed);
+    // Laid out in the order they were taken, each pair's Go reading before its libc one, the
+    // readings carry the change from the first that does onward.
+    let readings: Vec<i64> = pairs.iter().flatten().copied().collect();
+    let landed = readings
+        .iter()
+        .position(|&nanos| nanos >= deadline)
+        .unwrap();
     assert!(
-        pairs.len() > 20,
-        "only {} readings:\n{printed}",
-        pairs.len()
+        readings[landed..].iter().all(|&nanos| nanos >= deadline),
+        "a reading after the change went back before it",
     );
     // The two readers never disagree: both reach the one read path, so a change is published to
-    // both at once.
+    // both at once. The one pair it may land between has only its libc reading past it.
     for &[through_fallback, through_libc] in &pairs {
         let gap = through_libc - through_fallback;
+        let straddles = through_fallback < deadline && deadline <= through_libc;
         assert!(
-            gap.abs() < TOGETHER_NS,
+            straddles || gap.abs() < TOGETHER_NS,
             "the two readers are {gap} ns apart"
         );
     }
-    // And the change reached both: the last readings are past the instant it set.
-    let last = pairs[pairs.len() - 1];
-    assert!(
-        last[0] >= deadline,
-        "the Go reader never reached the set time"
-    );
-    assert!(
-        last[1] >= deadline,
-        "the libc reader never reached the set time"
-    );
+}
+
+/// Starts `go_pair` under the library with its sessions in `dir`, and hands over each pair as it is
+/// printed, so a case acts on the readings as they are taken and the program never blocks on a
+/// full pipe.
+fn pairing(program: &Path, dir: &Path) -> (Reaped, mpsc::Receiver<[i64; 2]>) {
+    let mut command = Command::new(program);
+    command
+        // More pairs than a case reads, two hundred microseconds of faketime apart.
+        .arg("1000000")
+        .arg("200")
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env(harness::PRELOAD, harness::library())
+        .env("LIBTIMEWARP_SESSION_DIR", dir)
+        .stdout(Stdio::piped());
+    let mut child = command.spawn().unwrap();
+    let printing = BufReader::new(child.stdout.take().unwrap());
+    let (sender, printed) = mpsc::channel();
+    std::thread::spawn(move || {
+        for pair in printing
+            .lines()
+            .map_while(Result::ok)
+            .filter_map(|line| reading(&line))
+        {
+            if sender.send(pair).is_err() {
+                break;
+            }
+        }
+    });
+    (Reaped(child), printed)
+}
+
+/// A running target, killed and reaped once the case is done with it, a case that fails included.
+struct Reaped(Child);
+
+impl Drop for Reaped {
+    fn drop(&mut self) {
+        drop(self.0.kill());
+        drop(self.0.wait());
+    }
 }
 
 /// Every `.lease` file beside the sessions in `dir`.
@@ -332,17 +384,22 @@ fn helper_process_for(session: &Path) -> bool {
         .is_ok_and(|out| !out.stdout.is_empty())
 }
 
-/// The pairs of readings `go_pair` printed: what the runtime read through the fallback, and what
-/// libc answered beside it.
-fn readings(printed: &str) -> Vec<[i64; 2]> {
+/// The pair of readings on one line `go_pair` printed: what the runtime read through the fallback,
+/// and what libc answered beside it.
+fn reading(line: &str) -> Option<[i64; 2]> {
+    let mut numbers = line
+        .strip_prefix("pair=")?
+        .split_whitespace()
+        .map(str::parse::<i64>);
+    Some([numbers.next()?.ok()?, numbers.next()?.ok()?])
+}
+
+/// The next pair handed over from `go_pair`, or `None` once `until` has passed or the program has
+/// stopped printing.
+fn next_pair(printed: &mpsc::Receiver<[i64; 2]>, until: Instant) -> Option<[i64; 2]> {
     printed
-        .lines()
-        .filter_map(|line| line.strip_prefix("pair="))
-        .filter_map(|values| {
-            let mut numbers = values.split_whitespace().map(str::parse::<i64>);
-            Some([numbers.next()?.ok()?, numbers.next()?.ok()?])
-        })
-        .collect()
+        .recv_timeout(until.saturating_duration_since(Instant::now()))
+        .ok()
 }
 
 fn wait_for_session(dir: &Path) -> PathBuf {
