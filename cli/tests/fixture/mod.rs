@@ -14,8 +14,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
 
+use common::platform::{self, default_timebase};
 use common::session::layout::{Fault, Header, Keeper};
 use common::session::{self, Session, Setup};
+use common::time::Family;
 
 /// A case that creates a session takes this: the lock file a reader probes is named once per
 /// process, so two sessions at once would cross their probes.
@@ -112,6 +114,17 @@ fn create(dir: &Path, keeper: Keeper, fault: Option<Fault>) -> Session {
             |fault| session::create_faulted(&setup, fault),
         )
         .expect("a session of our own")
+}
+
+/// The name the family table gives a family's default timebase here: the first of the names its id
+/// goes by, since FreeBSD spells some ids twice.
+pub(crate) fn timebase_name(family: Family) -> &'static str {
+    let id = default_timebase(family).expect("a family with a timebase");
+    platform::clock::named()
+        .iter()
+        .find(|&&(_, known)| known == id)
+        .map(|&(name, _)| name)
+        .expect("a name for every default timebase")
 }
 
 /// Rewrites the creator pid and creation time in the header of the session file at `path`, so

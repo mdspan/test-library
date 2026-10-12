@@ -12,22 +12,11 @@ use std::ffi::OsStr;
 use std::process::{Command, Stdio};
 
 use common::config::parse_timestamp;
-use common::platform::{self, default_timebase, genuine_nanos};
+use common::platform::{default_timebase, genuine_nanos};
 use common::session::layout::{Fault, FaultCode, Keeper};
 use common::time::{Family, Nanos};
 
-use fixture::{Fixture, one_at_a_time, run};
-
-/// The name the family table gives a family's default timebase here: the first of the names its id
-/// goes by, since FreeBSD spells some ids twice.
-fn timebase_name(family: Family) -> &'static str {
-    let id = default_timebase(family).expect("a family with a timebase");
-    platform::clock::named()
-        .iter()
-        .find(|&&(_, known)| known == id)
-        .map(|&(name, _)| name)
-        .expect("a name for every default timebase")
-}
+use fixture::{Fixture, one_at_a_time, run, timebase_name};
 
 fn genuine(family: Family) -> i64 {
     genuine_nanos(default_timebase(family).expect("a family with a timebase"))

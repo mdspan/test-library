@@ -1,31 +1,19 @@
 //! `shift`, `set-time`, `set-rate`, and several of them staged on one transaction.
 #![expect(
-    clippy::expect_used,
     dead_code,
-    reason = "test support: a failed assumption should fail the test loudly, and not every helper \
-              is used by every case"
+    reason = "not every helper of the fixture is used by every case"
 )]
 
 mod fixture;
 
 use std::time::Instant;
 
-use common::platform::{self, default_timebase};
 use common::session::layout::Keeper;
 use common::time::{Family, Nanos};
 
-use fixture::{Fixture, Run, one_at_a_time};
+use fixture::{Fixture, Run, one_at_a_time, timebase_name};
 
 const HOUR: i64 = 3_600 * Nanos::SECOND;
-
-fn timebase_name(family: Family) -> &'static str {
-    let id = default_timebase(family).expect("a family with a timebase");
-    platform::clock::named()
-        .iter()
-        .find(|&&(_, known)| known == id)
-        .map(|&(name, _)| name)
-        .expect("a name for every default timebase")
-}
 
 /// Every rate and Realtime's reading. Exact only while Realtime is frozen.
 fn state(session: &Fixture) -> (Vec<String>, i64) {
