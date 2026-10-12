@@ -28,17 +28,17 @@ pub(crate) fn run<W: Write>(invocation: &Invocation, out: &mut Output<W>) -> Res
 
 /// The directory sessions are looked for in: `--dir`, else the one the library computes.
 fn directory(picking: &Picking) -> PathBuf {
-    picking.dir.clone().unwrap_or_else(directory::session_dir)
+    directory::tidy(&picking.dir.clone().unwrap_or_else(directory::session_dir))
 }
 
 /// The session file the command acts on: `--session`, else the one `--pid` carries, else the pick
 /// out of the directory.
 fn chosen(picking: &Picking) -> Result<PathBuf, Failure> {
     if let Some(session) = &picking.session {
-        return Ok(session.clone());
+        return Ok(directory::tidy(session));
     }
     if let Some(pid) = picking.pid {
-        return environ::shared_file_of(pid);
+        return environ::shared_file_of(pid).map(|path| directory::tidy(&path));
     }
     directory::select(&directory(picking), picking.creator, picking.newest).map(|found| found.path)
 }

@@ -2,7 +2,7 @@
 //! their headers carry.
 
 use std::cmp::Reverse;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use common::config::{ProcessEnv, Settings};
 use common::session::naming::{SESSION_SUFFIX, session_dir_from_env};
@@ -17,6 +17,19 @@ pub(crate) fn session_dir() -> PathBuf {
         |_| session_dir_from_env(&ProcessEnv),
         |settings| session_dir_from_env(&settings),
     )
+}
+
+/// `path` without `.` components or repeated and trailing slashes.
+pub(crate) fn tidy(path: &Path) -> PathBuf {
+    let tidy: PathBuf = path
+        .components()
+        .filter(|&part| part != Component::CurDir)
+        .collect();
+    if tidy.as_os_str().is_empty() {
+        PathBuf::from(".")
+    } else {
+        tidy
+    }
 }
 
 /// A session file in the directory, and its header.
@@ -34,7 +47,7 @@ pub(crate) fn sessions(directory: &Path) -> Vec<Found> {
     };
     let mut paths: Vec<PathBuf> = entries
         .filter_map(Result::ok)
-        .map(|entry| entry.path())
+        .map(|entry| tidy(&entry.path()))
         .filter(|path| {
             path.file_name()
                 .is_some_and(|name| name.as_encoded_bytes().ends_with(SESSION_SUFFIX.as_bytes()))
@@ -86,4 +99,23 @@ pub(crate) fn select(
         .into_iter()
         .next()
         .ok_or_else(|| Failure::Other(format!("no session in {}", directory.display())))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tidy_drops_dot_components_and_extra_slashes() {
+        for (typed, tidied) in [
+            ("./x.session", "x.session"),
+            ("/d/./x.session", "/d/x.session"),
+            ("/d//e/", "/d/e"),
+            ("a/../b", "a/../b"),
+            (".", "."),
+            ("./", "."),
+        ] {
+            assert_eq!(tidy(Path::new(typed)), Path::new(tidied), "{typed}");
+        }
+    }
 }

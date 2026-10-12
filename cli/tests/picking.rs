@@ -9,6 +9,7 @@ mod fixture;
 
 use std::fs;
 use std::os::unix::fs::MetadataExt;
+use std::path::Path;
 
 use common::session::layout::Keeper;
 
@@ -277,6 +278,38 @@ fn creator_and_newest_narrow_the_directory_down() {
         .refused(1, "2 sessions in ");
     tool.run(&["--creator", "300", "--newest", "info"])
         .refused(1, "no session in ");
+}
+
+#[test]
+fn paths_are_printed_without_dot_components_or_trailing_slashes() {
+    let _one = one_at_a_time();
+    let session = Fixture::on(Keeper::Affine);
+    let name = session.path().file_name().expect("a session file name");
+
+    let info = session
+        .tool()
+        .within(&session.session_dir())
+        .run(&[
+            "--session".as_ref(),
+            Path::new(".").join(name).as_os_str(),
+            "info".as_ref(),
+        ])
+        .ok();
+    assert_eq!(info.get("session"), name.to_string_lossy());
+
+    let mut dir = session.session_dir().into_os_string();
+    dir.push("/./");
+    let listed = Tool::new()
+        .run(&["--dir".as_ref(), dir.as_os_str(), "list".as_ref()])
+        .ok();
+    assert_eq!(
+        listed.get("directory"),
+        session.session_dir().to_string_lossy()
+    );
+    assert_eq!(
+        listed.get("session.0.path"),
+        session.path().to_string_lossy()
+    );
 }
 
 #[test]
