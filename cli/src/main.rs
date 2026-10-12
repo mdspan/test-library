@@ -4,6 +4,7 @@
 //! stderr and exits 1, a usage error exits 2.
 
 mod args;
+mod change;
 mod commands;
 mod directory;
 mod environ;

@@ -7,7 +7,8 @@ use std::path::{Path, PathBuf};
 use common::time::{Family, Nanos};
 use controller::{Controller, Info};
 
-use crate::args::{Command, Invocation, Picking};
+use crate::args::{Command, Invocation, Operation, Picking};
+use crate::change::{self, Step};
 use crate::failure::Failure;
 use crate::output::Output;
 use crate::{directory, environ, family, format};
@@ -18,6 +19,7 @@ pub(crate) fn run<W: Write>(invocation: &Invocation, out: &mut Output<W>) -> Res
         Command::List => list(&invocation.picking, out),
         Command::Info => info(&invocation.picking, out),
         Command::Get { family } => get(&invocation.picking, family, out),
+        Command::Change(operations) => change(&invocation.picking, operations, out),
     }
 }
 
@@ -64,6 +66,34 @@ fn get<W: Write>(picking: &Picking, name: &str, out: &mut Output<W>) -> Result<(
     let family = family::named(name)?;
     let session = Controller::attach(&chosen(picking)?)?;
     reading(out, family, session.get(family)?)
+}
+
+/// Parses every operation, then attaches, applies them as one transaction, and prints each family
+/// they touched.
+fn change<W: Write>(
+    picking: &Picking,
+    operations: &[Operation],
+    out: &mut Output<W>,
+) -> Result<(), Failure> {
+    let steps = operations
+        .iter()
+        .map(Step::parse)
+        .collect::<Result<Vec<_>, _>>()?;
+    let session = Controller::attach(&chosen(picking)?)?;
+    change::apply(&session, &steps)?;
+    for touched in change::touched(&steps) {
+        if touched.reading {
+            reading(out, touched.family, session.get(touched.family)?)?;
+        }
+        if touched.rate {
+            let rate = session.info().family(touched.family).rate;
+            out.say(
+                &format!("{}.rate", family::label(touched.family)),
+                format::rate(rate),
+            )?;
+        }
+    }
+    Ok(())
 }
 
 /// What `family` shows: `<family>.ns`, then `realtime.iso` or `<family>.elapsed`.

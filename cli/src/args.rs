@@ -47,6 +47,46 @@ pub(crate) enum Command {
     Info,
     /// `get <family>`.
     Get { family: String },
+    /// `shift`, `set-time`, or `set-rate`, then any further operations, staged in order on one
+    /// transaction.
+    Change(Vec<Operation>),
+}
+
+/// One operation of a change, as typed.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Operation {
+    pub(crate) kind: Kind,
+    pub(crate) family: String,
+    pub(crate) value: String,
+}
+
+/// The operations a change is made of.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Kind {
+    /// `shift <family> <duration>`.
+    Shift,
+    /// `set-time <family> <value>`.
+    SetTime,
+    /// `set-rate <family> <rate>`.
+    SetRate,
+}
+
+impl Kind {
+    /// The operation `word` names.
+    fn named(word: &str) -> Option<Self> {
+        [Self::Shift, Self::SetTime, Self::SetRate]
+            .into_iter()
+            .find(|kind| kind.word() == word)
+    }
+
+    /// The word that names the operation.
+    pub(crate) const fn word(self) -> &'static str {
+        match self {
+            Self::Shift => "shift",
+            Self::SetTime => "set-time",
+            Self::SetRate => "set-rate",
+        }
+    }
 }
 
 /// A command line that does not parse. The message names the offending token.
@@ -77,6 +117,15 @@ const COMMANDS: &[(&str, &str)] = &[
         "how the session was set up and what went wrong with it",
     ),
     ("get FAMILY", "what a family shows now"),
+    (
+        "shift FAMILY DURATION",
+        "move a family by a duration such as -2h, 90s or 500ms",
+    ),
+    (
+        "set-time FAMILY VALUE",
+        "make a family show 2020-01-01T00:00:00Z, @1577836800, or a duration",
+    ),
+    ("set-rate FAMILY RATE", "fake seconds per second; 0 freezes"),
 ];
 
 /// The one-line synopsis a usage error ends with.
@@ -99,6 +148,9 @@ pub(crate) fn help() -> String {
     };
     format!(
         "{SYNOPSIS}\n\nRead and change a live libtimewarp session.\n\ncommands:\n{}\n\
+         shift, set-time, and set-rate take further operations after their own, each written\n\
+         as a command; all of them are applied together or not at all:\n\
+         \x20 libtimewarp shift realtime -2h set-rate realtime 10\n\n\
          picking the session:\n{}\n  {:width$}  show this help\n",
         rows(COMMANDS),
         rows(OPTIONS),
@@ -151,7 +203,36 @@ fn command(word: &str, rest: Vec<String>) -> Result<Command, Usage> {
             let [family] = exactly::<1>(word, rest)?;
             Ok(Command::Get { family })
         }
-        _ => Err(Usage(format!("unknown command {word}"))),
+        _ => {
+            let kind = Kind::named(word).ok_or_else(|| Usage(format!("unknown command {word}")))?;
+            operations(kind, rest).map(Command::Change)
+        }
+    }
+}
+
+/// The operation `first` with its two arguments, then each further operation in `rest` with its
+/// two.
+fn operations(first: Kind, rest: Vec<String>) -> Result<Vec<Operation>, Usage> {
+    let mut tokens = rest.into_iter();
+    let mut operations = Vec::new();
+    let mut kind = first;
+    loop {
+        let (Some(family), Some(value)) = (tokens.next(), tokens.next()) else {
+            return Err(Usage(format!("{} is missing an argument", kind.word())));
+        };
+        operations.push(Operation {
+            kind,
+            family,
+            value,
+        });
+        let Some(word) = tokens.next() else {
+            return Ok(operations);
+        };
+        kind = Kind::named(&word).ok_or_else(|| {
+            Usage(format!(
+                "unexpected {word}: a further operation is shift, set-time, or set-rate"
+            ))
+        })?;
     }
 }
 
@@ -214,4 +295,70 @@ fn text(token: OsString) -> Result<String, Usage> {
     token
         .into_string()
         .map_err(|token| Usage(format!("{} is not UTF-8", token.to_string_lossy())))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parsed(line: &[&str]) -> Result<Command, Usage> {
+        match parse(line.iter().map(OsString::from))? {
+            Parsed::Run(invocation) => Ok(invocation.command),
+            Parsed::Help => Err(Usage("help".to_owned())),
+        }
+    }
+
+    fn operation(kind: Kind, family: &str, value: &str) -> Operation {
+        Operation {
+            kind,
+            family: family.to_owned(),
+            value: value.to_owned(),
+        }
+    }
+
+    fn usage(line: &[&str]) -> String {
+        match parsed(line) {
+            Err(Usage(message)) => message,
+            Ok(command) => format!("parsed as {command:?}"),
+        }
+    }
+
+    #[test]
+    fn a_sequence_is_every_triple_in_order() {
+        let Ok(Command::Change(operations)) = parsed(&[
+            "shift",
+            "realtime",
+            "-2h",
+            "set-rate",
+            "realtime",
+            "10",
+            "set-time",
+            "monotonic",
+            "1d",
+        ]) else {
+            panic!("not a change");
+        };
+        assert_eq!(
+            operations,
+            [
+                operation(Kind::Shift, "realtime", "-2h"),
+                operation(Kind::SetRate, "realtime", "10"),
+                operation(Kind::SetTime, "monotonic", "1d"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_malformed_triple_is_named() {
+        assert_eq!(
+            usage(&["set-time", "realtime"]),
+            "set-time is missing an argument"
+        );
+        assert_eq!(
+            usage(&["shift", "realtime", "1h", "set-rate", "monotonic"]),
+            "set-rate is missing an argument"
+        );
+        assert!(usage(&["shift", "realtime", "1h", "get", "monotonic", "1"]).contains("get"));
+        assert!(usage(&["shift", "realtime", "1h", "extra"]).contains("extra"));
+    }
 }
