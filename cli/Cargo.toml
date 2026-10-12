@@ -1,0 +1,22 @@
+[package]
+name = "cli"
+version.workspace = true
+edition.workspace = true
+description = "The libtimewarp command: reads and changes a live session from the shell."
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "libtimewarp"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+common = { path = "../common", default-features = false }
+controller = { path = "../controller", default-features = false }
+libc = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3.24.0"
