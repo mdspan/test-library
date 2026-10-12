@@ -28,6 +28,8 @@ pub(crate) struct Invocation {
 pub(crate) struct Picking {
     /// `--session PATH`: the session file, outright.
     pub(crate) session: Option<PathBuf>,
+    /// `--pid PID`: the session that process carries the path of in its environment.
+    pub(crate) pid: Option<u32>,
     /// `--creator PID`: only the sessions that process created.
     pub(crate) creator: Option<u32>,
     /// `--newest`: the session created last.
@@ -53,6 +55,10 @@ pub(crate) struct Usage(pub(crate) String);
 
 /// One line of `--help` per option and per command: the spelling, then what it does.
 const OPTIONS: &[(&str, &str)] = &[
+    (
+        "--pid PID",
+        "the session that process of the faked tree carries in its environment",
+    ),
     (
         "--creator PID",
         "the session that process created; for the program you started",
@@ -116,6 +122,7 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Parsed, 
             "-h" | "--help" => return Ok(Parsed::Help),
             "--session" => picking.session = Some(value(name, attached, &mut tokens)?.into()),
             "--dir" => picking.dir = Some(value(name, attached, &mut tokens)?.into()),
+            "--pid" => picking.pid = Some(pid(name, &value(name, attached, &mut tokens)?)?),
             "--creator" => picking.creator = Some(pid(name, &value(name, attached, &mut tokens)?)?),
             "--newest" if attached.is_none() => picking.newest = true,
             "--newest" => return Err(Usage("--newest takes no value".to_owned())),

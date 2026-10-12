@@ -11,8 +11,8 @@ use std::fs::OpenOptions;
 use std::mem::offset_of;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::process::{Child, Command, Stdio};
+use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
 
 use common::session::layout::{Fault, Header, Keeper};
 use common::session::{self, Session, Setup};
@@ -35,16 +35,20 @@ pub(crate) struct Fixture {
 
 impl Fixture {
     pub(crate) fn on(keeper: Keeper) -> Self {
-        Self::build(keeper, None)
+        Self::build(tempdir(""), keeper, None)
     }
 
     /// A session whose creator recorded `fault` before publishing it.
     pub(crate) fn faulted(keeper: Keeper, fault: Fault) -> Self {
-        Self::build(keeper, Some(fault))
+        Self::build(tempdir(""), keeper, Some(fault))
     }
 
-    fn build(keeper: Keeper, fault: Option<Fault>) -> Self {
-        let dir = tempfile::tempdir().expect("a temporary directory");
+    /// A session in a directory whose path has a space in it.
+    pub(crate) fn spaced(keeper: Keeper) -> Self {
+        Self::build(tempdir("with space "), keeper, None)
+    }
+
+    fn build(dir: tempfile::TempDir, keeper: Keeper, fault: Option<Fault>) -> Self {
         let session = create(&dir.path().join("libtimewarp"), keeper, fault);
         Self {
             dir,
@@ -88,6 +92,13 @@ impl Fixture {
     }
 }
 
+fn tempdir(prefix: &str) -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix(prefix)
+        .tempdir()
+        .expect("a temporary directory")
+}
+
 fn create(dir: &Path, keeper: Keeper, fault: Option<Fault>) -> Session {
     // These cases are not about posing as the vDSO, so it is off.
     let setup = Setup {
@@ -121,6 +132,83 @@ pub(crate) fn restamp(path: &Path, creator_pid: u32, creation_time: i64) {
         at(offset_of!(Header, creation_time)),
     )
     .expect("the creation time is written");
+}
+
+/// Where cargo put the artifacts of this test run.
+fn target_dir() -> PathBuf {
+    let mut dir = std::env::current_exe().expect("test executable has a path");
+    dir.pop();
+    if dir.ends_with("deps") {
+        dir.pop();
+    }
+    dir
+}
+
+/// Compiles `tests/c/<name>.c` into a program of the suite's own, with `extra` on the command line
+/// beyond the source and the output. Each test binary builds to a name of its own and renames the
+/// result into place, so two binaries compiling at once do not write one file.
+pub(crate) fn compile(name: &str, extra: &[String]) -> PathBuf {
+    let out = target_dir().join("timewarp-cli-tests");
+    std::fs::create_dir_all(&out).expect("a directory for the programs under test");
+    let binary = out.join(name);
+    let building = out.join(format!("{name}.{}", std::process::id()));
+    let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/c")
+        .join(format!("{name}.c"));
+    let status = Command::new(std::env::var("CC").as_deref().unwrap_or("cc"))
+        .arg("-O0")
+        .args(["-Wall", "-Wextra", "-Werror"])
+        .arg("-o")
+        .arg(&building)
+        .arg(&source)
+        .args(extra)
+        .status()
+        .expect("a C compiler");
+    assert!(status.success(), "compiling {}", source.display());
+    std::fs::rename(&building, &binary).expect("the program moves into place");
+    binary
+}
+
+static MEMBER: OnceLock<PathBuf> = OnceLock::new();
+
+/// A running process of the suite's own, `tests/c/member.c`, killed on drop.
+pub(crate) struct Member(Child);
+
+impl Member {
+    /// A member whose environment carries `path` as its session file.
+    pub(crate) fn of(path: &Path) -> Self {
+        Self::with(Some(path.as_os_str()))
+    }
+
+    /// A member whose environment carries no session file.
+    pub(crate) fn outside() -> Self {
+        Self::with(None)
+    }
+
+    fn with(shared_file: Option<&OsStr>) -> Self {
+        let program = MEMBER.get_or_init(|| compile("member", &[]));
+        let mut command = Command::new(program);
+        command.env_clear().stdout(Stdio::null());
+        if let Some(path) = shared_file {
+            command.env(common::config::ENV_SHARED_FILE, path);
+        }
+        Self(
+            command
+                .spawn()
+                .expect("a process to read the environment of"),
+        )
+    }
+
+    pub(crate) fn pid(&self) -> u32 {
+        self.0.id()
+    }
+}
+
+impl Drop for Member {
+    fn drop(&mut self) {
+        drop(self.0.kill());
+        drop(self.0.wait());
+    }
 }
 
 /// The binary under test in an environment of the case's own: nothing inherited, so the session

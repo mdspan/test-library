@@ -10,7 +10,7 @@ use controller::{Controller, Info};
 use crate::args::{Command, Invocation, Picking};
 use crate::failure::Failure;
 use crate::output::Output;
-use crate::{directory, family, format};
+use crate::{directory, environ, family, format};
 
 /// Runs the command of `invocation`.
 pub(crate) fn run<W: Write>(invocation: &Invocation, out: &mut Output<W>) -> Result<(), Failure> {
@@ -26,15 +26,16 @@ fn directory(picking: &Picking) -> PathBuf {
     picking.dir.clone().unwrap_or_else(directory::session_dir)
 }
 
-/// The session file the command acts on: `--session`, else the pick out of the directory.
+/// The session file the command acts on: `--session`, else the one `--pid` carries, else the pick
+/// out of the directory.
 fn chosen(picking: &Picking) -> Result<PathBuf, Failure> {
-    picking.session.clone().map_or_else(
-        || {
-            directory::select(&directory(picking), picking.creator, picking.newest)
-                .map(|found| found.path)
-        },
-        Ok,
-    )
+    if let Some(session) = &picking.session {
+        return Ok(session.clone());
+    }
+    if let Some(pid) = picking.pid {
+        return environ::shared_file_of(pid);
+    }
+    directory::select(&directory(picking), picking.creator, picking.newest).map(|found| found.path)
 }
 
 fn list<W: Write>(picking: &Picking, out: &mut Output<W>) -> Result<(), Failure> {

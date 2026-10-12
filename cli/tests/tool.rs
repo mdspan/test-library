@@ -210,6 +210,7 @@ fn help_lists_the_commands_and_exits_zero() {
             "--creator",
             "--newest",
             "--session",
+            "--pid",
             "--dir",
         ] {
             assert!(
