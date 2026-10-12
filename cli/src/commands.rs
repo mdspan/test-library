@@ -4,14 +4,15 @@ use std::io::Write;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
-use common::time::{Family, Nanos};
+use common::time::{Family, Nanos, Rate};
 use controller::{Controller, Info};
 
 use crate::args::{Command, Invocation, Operation, Picking};
 use crate::change::{self, Step};
 use crate::failure::Failure;
+use crate::frozen::StateFile;
 use crate::output::Output;
-use crate::{directory, environ, family, format};
+use crate::{directory, environ, family, format, frozen};
 
 /// Runs the command of `invocation`.
 pub(crate) fn run<W: Write>(invocation: &Invocation, out: &mut Output<W>) -> Result<(), Failure> {
@@ -20,6 +21,8 @@ pub(crate) fn run<W: Write>(invocation: &Invocation, out: &mut Output<W>) -> Res
         Command::Info => info(&invocation.picking, out),
         Command::Get { family } => get(&invocation.picking, family, out),
         Command::Change(operations) => change(&invocation.picking, operations, out),
+        Command::Freeze { families } => freeze(&invocation.picking, families, out),
+        Command::Thaw { families } => thaw(&invocation.picking, families, out),
     }
 }
 
@@ -92,6 +95,59 @@ fn change<W: Write>(
                 format::rate(rate),
             )?;
         }
+    }
+    Ok(())
+}
+
+/// The families `names` spell, each once, in order; Realtime, Monotonic, and Boottime when there
+/// are none.
+fn families(names: &[String]) -> Result<Vec<Family>, Failure> {
+    if names.is_empty() {
+        return Ok(vec![Family::Realtime, Family::Monotonic, Family::Boottime]);
+    }
+    let mut families = Vec::new();
+    for name in names {
+        let family = family::named(name)?;
+        if !families.contains(&family) {
+            families.push(family);
+        }
+    }
+    Ok(families)
+}
+
+/// Remembers each family's rate and stops it, in one transaction.
+fn freeze<W: Write>(
+    picking: &Picking,
+    names: &[String],
+    out: &mut Output<W>,
+) -> Result<(), Failure> {
+    let families = families(names)?;
+    let path = chosen(picking)?;
+    let file = StateFile::of(&path)?;
+    let session = Controller::attach(&path)?;
+    let remembered = frozen::freeze(&session, &file, &families)?;
+    for family in families {
+        let label = family::label(family);
+        out.say(&format!("{label}.rate"), format::rate(Rate::FROZEN))?;
+        let rate = remembered.rate(family).unwrap_or_default();
+        out.say(&format!("{label}.remembered"), format::fraction(rate))?;
+    }
+    Ok(())
+}
+
+/// Puts back the rates `freeze` remembered, in one transaction, and prints them as read back.
+fn thaw<W: Write>(picking: &Picking, names: &[String], out: &mut Output<W>) -> Result<(), Failure> {
+    let families = families(names)?;
+    let path = chosen(picking)?;
+    let file = StateFile::of(&path)?;
+    let session = Controller::attach(&path)?;
+    frozen::thaw(&session, &file, &families)?;
+    let info = session.info();
+    for family in families {
+        out.say(
+            &format!("{}.rate", family::label(family)),
+            format::rate(info.family(family).rate),
+        )?;
     }
     Ok(())
 }

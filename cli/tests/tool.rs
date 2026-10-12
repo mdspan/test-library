@@ -210,6 +210,8 @@ fn help_lists_the_commands_and_exits_zero() {
             "shift",
             "set-time",
             "set-rate",
+            "freeze",
+            "thaw",
             "--creator",
             "--newest",
             "--session",

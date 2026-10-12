@@ -215,18 +215,29 @@ impl Drop for Member {
 /// directory and the configuration file are what the case sets.
 pub(crate) struct Tool {
     env: Vec<(OsString, OsString)>,
+    cwd: Option<PathBuf>,
 }
 
 impl Tool {
     /// An environment with `XDG_CONFIG_HOME` naming a directory with no configuration file in it.
     pub(crate) fn new() -> Self {
-        Self { env: Vec::new() }.env("XDG_CONFIG_HOME", "/nonexistent")
+        Self {
+            env: Vec::new(),
+            cwd: None,
+        }
+        .env("XDG_CONFIG_HOME", "/nonexistent")
     }
 
     /// The same environment with `name` set to `value`.
     pub(crate) fn env(mut self, name: impl AsRef<OsStr>, value: impl AsRef<OsStr>) -> Self {
         self.env
             .push((name.as_ref().to_owned(), value.as_ref().to_owned()));
+        self
+    }
+
+    /// The same environment, run from `dir`.
+    pub(crate) fn within(mut self, dir: &Path) -> Self {
+        self.cwd = Some(dir.to_path_buf());
         self
     }
 
@@ -237,6 +248,9 @@ impl Tool {
             .env_clear()
             .envs(self.env.iter().cloned())
             .args(args);
+        if let Some(dir) = &self.cwd {
+            command.current_dir(dir);
+        }
         finished(&mut command)
     }
 }

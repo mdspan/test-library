@@ -11,6 +11,7 @@ mod environ;
 mod failure;
 mod family;
 mod format;
+mod frozen;
 mod output;
 
 use std::io::{self, BufWriter};

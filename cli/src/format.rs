@@ -30,7 +30,12 @@ pub(crate) fn elapsed(by: Nanos) -> String {
 
 /// A rate with nine fraction digits.
 pub(crate) fn rate(rate: Rate) -> String {
-    format!("{:.9}", rate.as_f64())
+    fraction(rate.as_f64())
+}
+
+/// A rate as a `double`, with nine fraction digits.
+pub(crate) fn fraction(rate: f64) -> String {
+    format!("{rate:.9}")
 }
 
 /// A timebase by the first name the platform's clock table gives its id, else the number. Empty

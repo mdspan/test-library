@@ -50,6 +50,10 @@ pub(crate) enum Command {
     /// `shift`, `set-time`, or `set-rate`, then any further operations, staged in order on one
     /// transaction.
     Change(Vec<Operation>),
+    /// `freeze [<family>...]`.
+    Freeze { families: Vec<String> },
+    /// `thaw [<family>...]`.
+    Thaw { families: Vec<String> },
 }
 
 /// One operation of a change, as typed.
@@ -126,6 +130,14 @@ const COMMANDS: &[(&str, &str)] = &[
         "make a family show 2020-01-01T00:00:00Z, @1577836800, or a duration",
     ),
     ("set-rate FAMILY RATE", "fake seconds per second; 0 freezes"),
+    (
+        "freeze [FAMILY...]",
+        "remember each family's rate and set it to zero",
+    ),
+    (
+        "thaw [FAMILY...]",
+        "put back the rate the freeze remembered",
+    ),
 ];
 
 /// The one-line synopsis a usage error ends with.
@@ -151,6 +163,7 @@ pub(crate) fn help() -> String {
          shift, set-time, and set-rate take further operations after their own, each written\n\
          as a command; all of them are applied together or not at all:\n\
          \x20 libtimewarp shift realtime -2h set-rate realtime 10\n\n\
+         freeze and thaw act on realtime, monotonic, and boottime when no family is named.\n\n\
          picking the session:\n{}\n  {:width$}  show this help\n",
         rows(COMMANDS),
         rows(OPTIONS),
@@ -203,6 +216,8 @@ fn command(word: &str, rest: Vec<String>) -> Result<Command, Usage> {
             let [family] = exactly::<1>(word, rest)?;
             Ok(Command::Get { family })
         }
+        "freeze" => Ok(Command::Freeze { families: rest }),
+        "thaw" => Ok(Command::Thaw { families: rest }),
         _ => {
             let kind = Kind::named(word).ok_or_else(|| Usage(format!("unknown command {word}")))?;
             operations(kind, rest).map(Command::Change)
