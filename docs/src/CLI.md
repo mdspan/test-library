@@ -21,7 +21,7 @@ libtimewarp get realtime                       # what a family shows now
 libtimewarp shift realtime -2h                 # move a family by a duration
 libtimewarp set-time realtime 2020-01-01T00:00:00Z
 libtimewarp set-rate realtime 10               # 0 freezes
-libtimewarp freeze                             # remember each rate, then set it to 0
+libtimewarp freeze                             # store each rate, then set it to 0
 libtimewarp thaw                               # put the remembered rates back
 ```
 
@@ -62,8 +62,8 @@ libtimewarp freeze realtime
 libtimewarp thaw realtime
 ```
 
-`freeze` remembers each family's rate before setting it to `0`, and `thaw`
-sets the remembered rate back. Freezing a family twice keeps the rate from
+`freeze` stores each family's rate, its remembered rate, before setting it
+to `0`, and `thaw` sets the remembered rate back. Freezing a family twice keeps the rate from
 the first freeze. Thawing a family with no remembered rate fails and changes
 nothing; set its rate with `set-rate` instead. Remember that
 [thawing leaves sleeping threads asleep](COVERAGE.md#sleeps-timeouts-and-timers).
@@ -124,7 +124,7 @@ realtime.rate=10.000000000
 monotonic.rate=10.000000000
 ```
 
-`freeze` prints each family's new rate and the rate it remembers:
+`freeze` prints each family's new rate and its remembered rate:
 
 ```console
 $ libtimewarp freeze

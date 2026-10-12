@@ -2,7 +2,7 @@
 name = "cli"
 version.workspace = true
 edition.workspace = true
-description = "The libtimewarp command: reads and changes a live session from the shell."
+description = "The libtimewarp tool: reads and changes a live session from the shell."
 license.workspace = true
 repository.workspace = true
 

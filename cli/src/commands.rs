@@ -115,7 +115,7 @@ fn families(names: &[String]) -> Result<Vec<Family>, Failure> {
     Ok(families)
 }
 
-/// Remembers each family's rate and stops it, in one transaction.
+/// Adds each family's rate to the remembered rates and stops it, in one transaction.
 fn freeze<W: Write>(
     picking: &Picking,
     names: &[String],
@@ -135,7 +135,7 @@ fn freeze<W: Write>(
     Ok(())
 }
 
-/// Puts back the rates `freeze` remembered, in one transaction, and prints them as read back.
+/// Puts back the remembered rates, in one transaction, and prints them as read back.
 fn thaw<W: Write>(picking: &Picking, names: &[String], out: &mut Output<W>) -> Result<(), Failure> {
     let families = families(names)?;
     let path = chosen(picking)?;

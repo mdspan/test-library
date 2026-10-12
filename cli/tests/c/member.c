@@ -1,8 +1,8 @@
 /* A process of a faked tree for the tool to find: it carries the session path in its environment
    and does nothing else until the case that started it kills it.
 
-   A program of the suite's own rather than one of the system's, because macOS withholds the
-   environment of a protected binary from other processes. */
+   Built by the suite: macOS withholds the environment of a protected system binary from other
+   processes. */
 #include <unistd.h>
 
 int main(void) {

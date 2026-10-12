@@ -1,8 +1,8 @@
 //! The rates a freeze returns to: one file per session, `<state dir>/frozen/<session file name>`,
 //! with a `<family>=<rate>` line per remembered family.
 //!
-//! The controller keeps no memory between runs, so this file is the only place the rate before a
-//! freeze survives.
+//! The controller stores nothing between runs, so this file is the only record of the rate before a
+//! freeze.
 
 use std::ffi::OsString;
 use std::io;
@@ -16,7 +16,7 @@ use crate::change::{Change, Step};
 use crate::failure::Failure;
 use crate::family;
 
-/// The rates remembered for one session, in the order they were first remembered.
+/// The remembered rates of one session, in the order they were added.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub(crate) struct Remembered {
     rates: Vec<(Family, f64)>,
@@ -40,7 +40,7 @@ impl Remembered {
                     index + 1
                 ));
             };
-            remembered.keep(family, rate);
+            remembered.add_if_absent(family, rate);
         }
         Ok(remembered)
     }
@@ -67,9 +67,8 @@ impl Remembered {
             .map(|&(_, rate)| rate)
     }
 
-    /// Remembers `rate` for `family` unless a rate is already remembered for it. Whether it was
-    /// added.
-    pub(crate) fn keep(&mut self, family: Family, rate: f64) -> bool {
+    /// Adds `rate` for `family` unless there is a rate for it already. Whether it was added.
+    pub(crate) fn add_if_absent(&mut self, family: Family, rate: f64) -> bool {
         let absent = self.rate(family).is_none();
         if absent {
             self.rates.push((family, rate));
@@ -77,8 +76,8 @@ impl Remembered {
         absent
     }
 
-    /// Drops what is remembered for `family`.
-    pub(crate) fn forget(&mut self, family: Family) {
+    /// Removes the rate of `family`.
+    pub(crate) fn remove(&mut self, family: Family) {
         self.rates.retain(|&(known, _)| known != family);
     }
 
@@ -114,7 +113,7 @@ impl StateFile {
     pub(crate) fn of(session: &Path) -> Result<Self, Failure> {
         let dir = state_dir(&ProcessEnv).ok_or_else(|| {
             Failure::Other(
-                "no state directory to remember rates in: set LIBTIMEWARP_STATE_DIR".to_owned(),
+                "no state directory for the remembered rates: set LIBTIMEWARP_STATE_DIR".to_owned(),
             )
         })?;
         Self::under(&dir, session)
@@ -131,7 +130,7 @@ impl StateFile {
         })
     }
 
-    /// What the file remembers; nothing when there is no file.
+    /// The remembered rates in the file; none when there is no file.
     pub(crate) fn load(&self) -> Result<Remembered, Failure> {
         match std::fs::read_to_string(&self.path) {
             Ok(text) => Remembered::parse(&text)
@@ -173,8 +172,8 @@ impl StateFile {
     }
 }
 
-/// Stops `families` in one transaction of `session`, remembering the rate each had unless one is
-/// remembered already, and gives what `file` remembers afterwards.
+/// Stops `families` in one transaction of `session`, adding the rate each had to `file` unless the
+/// file has a rate for it already, and returns the rates in the file afterwards.
 ///
 /// The rates are read and the file written while the transaction holds the write lock, so no other
 /// controller changes a rate in between. A refused commit takes back the entries this run added.
@@ -194,7 +193,7 @@ pub(crate) fn freeze(
     let added: Vec<Family> = families
         .iter()
         .copied()
-        .filter(|&family| remembered.keep(family, info.family(family).rate.as_f64()))
+        .filter(|&family| remembered.add_if_absent(family, info.family(family).rate.as_f64()))
         .collect();
     let steps: Vec<Step> = families
         .iter()
@@ -205,14 +204,15 @@ pub(crate) fn freeze(
         .collect();
     commit(transaction, &steps, file, &remembered, |now| {
         for &family in &added {
-            now.forget(family);
+            now.remove(family);
         }
     })?;
     Ok(remembered)
 }
 
-/// Puts back the rate `file` remembers for each of `families` in one transaction of `session`,
-/// and forgets them. A family with nothing remembered fails the whole run with nothing changed.
+/// Puts back the rate `file` has for each of `families` in one transaction of `session`, and
+/// removes those rates from the file. A family with no rate in the file fails the whole run with
+/// nothing changed.
 pub(crate) fn thaw(
     session: &Controller,
     file: &StateFile,
@@ -243,11 +243,11 @@ pub(crate) fn thaw(
         })
         .collect();
     for &(family, _) in &restored {
-        remembered.forget(family);
+        remembered.remove(family);
     }
     commit(transaction, &steps, file, &remembered, |now| {
         for &(family, rate) in &restored {
-            now.keep(family, rate);
+            now.add_if_absent(family, rate);
         }
     })
 }
@@ -331,7 +331,7 @@ mod tests {
             (Family::Monotonic, 1.0 / 3.0),
             (Family::Boottime, 1e-9),
         ] {
-            assert!(remembered.keep(family, rate));
+            assert!(remembered.add_if_absent(family, rate));
         }
         let text = remembered.render();
         assert!(text.starts_with("realtime=0.1\nmonotonic="), "{text}");
@@ -341,10 +341,10 @@ mod tests {
     #[test]
     fn the_first_remembered_rate_stays() {
         let mut remembered = Remembered::default();
-        assert!(remembered.keep(Family::Realtime, 7.0));
-        assert!(!remembered.keep(Family::Realtime, 0.0));
+        assert!(remembered.add_if_absent(Family::Realtime, 7.0));
+        assert!(!remembered.add_if_absent(Family::Realtime, 0.0));
         assert_eq!(remembered.rate(Family::Realtime), Some(7.0));
-        remembered.forget(Family::Realtime);
+        remembered.remove(Family::Realtime);
         assert!(remembered.is_empty());
     }
 
@@ -374,7 +374,7 @@ mod tests {
         assert_eq!(file.load().ok(), Some(Remembered::default()));
 
         let mut remembered = Remembered::default();
-        remembered.keep(Family::Monotonic, 2.5);
+        remembered.add_if_absent(Family::Monotonic, 2.5);
         assert!(file.store(&remembered).is_ok());
         assert_eq!(
             std::fs::read_to_string(dir.path().join("frozen/s.session")).ok(),

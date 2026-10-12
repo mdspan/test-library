@@ -132,12 +132,9 @@ const COMMANDS: &[(&str, &str)] = &[
     ("set-rate FAMILY RATE", "fake seconds per second; 0 freezes"),
     (
         "freeze [FAMILY...]",
-        "remember each family's rate and set it to zero",
+        "store each family's rate, then set it to zero",
     ),
-    (
-        "thaw [FAMILY...]",
-        "put back the rate the freeze remembered",
-    ),
+    ("thaw [FAMILY...]", "put back the remembered rates"),
 ];
 
 /// The one-line synopsis a usage error ends with.
