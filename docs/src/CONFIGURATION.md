@@ -237,3 +237,11 @@ session find it. The library sets it to the absolute path of the session
 file; you never need to. Unset it to start
 a fresh session from inside a faked shell; see
 [Sessions](SESSIONS.md#one-clock-per-process-tree).
+
+The library also sets it in the environment the program was started with,
+which is what a Go program passes to the programs it starts. There it
+takes the place of the variable's own entry, or else of the first clock,
+Go, hook, or timekeeper setting, which the program then no longer sees in
+that environment. Starting a program with `LIBTIMEWARP__SHARED_FILE` set to
+empty keeps every other variable; see
+[How Programs Find the Session](SESSIONS.md#how-programs-find-the-session).

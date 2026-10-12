@@ -25,7 +25,7 @@ libtimewarp[26663] error: LIBTIMEWARP_RATE: not a valid value
 | Level | Event |
 | --- | --- |
 | `error` | A [wrong value](CONFIGURATION.md#when-a-value-is-wrong), a hook that fails to load, or a session file the program cannot use. The program is running on real time. |
-| `warn` | A program that was changing the clock appears to have died mid-change. The session recovers by itself. Or, on FreeBSD, a Go program built by a Go release the library does not match, named in the line; that program runs on real time. |
+| `warn` | A program that was changing the clock appears to have died mid-change. The session recovers by itself. Or, on FreeBSD, a Go program built by a Go release the library does not match, named in the line; that program runs on real time. Or a program started with nothing in its environment for the session's name to take the place of; the programs a Go program like it starts begin sessions of their own. |
 | `info` | A setting this build of the library ignores, such as asking for Go support from a build without it, or a program the library cannot fake Go in. |
 | `debug` | On FreeBSD, a program that is not written in Go, so has no Go clock routines to take over. |
 
@@ -78,6 +78,17 @@ log.
 **A child program ignores its own settings.** It joined its parent's
 session, as every child does. See
 [One Clock per Process Tree](SESSIONS.md#one-clock-per-process-tree).
+
+**The programs a Go program starts are on a clock of their own.** The Go
+program was started with no clock, Go, hook, or timekeeper setting and no
+`LIBTIMEWARP__SHARED_FILE` in its environment, perhaps because its settings
+are in the configuration file, and a `warn` line in the log says so. Start
+it with `LIBTIMEWARP__SHARED_FILE=` set to empty; see
+[How Programs Find the Session](SESSIONS.md#how-programs-find-the-session).
+
+**A Go program reads a setting it was started with as empty.** The
+session's name took its place in the environment the program started
+with. See [How Programs Find the Session](SESSIONS.md#how-programs-find-the-session).
 
 **A program hangs after a freeze and never recovers.** Threads that slept
 under a frozen clock stay asleep after a thaw. Restart the program. See

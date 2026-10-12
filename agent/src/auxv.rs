@@ -9,32 +9,39 @@
 //! process's own, on the initial stack, and it is written in place: there is nowhere else a program
 //! looks.
 //!
-//! The vector sits just past the environment's terminator, which is the only way to its address.
-//! So it is found in the constructor, before anything of ours or of the program's can move
-//! `environ` off the stack it started on, and what is found is checked against the value libc
-//! itself answers for the same entry.
+//! The vector sits just past the terminator of the environment the kernel laid out, which is the
+//! only way to its address. So it is found in the constructor, from the array
+//! [`crate::initial_env`] takes for that environment, and what is found is checked against the
+//! value libc itself answers for an entry the kernel gives every process. A vector found that way
+//! is also what says the array is the one the kernel laid out, rather than a copy somebody moved to
+//! the heap.
 //!
 //! On FreeBSD the walk also keeps `AT_PHDR`, `AT_PHENT`, and `AT_PHNUM`, which locate the Go
 //! fallback routines in the program's own text: `elf_aux_info` answers none of the three.
 
 use std::ffi::c_char;
+#[cfg(any(feature = "vdso", target_os = "freebsd"))]
 use std::ptr;
-use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
+#[cfg(feature = "vdso")]
+use std::sync::atomic::AtomicPtr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use common::elf::{AT_PHDR, AT_PHENT, AT_PHNUM};
 
-unsafe extern "C" {
-    /// The environment as libc keeps it: the array the kernel left on the stack, until a libc that
-    /// has to grow it moves the array somewhere else.
-    static mut environ: *mut *mut c_char;
-}
-
 /// The entry this platform names the clock's source in: the vDSO on Linux, and the timekeep page
 /// on FreeBSD.
-#[cfg(target_os = "linux")]
+#[cfg(all(feature = "vdso", target_os = "linux"))]
 const TAG: libc::c_ulong = common::platform::AT_SYSINFO_EHDR;
+#[cfg(all(feature = "vdso", target_os = "freebsd"))]
+const TAG: libc::c_ulong = WITNESS;
+
+/// The entry checked against libc's own reader, which the kernel gives every process: the address
+/// of the random bytes it seeds a process with on Linux, and of the timekeep page on FreeBSD. Both
+/// are addresses no other word past a copy of the environment would happen to hold.
+#[cfg(target_os = "linux")]
+const WITNESS: libc::c_ulong = libc::AT_RANDOM;
 #[cfg(target_os = "freebsd")]
-const TAG: libc::c_ulong = common::platform::AT_TIMEKEEP as libc::c_ulong;
+const WITNESS: libc::c_ulong = common::platform::AT_TIMEKEEP as libc::c_ulong;
 
 /// The entry that ends the vector.
 const AT_NULL: libc::c_ulong = 0;
@@ -65,9 +72,11 @@ struct Entry {
 }
 
 /// The [`TAG`] entry of this process, or null when it was not found.
+#[cfg(feature = "vdso")]
 static SLOT: AtomicPtr<Entry> = AtomicPtr::new(ptr::null_mut());
 
 /// What the kernel left in that entry, or zero when this process has nothing there.
+#[cfg(feature = "vdso")]
 static GENUINE: AtomicUsize = AtomicUsize::new(0);
 
 /// This process's `AT_PHDR`, `AT_PHENT`, and `AT_PHNUM`, in that order, as the walk found them, or
@@ -75,19 +84,36 @@ static GENUINE: AtomicUsize = AtomicUsize::new(0);
 #[cfg(target_os = "freebsd")]
 static PROGRAM_HEADERS: [AtomicUsize; 3] = [const { AtomicUsize::new(0) }; 3];
 
-/// Finds the entry, before the program or we can move the environment it sits behind.
+/// Finds the vector past the terminator of `strings` and keeps the entries the rest of the library
+/// reads. Says whether this process's vector is what follows `strings`, which holds for the
+/// environment the kernel laid out alone.
 ///
 /// Called once, from the constructor. Relaxed stores, because the constructor is the whole of this
 /// process at the time and every later reader is a thread it started afterwards.
-pub(super) fn prime() {
-    let Some(vector) = find() else {
-        return;
+///
+/// # Safety
+/// `strings` must be a null-terminated array of pointers, and the words past its terminator must be
+/// readable as far as a walk goes before it stops at a word no vector holds.
+pub(crate) unsafe fn prime(strings: *mut *mut c_char) -> bool {
+    let Ok(wanted) = usize::try_from(witness_value()) else {
+        return false;
     };
-    let Some(entry) = entry_of(vector, TAG) else {
-        return;
+    // Safety: the caller guarantees `strings`.
+    let Some(vector) = (unsafe { walk(strings, wanted) }) else {
+        return false;
     };
-    GENUINE.store(entry.value.load(Ordering::Relaxed), Ordering::Relaxed);
-    SLOT.store(ptr::from_ref(entry).cast_mut(), Ordering::Relaxed);
+    keep(vector);
+    true
+}
+
+/// Keeps the entries of `vector` the rest of the library reads.
+#[cfg(any(feature = "vdso", target_os = "freebsd"))]
+fn keep(vector: &'static [Entry]) {
+    #[cfg(feature = "vdso")]
+    if let Some(entry) = entry_of(vector, TAG) {
+        GENUINE.store(entry.value.load(Ordering::Relaxed), Ordering::Relaxed);
+        SLOT.store(ptr::from_ref(entry).cast_mut(), Ordering::Relaxed);
+    }
     #[cfg(target_os = "freebsd")]
     for (kept, tag) in PROGRAM_HEADERS.iter().zip([AT_PHDR, AT_PHENT, AT_PHNUM]) {
         if let Some(entry) = entry_of(vector, tag) {
@@ -96,10 +122,15 @@ pub(super) fn prime() {
     }
 }
 
+/// Nothing to keep on Linux in a build that cannot pose as the vDSO: libc answers the program
+/// headers there.
+#[cfg(not(any(feature = "vdso", target_os = "freebsd")))]
+const fn keep(_: &'static [Entry]) {}
+
 /// What the kernel left in the entry, or `None` when this process has nothing there to pose as or
 /// the vector could not be reached.
-#[cfg(target_os = "linux")]
-pub(super) fn genuine() -> Option<usize> {
+#[cfg(all(feature = "vdso", target_os = "linux"))]
+pub(crate) fn genuine() -> Option<usize> {
     if SLOT.load(Ordering::Relaxed).is_null() {
         return None;
     }
@@ -108,7 +139,8 @@ pub(super) fn genuine() -> Option<usize> {
 }
 
 /// Points the entry at `base`, and says whether there was an entry to point.
-pub(super) fn point_at(base: usize) -> bool {
+#[cfg(feature = "vdso")]
+pub(crate) fn point_at(base: usize) -> bool {
     let slot = SLOT.load(Ordering::Relaxed);
     let Some(entry) = (!slot.is_null()).then(|| {
         // Safety: the pointer names an entry of this process's own auxiliary vector, which lives
@@ -128,16 +160,8 @@ pub(super) fn point_at(base: usize) -> bool {
 ///
 /// The same store [`point_at`] makes, Release for the same reason: the fallback it steers the
 /// runtime onto reads the session this process installed first.
-#[cfg(target_os = "freebsd")]
-#[cfg_attr(
-    not(feature = "vdso"),
-    expect(
-        dead_code,
-        reason = "the FreeBSD pose path withholds the entry through this; a build without the \
-                  vdso feature does not compile that path and leaves it unused"
-    )
-)]
-pub(super) fn withhold_timekeep() -> bool {
+#[cfg(all(feature = "vdso", target_os = "freebsd"))]
+pub(crate) fn withhold_timekeep() -> bool {
     point_at(0)
 }
 
@@ -154,7 +178,7 @@ pub(super) fn withhold_timekeep() -> bool {
                   unused"
     )
 )]
-pub(super) fn program_headers() -> Option<(usize, usize, usize)> {
+pub(crate) fn program_headers() -> Option<(usize, usize, usize)> {
     let [phdr, phent, phnum] = program_header_entries();
     (phdr != 0 && phent != 0 && phnum != 0).then_some((phdr, phent, phnum))
 }
@@ -176,26 +200,12 @@ fn program_header_entries() -> [usize; 3] {
         .map(|kept| kept.load(Ordering::Relaxed))
 }
 
-/// This process's vector, or `None` when it cannot be reached or carries no [`TAG`] entry.
-fn find() -> Option<&'static [Entry]> {
-    // A raw pointer, because libc may replace what it points at, and read from the constructor
-    // because that is before the program has run a line that could.
-    let held = &raw const environ;
-    // Safety: `environ` is libc's own pointer to the environment, which it keeps for the life of
-    // the process.
-    let strings = unsafe { ptr::read(held) };
-    if strings.is_null() {
-        return None;
-    }
-    // What libc answers for the same entry, which is what says the walk landed on the vector
-    // rather than on a copy of the environment somebody moved to the heap.
-    let wanted = usize::try_from(genuine_value()).ok()?;
-    walk(strings, wanted)
-}
-
 /// The vector past the environment `strings` holds, up to its terminator, or `None` when what
-/// follows the environment is not a vector whose [`TAG`] entry carries `wanted`.
-fn walk(strings: *mut *mut c_char, wanted: usize) -> Option<&'static [Entry]> {
+/// follows the environment is not a vector whose [`WITNESS`] entry carries `wanted`.
+///
+/// # Safety
+/// As for [`prime`].
+unsafe fn walk(strings: *mut *mut c_char, wanted: usize) -> Option<&'static [Entry]> {
     let mut strings = strings;
     // Past the environment's own terminator is where the vector starts.
     loop {
@@ -223,7 +233,7 @@ fn walk(strings: *mut *mut c_char, wanted: usize) -> Option<&'static [Entry]> {
         if entry.tag == AT_NULL {
             // Safety: every entry ahead of the terminator was read above as one of the vector's.
             let vector = unsafe { std::slice::from_raw_parts(entries, index) };
-            return entry_of(vector, TAG)
+            return entry_of(vector, WITNESS)
                 .is_some_and(|found| found.value.load(Ordering::Relaxed) == wanted)
                 .then_some(vector);
         }
@@ -236,20 +246,20 @@ fn entry_of(vector: &'static [Entry], tag: libc::c_ulong) -> Option<&'static Ent
     vector.iter().find(|entry| entry.tag == tag)
 }
 
-/// What libc says the entry carries, or zero when this process has nothing there.
+/// What libc says the [`WITNESS`] entry carries, or zero when this process has nothing there.
 ///
 /// This is what says the walk landed on the vector rather than on a copy of the environment
 /// somebody moved to the heap, so it has to come from libc's own reader rather than from the same
 /// walk: `getauxval` here, and `elf_aux_info` where that is the reader libc gives.
 #[cfg(target_os = "linux")]
-fn genuine_value() -> libc::c_ulong {
+fn witness_value() -> libc::c_ulong {
     // Safety: `getauxval` takes a tag and answers a number, touching nothing of ours.
-    unsafe { libc::getauxval(TAG) }
+    unsafe { libc::getauxval(WITNESS) }
 }
 
 /// The same, through the reader this platform's libc gives.
 #[cfg(target_os = "freebsd")]
-fn genuine_value() -> libc::c_ulong {
+fn witness_value() -> libc::c_ulong {
     let mut at: *mut libc::c_void = ptr::null_mut();
     let len = libc::c_int::try_from(size_of::<*mut libc::c_void>()).unwrap_or(0);
     // Safety: the buffer is a live pointer-sized word, which is what this entry answers in.
@@ -263,13 +273,15 @@ fn genuine_value() -> libc::c_ulong {
 
 #[cfg(test)]
 mod tests {
+    use std::ptr;
+
     use super::*;
 
     /// What the constructor found, which it had to find before naming the session in the
     /// environment: a libc that grows the environment moves it off the stack the vector sits on,
     /// and the walk past it stops being a walk to the vector.
     #[test]
-    #[cfg(target_os = "linux")]
+    #[cfg(all(feature = "vdso", target_os = "linux"))]
     fn the_entry_was_found_and_what_the_kernel_left_in_it_was_kept() {
         let genuine = genuine().expect("a program the kernel started carries the entry");
         // Safety: the address is what the kernel left in the vector, where it maps an ELF object.
@@ -289,7 +301,8 @@ mod tests {
             ptr::without_provenance_mut(0x4000_0000),
             ptr::without_provenance_mut(0x4000_1000),
         ];
-        assert!(walk(planted.as_ptr().cast_mut(), 0).is_none());
+        // Safety: the array is terminated, and the walk stops at the first word past it.
+        assert!(unsafe { walk(planted.as_ptr().cast_mut(), 0) }.is_none());
     }
 
     /// A walk that lands on a vector carrying the entry keeps every entry up to the terminator,
@@ -303,19 +316,22 @@ mod tests {
         let planted = [
             word(0x4000_0000),
             word(0),
-            word(TAG),
+            word(WITNESS),
             word(0x5000),
             word(AT_PHNUM),
             word(9),
             word(AT_NULL),
             word(0),
         ];
-        let vector = walk(planted.as_ptr().cast_mut(), 0x5000).expect("the entry is there");
+        // Safety: the array is terminated, and so is the vector planted past it.
+        let vector =
+            unsafe { walk(planted.as_ptr().cast_mut(), 0x5000) }.expect("the entry is there");
         assert_eq!(vector.len(), 2);
         let phnum = entry_of(vector, AT_PHNUM).expect("the entry after it is kept");
         assert_eq!(phnum.value.load(Ordering::Relaxed), 9);
 
-        assert!(walk(planted.as_ptr().cast_mut(), 0x6000).is_none());
+        // Safety: as above.
+        assert!(unsafe { walk(planted.as_ptr().cast_mut(), 0x6000) }.is_none());
     }
 
     /// The program headers this process reports locate an image that covers its own code, which is

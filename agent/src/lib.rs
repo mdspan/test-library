@@ -8,7 +8,12 @@
 //! exported symbols of the image, and what puts those in front of a program there is the
 //! interpose table rather than the name.
 
+// The auxiliary vector, found past the environment the kernel laid out: what the vDSO and the
+// FreeBSD Go fallback are posed through, and what tells that environment from a copy of it.
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+mod auxv;
 mod genuine;
+mod initial_env;
 mod interpose;
 
 // The FreeBSD mechanism that reaches the Go runtime's clock reads by interposing its own fallback
@@ -91,11 +96,10 @@ fn constructor() {
     // And the ratio the Mach counter runs at, which every reading of it converts through.
     #[cfg(target_os = "macos")]
     mach::prime();
-    // The auxiliary vector, before the environment it sits behind can be moved: `publish` below
-    // writes one of ours, and a libc that grows the environment moves it off the stack the vector
-    // is on.
-    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-    vdso::prime();
+    // The environment the kernel laid out, and on Linux and FreeBSD the auxiliary vector behind it,
+    // before libc's pointer can be moved off it: `publish` below writes a variable of ours, and a
+    // libc that grows the environment moves it to a copy.
+    initial_env::prime();
     // We are inside somebody else's program before its `main`. A panic here would abort a process
     // that has done nothing wrong, so the worst case is that the target runs on genuine time.
     drop(std::panic::catch_unwind(attach_or_create));
@@ -170,11 +174,13 @@ fn publish(session: session::Session) {
 }
 
 /// Names `path`, which [`session::Session::path`] keeps absolute, as the session whatever this
-/// process execs attaches to.
+/// process execs attaches to: in libc's environment, and then in the one the process started with,
+/// which is what a Go runtime hands its children.
 fn name_for_children(path: &Path) {
     // Safety: a constructor runs before `main`, so nothing in the program is reading `environ` yet
     // to race this write.
     unsafe { std::env::set_var(ENV_SHARED_FILE, path) };
+    initial_env::name_session(path);
 }
 
 /// Hands the session to the process for good: the mapped header, the hook in front of its keeper,

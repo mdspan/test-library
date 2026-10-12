@@ -19,29 +19,16 @@ use common::config::ENV_EMULATE_VDSO;
 use common::log::Level;
 use common::session::layout::Header;
 
-// The auxiliary vector is the one piece both mechanisms share: the same walk, past the same
-// environment terminator, for a tag each platform spells differently.
+// The auxiliary vector is the one piece both mechanisms share: the entry each platform names the
+// clock's source in, which the constructor found before anything could move the environment the
+// vector sits behind.
 #[cfg(feature = "vdso")]
-mod auxv;
+use crate::auxv;
 
 #[cfg(all(feature = "vdso", target_os = "linux"))]
 mod entries;
 #[cfg(all(feature = "vdso", target_os = "linux"))]
 mod image;
-
-/// Finds the auxiliary-vector entry `pose` rewrites, before the program can move it.
-///
-/// Called from the constructor, ahead of everything that touches the environment: the auxiliary
-/// vector is reached through `environ`, and a process that has replaced that pointer has taken the
-/// only way to it away.
-#[cfg(feature = "vdso")]
-pub(crate) fn prime() {
-    auxv::prime();
-}
-
-/// Nothing to find in a build that cannot pose as anything.
-#[cfg(not(feature = "vdso"))]
-pub(crate) const fn prime() {}
 
 /// Puts something of ours where a target that skips libc reads the clock, when the session says
 /// to.

@@ -184,17 +184,33 @@ fn compile(name: &str, extra: &[String]) -> PathBuf {
 /// this machine has no Go toolchain to build one with.
 ///
 /// A dynamically linked executable with cgo enabled, because that is the Go binary the library
-/// can reach at all: it has an interpreter, so the loader runs and our constructor with it. The
-/// runtime inside still skips libc for every clock it reads, which is the point of running one.
+/// can reach at all: it has an interpreter, so the loader runs and our constructor with it. A
+/// program that calls no C is still linked by Go itself, without the cgo runtime. The runtime
+/// inside still skips libc for every clock it reads, which is the point of running one.
+pub(crate) fn go_program(name: &str) -> Option<PathBuf> {
+    go_build(name, false)
+}
+
+/// The same, linked by the system linker, which links the cgo runtime in whether or not the
+/// program calls C: the C library starts the program and makes its threads, as in any Go program
+/// that does call C. Built as `<name>-cgo`.
+pub(crate) fn go_program_with_cgo(name: &str) -> Option<PathBuf> {
+    go_build(name, true)
+}
+
 #[expect(
     clippy::print_stderr,
     reason = "a machine with no Go says the cases went unexercised, rather than passing quietly"
 )]
-pub(crate) fn go_program(name: &str) -> Option<PathBuf> {
+fn go_build(name: &str, external: bool) -> Option<PathBuf> {
     let source = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/progs")
         .join(format!("{name}.go"));
-    let binary = target_dir().join("timewarp-tests").join(name);
+    let binary = target_dir().join("timewarp-tests").join(if external {
+        format!("{name}-cgo")
+    } else {
+        name.to_owned()
+    });
     let out_dir = binary.parent().expect("a binary sits in a directory");
 
     let _guard = COMPILE.lock().unwrap();
@@ -213,10 +229,12 @@ pub(crate) fn go_program(name: &str) -> Option<PathBuf> {
     command.arg("build");
     // Dynamically linked, so the preloaded library loads: a position-independent executable where
     // Go builds one, and external linking on FreeBSD arm64, where it does not.
-    if cfg!(all(target_os = "freebsd", target_arch = "aarch64")) {
-        command.arg("-ldflags=-linkmode=external");
-    } else {
+    let pie = !cfg!(all(target_os = "freebsd", target_arch = "aarch64"));
+    if pie {
         command.arg("-buildmode=pie");
+    }
+    if external || !pie {
+        command.arg("-ldflags=-linkmode=external");
     }
     let built = command
         .arg("-o")

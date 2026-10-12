@@ -4,9 +4,10 @@
 
 `time.Now`, `time.Since`, timers, and tickers follow the faked clock. On
 macOS, Go calls the system library like any other program, and nothing
-below applies. On Linux and FreeBSD, the Go runtime reads the clock without
-calling the C library, and libtimewarp fakes those reads under three
-conditions.
+below applies but
+[The Programs a Go Program Starts](#the-programs-a-go-program-starts). On
+Linux and FreeBSD, the Go runtime reads the clock without calling the C
+library, and libtimewarp fakes those reads under three conditions.
 
 **The program has to be dynamically linked.** Go links statically by
 default, and a statically linked program never loads the library. Build
@@ -55,6 +56,30 @@ directly:
   rate above 1 it blocks for about the real length of the sleep: at rate 10,
   `time.Sleep(10 * time.Second)` takes about ten real seconds. Under a rate
   below 1 the timing is right. A freeze holds every Go timer, as it should.
+
+### The Programs a Go Program Starts
+
+On every platform, a Go program passes the programs it starts the
+environment it was itself started with, never the one the C library keeps.
+The library names the session there as well, so those programs join it.
+That environment has no room for a new variable, so the session's name
+takes the place of `LIBTIMEWARP__SHARED_FILE` when the program was started
+with it, and otherwise of the first setting there that only a new session
+reads, such as `LIBTIMEWARP_TIME`. The Go program's own `os.Getenv` then
+reads that setting as empty, and the programs it starts do not get it;
+having joined the session, they have no use for it.
+
+Start the program with `LIBTIMEWARP__SHARED_FILE` set to empty to keep
+every setting:
+
+```sh
+LIBTIMEWARP__SHARED_FILE= LIBTIMEWARP_TIME=2020-01-01T00:00:00Z LD_PRELOAD=$TIMEWARP ./myprog
+```
+
+A program started with neither `LIBTIMEWARP__SHARED_FILE` nor such a
+setting logs a `warn` line, and the programs it starts begin sessions of
+their own. See
+[How Programs Find the Session](SESSIONS.md#how-programs-find-the-session).
 
 ## Linux
 
