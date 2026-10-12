@@ -102,13 +102,6 @@ jobs:
           cargo test --locked --workspace --all-features --lib go_locate 2>&1 \
             | tee -a "$RUNNER_TEMP/test.log"
 
-      # The Python tool is pure Python over the C library, so its own cases run wherever an
-      # interpreter does. The ones that read another process's environment exercise this
-      # platform's way of asking for it, which is the part that differs between the three.
-      - name: Python tool
-        working-directory: python
-        run: PYTHONPATH=. python3 -m unittest discover -s tests -t .
-
       - name: Name what failed
         if: failure()
         shell: bash
@@ -251,10 +244,6 @@ jobs:
           cargo test --locked --workspace --all-features --no-fail-fast 2>&1 \
             | tee "$RUNNER_TEMP/test.log"
 
-      - name: Python tool
-        working-directory: python
-        run: PYTHONPATH=. python3 -m unittest discover -s tests -t .
-
       - name: Name what failed
         if: failure()
         shell: bash
@@ -369,9 +358,7 @@ jobs:
           prepare: |
             # The base system carries no root certificates, so cargo cannot reach crates.io
             # until this package drops a bundle at /etc/ssl/cert.pem.
-            # python3 is for the Python tool's own cases; procstat, which those cases use to
-            # read another process's environment here, is in the base system.
-            pkg install -y ca_root_nss python3
+            pkg install -y ca_root_nss
             if [ "${{ matrix.arch }}" = aarch64 ]; then
               # aarch64 FreeBSD is a tier 3 Rust target, with no host toolchain for rustup to
               # install, so this row builds with whatever Rust the package repository carries.
@@ -438,14 +425,13 @@ jobs:
               cargo check --locked -p agent --no-default-features --all-targets
             fi
             # The action runs this script under `set -e`, so a failing suite is caught with `||`,
-            # and the exit at the end reports it once the Python tool and the summary have run.
+            # and the exit at the end reports it once the summary has run.
             # Streamed, so a run that hangs still shows how far it got; pipefail carries cargo's
             # status past tee.
             set -o pipefail
             status=0
             cargo test --locked --workspace --all-features --no-fail-fast 2>&1 | tee test.log \
               || status=1
-            (cd python && PYTHONPATH=. python3 -m unittest discover -s tests -t .) || status=1
             if [ $status -ne 0 ]; then
               echo "=== freebsd failed ==="
               grep -E '^test .+ \.\.\. FAILED$' test.log || true

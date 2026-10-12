@@ -1,4 +1,4 @@
-//! The stable code every controller call answers with, and the message beside it.
+//! The code every controller refusal carries, and the message beside it.
 
 use std::io;
 
@@ -10,29 +10,23 @@ use common::time::Family;
 pub(crate) const CPU_HAS_ONE_SETTING: &str =
     "Cpu has one setting, its rate, fixed at creation, and no single value it shows now";
 
-/// The stable number a controller call answers with outside Rust.
-///
-/// Zero is success, so a caller tests for it and asks for the message otherwise. A number is fixed
-/// for good: a code added later takes a new one rather than renumbering its neighbours.
+/// The kind of a refusal, without the message or the value it names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(i32)]
 pub enum Code {
-    /// The call did what it was asked.
-    Ok = 0,
     /// [`Error::NoSession`].
-    NoSession = 1,
+    NoSession,
     /// [`Error::BadSessionFile`].
-    BadSessionFile = 2,
+    BadSessionFile,
     /// [`Error::BadArgument`].
-    BadArgument = 3,
+    BadArgument,
     /// [`Error::WouldGoBackwards`].
-    WouldGoBackwards = 4,
+    WouldGoBackwards,
     /// [`Error::UnsupportedForKeeper`].
-    UnsupportedForKeeper = 5,
+    UnsupportedForKeeper,
     /// [`Error::NotOurs`].
-    NotOurs = 6,
+    NotOurs,
     /// [`Error::Io`].
-    Io = 7,
+    Io,
 }
 
 /// Why a controller call did not do what it was asked.
@@ -60,7 +54,7 @@ pub enum Error {
 }
 
 impl Error {
-    /// The stable number this refusal answers with outside Rust.
+    /// The kind of this refusal.
     #[must_use]
     pub const fn code(&self) -> Code {
         match self {

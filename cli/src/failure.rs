@@ -61,7 +61,6 @@ impl Failure {
 /// The `snake_case` name of a refusal's code.
 const fn code_name(code: Code) -> &'static str {
     match code {
-        Code::Ok => "ok",
         Code::NoSession => "no_session",
         Code::BadSessionFile => "bad_session_file",
         Code::BadArgument => "bad_argument",

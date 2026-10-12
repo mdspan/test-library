@@ -172,15 +172,3 @@ fn would_go_backwards_names_a_refused_move_on_a_nondecreasing_family() {
     transaction.shift(Family::Realtime, Nanos(-SECOND)).unwrap();
     transaction.commit().unwrap();
 }
-
-#[test]
-fn the_codes_are_the_numbers_the_c_header_declares() {
-    assert_eq!(Code::Ok as i32, 0);
-    assert_eq!(Code::NoSession as i32, 1);
-    assert_eq!(Code::BadSessionFile as i32, 2);
-    assert_eq!(Code::BadArgument as i32, 3);
-    assert_eq!(Code::WouldGoBackwards as i32, 4);
-    assert_eq!(Code::UnsupportedForKeeper as i32, 5);
-    assert_eq!(Code::NotOurs as i32, 6);
-    assert_eq!(Code::Io as i32, 7);
-}

@@ -60,7 +60,7 @@ use common::session::{self, SessionError, Setup, naming};
 /// What a process that fails closed exits with: the `EX_CONFIG` of `sysexits.h`.
 const EX_CONFIG: libc::c_int = 78;
 
-/// The genuine reading of `clock`, for a hook or a controller loaded into a faked process.
+/// The genuine reading of `clock`, for a hook loaded into a faked process.
 ///
 /// Everything else in this library that names a clock is faked, so this is the only way back to
 /// what the operating system actually says.
