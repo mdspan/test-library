@@ -53,7 +53,9 @@ enum libtimewarp_kind {
     LIBTIMEWARP_INSTANT_TO_FAKE = 1,
     /* A fake instant becomes the genuine one: timestamp sets, clock sets. */
     LIBTIMEWARP_INSTANT_TO_GENUINE = 2,
-    /* A fake duration becomes the genuine one: sleeps, timeouts, timer arms. */
+    /* A fake duration becomes the genuine one: sleeps, timeouts, timer arms.
+       A timer arm answered with 0 or less fires at once rather than being
+       disarmed. */
     LIBTIMEWARP_DURATION_TO_GENUINE = 3,
     /* A genuine remaining becomes the fake one: timer queries. */
     LIBTIMEWARP_DURATION_TO_FAKE = 4

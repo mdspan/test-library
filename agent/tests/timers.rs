@@ -1,6 +1,7 @@
 //! Timers: every timer the library takes over, measured against the genuine time it took to fire,
-//! the family each one follows, what a query reports while a timer is armed, and what a change
-//! landing after the arm reaches, which is nothing.
+//! the family each one follows, what a query reports while a timer is armed, a timer armed for
+//! less than its struct can carry once converted, and what a change landing after the arm
+//! reaches, which is nothing.
 //!
 //! The lists below are this platform's own, and a timer the platform does not have is named on
 //! none of them rather than skipped quietly.
@@ -480,6 +481,142 @@ fn a_frozen_clock_fires_a_timer_armed_for_a_deadline_already_past() {
         "the timer fired after {} ms for a deadline already past",
         genuine / MILLI
     );
+}
+
+/// Every timer `short_timers` arms to fire, this platform's own.
+#[cfg(target_os = "linux")]
+const SHORT_TIMERS: &[&str] = &[
+    "setitimer_real",
+    "itimer_prof",
+    "timer_settime",
+    "timerfd_settime",
+];
+
+/// The same for FreeBSD, without the timerfd.
+#[cfg(target_os = "freebsd")]
+const SHORT_TIMERS: &[&str] = &["setitimer_real", "itimer_prof", "timer_settime"];
+
+/// The same for macOS, whose timers are the interval timers alone.
+#[cfg(target_os = "macos")]
+const SHORT_TIMERS: &[&str] = &["setitimer_real", "itimer_prof"];
+
+/// Every query of a short interval `short_timers` makes, the old value an arm reports included.
+#[cfg(target_os = "linux")]
+const SHORT_INTERVALS: &[&str] = &[
+    "getitimer",
+    "setitimer_old",
+    "timer_gettime",
+    "timerfd_gettime",
+];
+
+/// The same for FreeBSD, without the timerfd.
+#[cfg(target_os = "freebsd")]
+const SHORT_INTERVALS: &[&str] = &["getitimer", "setitimer_old", "timer_gettime"];
+
+/// The same for macOS, without the POSIX timer either.
+#[cfg(target_os = "macos")]
+const SHORT_INTERVALS: &[&str] = &["getitimer", "setitimer_old"];
+
+/// One run of `short_timers`, arming each timer for `units` of the least its struct can name, and
+/// `alarm(1)` beside them when `alarm` says so.
+fn short_timers(dir: &Path, units: i64, alarm: bool, env: &[(&str, &str)]) -> Report {
+    let mut run = Run::new(harness::program_linked_with(
+        "short_timers",
+        EXTRA_LIBRARIES,
+    ))
+    .without_library()
+    .session_dir(dir)
+    .arg(units.to_string());
+    if alarm {
+        run = run.arg("alarm");
+    }
+    for (name, value) in env {
+        run = run.env(name, value);
+    }
+    run.run()
+}
+
+/// The environment that gives every family `rate`, the Cpu one included.
+const fn every_rate(rate: &str) -> [(&str, &str); 2] {
+    [("LIBTIMEWARP_RATE", rate), ("LIBTIMEWARP_CPU_RATE", rate)]
+}
+
+/// Asserts every timer of a run fired, `extra` beside this platform's own, and every interval it
+/// queried read as one.
+#[track_caller]
+fn assert_still_armed(report: &Report, extra: &[&str]) {
+    for key in SHORT_TIMERS.iter().chain(extra) {
+        assert_eq!(
+            report.nanos(&format!("{key}.available")),
+            1,
+            "{key} did not run"
+        );
+        assert_eq!(
+            report.nanos(&format!("{key}.fired")),
+            1,
+            "{key} never fired, so the arm disarmed it"
+        );
+    }
+    for key in SHORT_INTERVALS {
+        assert_eq!(
+            report.nanos(&format!("{key}.available")),
+            1,
+            "{key} did not run"
+        );
+        let interval = report.nanos(&format!("{key}.interval"));
+        assert!(
+            interval > 0,
+            "{key} read an interval of {interval} ns, a timer that does not repeat"
+        );
+    }
+}
+
+#[test]
+fn a_timer_armed_for_the_least_its_struct_names_still_fires_on_a_clock_twice_as_fast() {
+    let dir = tempfile::tempdir().unwrap();
+    // Half a nanosecond and half a microsecond, which neither struct can carry.
+    let report = short_timers(dir.path(), 1, false, &every_rate("2"));
+    assert_still_armed(&report, &[]);
+}
+
+#[test]
+fn a_timer_armed_for_under_a_millisecond_still_fires_on_a_clock_a_thousand_times_as_fast() {
+    let dir = tempfile::tempdir().unwrap();
+    // 999 fake microseconds in a `timeval` are 999 genuine nanoseconds, and 999 fake nanoseconds
+    // in a `timespec` are under one.
+    let report = short_timers(dir.path(), 999, false, &every_rate("1000"));
+    assert_still_armed(&report, &[]);
+}
+
+#[test]
+fn an_alarm_of_a_second_still_fires_on_a_clock_millions_of_times_as_fast() {
+    let dir = tempfile::tempdir().unwrap();
+    // A fake second is half a genuine microsecond.
+    let report = short_timers(dir.path(), 1, true, &every_rate("2000000"));
+    assert_still_armed(&report, &["alarm"]);
+}
+
+#[test]
+fn a_short_interval_still_reads_as_one_on_a_slow_clock() {
+    let dir = tempfile::tempdir().unwrap();
+    // A fake microsecond of interval is a few genuine ones, and what the kernel reads back of
+    // those converts to fake nanoseconds that are no whole number of microseconds, and may be
+    // fewer than one.
+    let report = short_timers(dir.path(), 1, false, &every_rate("0.3"));
+    assert_still_armed(&report, &[]);
+}
+
+#[test]
+fn a_hook_that_answers_an_arm_with_nothing_fires_the_timer_at_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let hook = harness::hook_library("timers_at_once");
+    let report = short_timers(
+        dir.path(),
+        1,
+        true,
+        &[("LIBTIMEWARP_HOOK", &hook.display().to_string())],
+    );
+    assert_still_armed(&report, &["alarm"]);
 }
 
 /// Every arm of the timers group, the number the ABI gives it, and the clock the timer was created

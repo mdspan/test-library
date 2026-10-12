@@ -22,7 +22,9 @@
 //!
 //! Zero is not a duration in either direction. A zero expiry disarms a timer and a zero interval
 //! stops it repeating, so neither is scaled; a frozen family must not turn a disarm into the
-//! longest duration there is, and a query must not turn a disarmed timer into an armed one.
+//! longest duration there is, and a query must not turn a disarmed timer into an armed one. Nor
+//! may a field with something in it come to nothing: an arm converts to at least a nanosecond, and
+//! a `timeval` field rounds up to the microsecond, in both directions.
 
 // Which clock a POSIX timer or a timerfd was created on, which is a question only where there
 // are such timers to create.
@@ -38,7 +40,7 @@ use common::time::Nanos;
 
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use crate::wait::duration_of;
-use crate::wait::{self, MICROS_PER_SECOND, unsupported};
+use crate::wait::{self, MICROS_PER_SECOND, NANOS_PER_MICRO, unsupported};
 use crate::{genuine, state};
 
 /// The clock of the family an interval timer follows, or `None` for a `which` the genuine call
@@ -58,7 +60,8 @@ const fn itimer_clock(which: libc::c_int) -> Option<libc::clockid_t> {
 /// the program wrote it: it disarms the timer, or nothing fakes this clock.
 ///
 /// The expiry is converted first, because it is the field that decides whether the timer is armed
-/// at all, and an interval of nothing is a timer that does not repeat rather than a duration.
+/// at all, and an interval of nothing is a timer that does not repeat rather than a duration. Each
+/// field the program set stays set, however short the rate or the hook makes it.
 #[inline]
 fn armed(
     func: Func,
@@ -78,9 +81,27 @@ fn armed(
     let genuine_interval = if interval.0 == 0 {
         Nanos::ZERO
     } else {
-        wait::genuine_duration(func, clock, interval)?
+        still_set(wait::genuine_duration(func, clock, interval)?)
     };
-    Some((genuine_expiry, genuine_interval))
+    Some((still_set(genuine_expiry), genuine_interval))
+}
+
+/// A converted field of an arm, at least a nanosecond, because the program set the field and a
+/// field of nothing would disarm the timer or stop it repeating. One that comes due at once fires
+/// at once.
+const fn still_set(genuine: Nanos) -> Nanos {
+    if genuine.0 < 1 { Nanos(1) } else { genuine }
+}
+
+/// A timer field as a `timeval`, rounded up to the microsecond: an arm fires no earlier than its
+/// conversion says, and a field with anything in it never comes out as the nothing that disarms,
+/// on the way to the kernel or back from it.
+fn timeval_of(field: Nanos) -> libc::timeval {
+    let micros = field
+        .0
+        .saturating_add(NANOS_PER_MICRO - 1)
+        .div_euclid(NANOS_PER_MICRO);
+    Nanos(micros.saturating_mul(NANOS_PER_MICRO)).to_timeval()
 }
 
 /// What a timer's genuine remaining becomes in the program's own units, or `None` when it stands as
@@ -135,8 +156,8 @@ unsafe fn armed_itimerval(
     // An interval timer's expiry is always relative: `setitimer` has no absolute form.
     let (expiry, interval) = armed(func, clock, expiry, interval, false)?;
     Some(libc::itimerval {
-        it_interval: interval.to_timeval(),
-        it_value: expiry.to_timeval(),
+        it_interval: timeval_of(interval),
+        it_value: timeval_of(expiry),
     })
 }
 
@@ -153,10 +174,10 @@ unsafe fn report_itimerval(func: Func, clock: libc::clockid_t, value: *mut libc:
     // Safety: `value` is non-null, so the caller's guarantee makes it valid for this access.
     let left = unsafe { &mut *value };
     if let Some(expiry) = remaining(func, clock, Nanos::from_timeval(&left.it_value)) {
-        left.it_value = expiry.to_timeval();
+        left.it_value = timeval_of(expiry);
     }
     if let Some(interval) = remaining(func, clock, Nanos::from_timeval(&left.it_interval)) {
-        left.it_interval = interval.to_timeval();
+        left.it_interval = timeval_of(interval);
     }
 }
 
@@ -446,6 +467,8 @@ pub(crate) unsafe fn timerfd_gettime(
 
 #[cfg(test)]
 mod tests {
+    use common::time::Rate;
+
     use super::*;
 
     fn timeval(sec: libc::time_t, usec: libc::suseconds_t) -> libc::timeval {
@@ -506,6 +529,71 @@ mod tests {
         assert_eq!(
             remaining(Func::Getitimer, clock::REALTIME, Nanos::ZERO),
             None
+        );
+    }
+
+    /// What a timer field reads as once it has been through a `timeval`.
+    fn through_timeval(field: Nanos) -> Nanos {
+        Nanos::from_timeval(&timeval_of(field))
+    }
+
+    #[test]
+    fn a_field_the_program_set_converts_to_at_least_a_nanosecond() {
+        assert_eq!(still_set(Nanos::ZERO), Nanos(1));
+        assert_eq!(still_set(Nanos(-5)), Nanos(1));
+        assert_eq!(still_set(Nanos(7)), Nanos(7));
+        assert_eq!(still_set(Nanos(i64::MAX)), Nanos(i64::MAX));
+    }
+
+    #[test]
+    fn a_timeval_field_rounds_up_to_the_microsecond() {
+        assert_eq!(through_timeval(Nanos::ZERO), Nanos::ZERO);
+        assert_eq!(through_timeval(Nanos(1)), Nanos(NANOS_PER_MICRO));
+        assert_eq!(through_timeval(Nanos(999)), Nanos(NANOS_PER_MICRO));
+        assert_eq!(
+            through_timeval(Nanos(NANOS_PER_MICRO)),
+            Nanos(NANOS_PER_MICRO)
+        );
+        assert_eq!(
+            through_timeval(Nanos(NANOS_PER_MICRO + 1)),
+            Nanos(2 * NANOS_PER_MICRO)
+        );
+        assert_eq!(
+            through_timeval(Nanos(Nanos::SECOND - 1)),
+            Nanos(Nanos::SECOND)
+        );
+        // A frozen family's longest duration stays the longest a `timeval` holds.
+        assert_eq!(timeval_of(Nanos(i64::MAX)).tv_sec, i64::MAX / Nanos::SECOND);
+    }
+
+    #[test]
+    fn a_short_arm_on_a_fast_clock_stays_armed() {
+        let twice = Rate::from_f64(2.0).unwrap();
+        let thousand = Rate::from_f64(1_000.0).unwrap();
+
+        // A nanosecond of `timespec` at twice the speed is half a genuine one.
+        assert_eq!(still_set(Nanos(twice.unscale(1))), Nanos(1));
+        // A microsecond of `timeval` at twice the speed, and anything under a millisecond at a
+        // thousand times, is under a genuine microsecond.
+        assert_eq!(
+            through_timeval(still_set(Nanos(twice.unscale(NANOS_PER_MICRO)))),
+            Nanos(NANOS_PER_MICRO)
+        );
+        assert_eq!(
+            through_timeval(still_set(Nanos(thousand.unscale(999 * NANOS_PER_MICRO)))),
+            Nanos(NANOS_PER_MICRO)
+        );
+        // Nothing asked of either is still nothing.
+        assert_eq!(through_timeval(Nanos(twice.unscale(0))), Nanos::ZERO);
+    }
+
+    #[test]
+    fn a_short_remaining_on_a_slow_clock_reads_as_armed() {
+        // Three genuine microseconds at 0.3 are under one fake microsecond.
+        let slow = Rate::from_f64(0.3).unwrap();
+        assert_eq!(
+            through_timeval(Nanos(slow.scale(3 * NANOS_PER_MICRO))),
+            Nanos(NANOS_PER_MICRO)
         );
     }
 }

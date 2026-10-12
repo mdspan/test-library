@@ -49,7 +49,7 @@ use crate::{genuine, interpose, state};
 const NANOS_PER_MILLI: i64 = 1_000_000;
 
 /// Microseconds as nanoseconds, the unit `usleep` and a `timeval` count their fractions in.
-const NANOS_PER_MICRO: i64 = 1_000;
+pub(crate) const NANOS_PER_MICRO: i64 = 1_000;
 
 /// The first microsecond a `timeval`'s fraction may not name, in the width the field has.
 pub(crate) const MICROS_PER_SECOND: libc::suseconds_t = 1_000_000;

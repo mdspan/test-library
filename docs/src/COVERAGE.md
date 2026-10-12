@@ -55,6 +55,14 @@ Each wait follows the family of the clock it measures:
 program sleeps reaches that sleep's end only if the program sleeps again.
 Timers behave the same way: a timer is converted when it is armed.
 
+**A timer you arm stays armed.** However fast the clock runs, a timer armed
+for any time at all fires, at once when its real time comes to less than
+the call can carry, and one given any interval at all repeats. A query of
+an armed timer, the old value an arm hands back included, never reads as
+nothing left. `setitimer`, `getitimer` and `alarm` count in microseconds
+underneath, and every value converted for them rounds up to the next whole
+microsecond.
+
 **Freezing is one way.** A sleep that starts or is running under rate 0
 gets the longest wait there is, about 292 years, and setting the rate back
 leaves it asleep. A thread sleeping when you freeze stays asleep until the

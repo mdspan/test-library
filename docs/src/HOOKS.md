@@ -106,6 +106,12 @@ everything, and a hook can still look at `func` for special cases. A wait
 with an absolute deadline arrives as a clock read for the faked now,
 followed by a duration.
 
+A timer arm the hook answers with 0 or less fires at once, and an interval
+answered that way repeats as often as the system allows: a timer the program
+armed stays armed whatever the hook answers. An answer for `setitimer`,
+`getitimer` or `alarm` rounds up to the next whole microsecond, the unit of
+the interval timer underneath all three.
+
 Calls that set the clock, `settimeofday` and its neighbours, reach the hook
 as `LIBTIMEWARP_INSTANT_TO_GENUINE`, with the instant the program asked for.
 Handling one tells the program it succeeded, and `*out` is ignored.
