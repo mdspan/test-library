@@ -68,9 +68,13 @@ impl Rate {
     /// which is what a wait is asked for and what it must block for.
     ///
     /// Saturating like [`Rate::scale`]. A frozen family gives the longest duration there is: its
-    /// clock never advances, so a wait on it is owed every nanosecond we can name.
+    /// clock never advances, so a wait on it is owed every nanosecond we can name. Zero stays zero
+    /// at every rate, frozen included, because a wait for no advance at all is already over.
     #[must_use]
     pub fn unscale(self, nanos: i64) -> i64 {
+        if nanos == 0 {
+            return 0;
+        }
         if self.0 == 0 {
             return if nanos < 0 { i64::MIN } else { i64::MAX };
         }
@@ -148,8 +152,14 @@ mod tests {
     #[test]
     fn a_frozen_family_owes_a_wait_every_nanosecond_there_is() {
         assert_eq!(Rate::FROZEN.unscale(1), i64::MAX);
-        assert_eq!(Rate::FROZEN.unscale(0), i64::MAX);
         assert_eq!(Rate::FROZEN.unscale(-1), i64::MIN);
+    }
+
+    #[test]
+    fn a_wait_of_nothing_unscales_to_nothing_at_every_rate() {
+        for rate in [Rate::FROZEN, Rate(1), Rate::UNITY, Rate::MAX] {
+            assert_eq!(rate.unscale(0), 0, "{rate:?}");
+        }
     }
 
     #[test]

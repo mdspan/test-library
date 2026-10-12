@@ -1048,7 +1048,8 @@ pub fn cpu_scaled(header: &Header, clock: libc::clockid_t, value: Nanos) -> Opti
 ///
 /// A wait is a promise about faketime: wake when the clock has advanced this far. So the duration
 /// is divided by the rate of the family the wait follows, and a frozen family owes it the longest
-/// duration there is. An absolute deadline reaches here as the fake duration still remaining.
+/// duration there is. A wait of nothing blocks for nothing at every rate. An absolute deadline
+/// reaches here as the fake duration still remaining, which is nothing once it has passed.
 ///
 /// The same read path as [`clock_now`]: no lock, no allocation, nothing written to shared memory.
 #[inline]

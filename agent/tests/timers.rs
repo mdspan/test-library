@@ -457,6 +457,31 @@ fn a_frozen_clock_holds_a_timer_and_thawing_does_not_release_it() {
     drop(child.wait());
 }
 
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn a_frozen_clock_fires_a_timer_armed_for_a_deadline_already_past() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut run = Run::new(harness::program_linked_with("timer_arm", EXTRA_LIBRARIES))
+        .without_library()
+        .session_dir(dir.path())
+        .arg("50")
+        .arg("past")
+        .within(std::time::Duration::from_secs(30));
+    for (name, value) in armed_rate("0") {
+        run = run.env(name, value);
+    }
+    let report = run.run();
+
+    // The expiry is behind what the clock shows, so no advance is left to wait for and the timer
+    // fires at once, frozen clock or not.
+    let genuine = report.nanos("genuine");
+    assert!(
+        genuine < 500 * MILLI,
+        "the timer fired after {} ms for a deadline already past",
+        genuine / MILLI
+    );
+}
+
 /// Every arm of the timers group, the number the ABI gives it, and the clock the timer was created
 /// on, which is the one the program named.
 fn arm_calls() -> Vec<(&'static str, i64, i64)> {

@@ -2,9 +2,12 @@
 //! back what the target printed.
 
 use std::collections::BTreeMap;
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output, Stdio};
 use std::sync::{Mutex, OnceLock};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 /// Where cargo put the artifacts of this test run.
 fn target_dir() -> PathBuf {
@@ -352,6 +355,7 @@ pub(crate) struct Run {
     session_dir: Option<PathBuf>,
     current_dir: Option<PathBuf>,
     through: Vec<String>,
+    patience: Option<Duration>,
 }
 
 impl Run {
@@ -365,6 +369,7 @@ impl Run {
             session_dir: None,
             current_dir: None,
             through: Vec::new(),
+            patience: None,
         }
     }
 
@@ -414,6 +419,13 @@ impl Run {
     /// session and the target attaches to it by the inherited path, as any exec does.
     pub(crate) fn through(mut self, wrapper: &[String]) -> Self {
         self.through = wrapper.to_vec();
+        self
+    }
+
+    /// Kills the target and fails the case once `patience` has passed with the target still
+    /// running, for a case whose target would otherwise block the suite for good.
+    pub(crate) const fn within(mut self, patience: Duration) -> Self {
+        self.patience = Some(patience);
         self
     }
 
@@ -469,7 +481,10 @@ impl Run {
         }
 
         let before = genuine_now();
-        let output = command.output().expect("target program ran");
+        let output = match self.patience {
+            Some(patience) => output_within(&mut command, &self.program, patience),
+            None => command.output().expect("target program ran"),
+        };
         let after = genuine_now();
 
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
@@ -484,6 +499,54 @@ impl Run {
             after,
         }
     }
+}
+
+/// What [`Command::output`] answers, from a target that has to leave within `patience`. One still
+/// running then is killed, and the case fails with whatever it printed.
+fn output_within(command: &mut Command, program: &Path, patience: Duration) -> Output {
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("target program ran");
+    let stdout = drained(child.stdout.take());
+    let stderr = drained(child.stderr.take());
+    let until = Instant::now() + patience;
+    let mut late = false;
+    while child.try_wait().expect("target program ran").is_none() {
+        if Instant::now() >= until {
+            late = true;
+            drop(child.kill());
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let output = Output {
+        status: child.wait().expect("target program ran"),
+        stdout: stdout.join().expect("stdout was read"),
+        stderr: stderr.join().expect("stderr was read"),
+    };
+    assert!(
+        !late,
+        "{} was still running after {patience:?}\nstdout:\n{}\nstderr:\n{}",
+        program.display(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    output
+}
+
+/// Everything `pipe` carries until it closes, read on a thread of its own so a target filling one
+/// pipe never blocks on it.
+fn drained(pipe: Option<impl Read + Send + 'static>) -> JoinHandle<Vec<u8>> {
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        if let Some(mut pipe) = pipe {
+            drop(pipe.read_to_end(&mut bytes));
+        }
+        bytes
+    })
 }
 
 fn parse(stdout: &str) -> BTreeMap<String, String> {

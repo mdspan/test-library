@@ -616,13 +616,11 @@ fn a_wait_the_family_table_leaves_alone_blocks_for_what_it_asked() {
     assert_blocked(&plain, "nanosleep", 200 * MILLI);
 }
 
-#[test]
-fn a_wait_asked_for_nothing_answers_at_once() {
-    let dir = tempfile::tempdir().unwrap();
-    let report = waits(dir.path(), 0, &[("LIBTIMEWARP_RATE", "10")]);
-
+/// Asserts every wait of a run asked for nothing answered at once.
+#[track_caller]
+fn assert_answered_at_once(report: &Report) {
     for key in MONOTONIC_WAITS.iter().chain(REALTIME_WAITS) {
-        if *key == "sleep" || report.nanos(&format!("{key}.available")) == 0 {
+        if report.nanos(&format!("{key}.available")) == 0 {
             continue;
         }
         let genuine = report.nanos(&format!("{key}.genuine"));
@@ -632,4 +630,26 @@ fn a_wait_asked_for_nothing_answers_at_once() {
             genuine / MILLI
         );
     }
+}
+
+#[test]
+fn a_wait_asked_for_nothing_answers_at_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let report = waits(dir.path(), 0, &[("LIBTIMEWARP_RATE", "10")]);
+    assert_answered_at_once(&report);
+}
+
+#[test]
+fn a_wait_asked_for_nothing_answers_at_once_on_a_frozen_clock() {
+    let dir = tempfile::tempdir().unwrap();
+    // Every family the waits follow is frozen. A zero timeout asks for no advance at all, and an
+    // absolute deadline at what the clock shows is already reached, so neither may block.
+    let report = Run::new(waits_program())
+        .without_library()
+        .session_dir(dir.path())
+        .arg("0")
+        .env("LIBTIMEWARP_RATE", "0")
+        .within(std::time::Duration::from_secs(30))
+        .run();
+    assert_answered_at_once(&report);
 }

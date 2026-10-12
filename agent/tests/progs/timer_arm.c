@@ -4,15 +4,18 @@
 
    A timerfd where the platform has one, a POSIX timer on the monotonic clock where it does not,
    and the wall-clock interval timer on macOS, which has neither. Either way the timer is armed
-   with a relative duration, and the suite sets the rate of whichever family it follows.
+   with a relative duration, unless argv[2] is `past`, and the suite sets the rate of whichever
+   family it follows.
 
    The three are reached through one interface in nanoseconds, because `struct itimerspec` is a
    POSIX timers type and a platform without those timers does not declare it.
 
    Linked against the library rather than preloading it, so the genuine clock comes from the
-   library's own symbol. argv[1] is the fake duration in milliseconds. `disarmed=` goes out first,
-   carrying what a timer disarmed on this session reports it has left, and `armed=1` after the
-   conversion, so a case knows exactly when to make its change. */
+   library's own symbol. argv[1] is the fake duration in milliseconds. `past` as argv[2] arms the
+   timer for an absolute expiry one nanosecond after its clock's epoch instead, a deadline already
+   gone, which macOS, with no absolute form, refuses. `disarmed=` goes out first, carrying what a
+   timer disarmed on this session reports it has left, and `armed=1` after the conversion, so a
+   case knows exactly when to make its change. */
 #define _GNU_SOURCE
 #include <errno.h>
 #include <signal.h>
@@ -68,6 +71,13 @@ static void arm(long long ns) {
     timerfd_settime(timer, 0, &value, NULL);
 }
 
+static int arm_at(long long ns) {
+    struct itimerspec value;
+    memset(&value, 0, sizeof value);
+    value.it_value = spec_of(ns);
+    return timerfd_settime(timer, TFD_TIMER_ABSTIME, &value, NULL);
+}
+
 static long long left(void) {
     struct itimerspec value;
     memset(&value, 0, sizeof value);
@@ -103,6 +113,11 @@ static void arm(long long ns) {
     memset(&value, 0, sizeof value);
     value.it_value = val_of(ns);
     setitimer(ITIMER_REAL, &value, NULL);
+}
+
+static int arm_at(long long ns) {
+    (void)ns;
+    return -1;
 }
 
 static long long left(void) {
@@ -147,6 +162,13 @@ static void arm(long long ns) {
     timer_settime(timer, 0, &value, NULL);
 }
 
+static int arm_at(long long ns) {
+    struct itimerspec value;
+    memset(&value, 0, sizeof value);
+    value.it_value = spec_of(ns);
+    return timer_settime(timer, TIMER_ABSTIME, &value, NULL);
+}
+
 static long long left(void) {
     struct itimerspec value;
     memset(&value, 0, sizeof value);
@@ -183,7 +205,13 @@ int main(int argc, char **argv) {
     printf("disarmed=%lld\n", left());
 
     printf("fake=%lld\n", fake);
-    arm(fake);
+    if (argc > 2 && strcmp(argv[2], "past") == 0) {
+        if (arm_at(1) != 0) {
+            return 5;
+        }
+    } else {
+        arm(fake);
+    }
     printf("armed=1\n");
     fflush(stdout);
 

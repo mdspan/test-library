@@ -977,6 +977,27 @@ fn a_disarmed_timer_has_nothing_left_and_an_armed_one_never_has_nothing() {
 }
 
 #[test]
+fn a_frozen_family_holds_a_wait_for_good_unless_it_asked_for_nothing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut setup = setup_in(tmp.path());
+    setup.monotonic.rate = Rate::FROZEN;
+    let session = create(&setup).unwrap();
+    let header = session.header();
+
+    // A zero timeout, or a deadline already reached, waits for no advance at all, so it blocks for
+    // nothing even on a clock that never advances.
+    assert_eq!(
+        wait_duration(header, monotonic(), Nanos::ZERO),
+        Some(Nanos::ZERO)
+    );
+    // Any other wait on that clock blocks for the longest duration there is.
+    assert_eq!(
+        wait_duration(header, monotonic(), Nanos(1)),
+        Some(Nanos(i64::MAX))
+    );
+}
+
+#[test]
 fn a_file_timestamp_is_carried_forward_from_the_two_nows() {
     let tmp = tempfile::tempdir().unwrap();
     let mut setup = setup_in(tmp.path());

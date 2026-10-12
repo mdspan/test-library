@@ -59,7 +59,9 @@ Timers behave the same way: a timer is converted when it is armed.
 gets the longest wait there is, about 292 years, and setting the rate back
 leaves it asleep. A thread sleeping when you freeze stays asleep until the
 program is killed, and so does every thread that sleeps while the clock is
-frozen, a zero-length sleep included. Plan on restarting a frozen program,
+frozen. A zero-length sleep or timeout still returns at once, as does a wait
+for a deadline the frozen clock has already reached, and a timer armed for
+such a deadline fires at once. Plan on restarting a frozen program,
 or freeze the wall clock alone with `LIBTIMEWARP_REALTIME_RATE=0`, which
 leaves the waits that follow the monotonic clocks running.
 

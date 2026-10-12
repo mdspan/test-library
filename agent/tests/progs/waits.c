@@ -11,7 +11,7 @@
    library's own symbol and the measurement is not the one under test.
 
    argv[1] is the fake duration, in milliseconds, every wait is asked for. `sleep` takes whole
-   seconds and so always asks for one.
+   seconds and so asks for one, or for none when the duration is zero.
 
    Each wait reports three facts: `<key>.fake`, the nanoseconds of faketime it asked for,
    `<key>.genuine`, the nanoseconds of genuine time it blocked, and `<key>.rc`, what it answered. A
@@ -149,6 +149,7 @@ static void burn(long long ns) {
 
 static void sleeps(void) {
     struct timespec request;
+    unsigned int seconds;
 #ifndef __APPLE__
     struct timespec remaining;
 #endif
@@ -185,9 +186,11 @@ static void sleeps(void) {
          (long long)syscall(SYS_clock_nanosleep, CLOCK_MONOTONIC, 0, &request, NULL));
 #endif
 
-    /* Whole seconds is all this one takes, so it asks for one however short the base is. */
+    /* Whole seconds is all this one takes, so it asks for one however short the base is, unless
+       the base is nothing. */
+    seconds = base_ns > 0 ? 1 : 0;
     begin();
-    done("sleep", NS_PER_S, sleep(1));
+    done("sleep", seconds * NS_PER_S, sleep(seconds));
 
     begin();
     done("usleep", base_ns, usleep((useconds_t)(base_ns / 1000)));
