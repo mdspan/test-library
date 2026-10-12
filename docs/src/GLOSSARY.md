@@ -7,9 +7,8 @@ the number after `@` in `LIBTIMEWARP_HOOK`. See [Hooks](HOOKS.md#shared-memory).
 
 ### controller
 
-Anything that reads or changes a running [session](#session): the
-command-line tool, or a program using the libraries. See
-[Changing Time Live](CONTROL.md).
+What reads or changes a running [session](#session): the command-line
+tool, `libtimewarp`. See [Changing Time Live](CONTROL.md).
 
 ### family
 

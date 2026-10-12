@@ -1,7 +1,16 @@
 # The Command-Line Tool
 
-`libtimewarp` reads and changes a running session. [Installation](INSTALL.md#the-command-line-tool)
-sets it up.
+`libtimewarp` reads and changes a running session.
+
+## Installing
+
+`cargo build --release` from [Installation](INSTALL.md#building) builds the
+tool as `target/release/libtimewarp`. Run it from there, or install it into
+Cargo's `bin` directory (`~/.cargo/bin` by default):
+
+```sh
+cargo install --path cli
+```
 
 ## Commands
 
@@ -16,9 +25,34 @@ libtimewarp freeze                             # remember each rate, then set it
 libtimewarp thaw                               # put the remembered rates back
 ```
 
-Families are `realtime`, `monotonic`, `boottime`, and `cpu`. Durations and
-dates are written as in [Configuration](CONFIGURATION.md#values). For a
-monotonic family, `set-time` takes a duration since boot, such as `3d`.
+`libtimewarp --help` lists them.
+
+Families are `realtime`, `monotonic`, `boottime`, and `cpu`. Durations,
+dates, and rates are written exactly as in
+[Configuration](CONFIGURATION.md#values), so a date needs its offset:
+`2020-01-01T00:00:00Z` works and `2020-01-01T00:00:00` is refused.
+
+`set-time` takes a date, written as an RFC 3339 timestamp or as `@` and Unix
+seconds, or a duration. For Realtime a duration is time since the epoch; for
+a monotonic family it is time since boot, such as `3d`.
+
+Every token after the command is an argument, so a negative duration such as
+`-2h` needs no `--`.
+
+## Several Operations at Once
+
+`shift`, `set-time`, and `set-rate` take further operations after their own,
+each written the same way as a command:
+
+```sh
+libtimewarp shift realtime -2h set-rate realtime 10 set-rate monotonic 10
+```
+
+The operations are applied in order as one
+[transaction](CONTROL.md#changing): every program sees all of them at once,
+and when one is refused, none is applied.
+
+## Freezing
 
 `freeze` and `thaw` act on Realtime, Monotonic, and Boottime together, or on
 the families you name:
@@ -28,10 +62,24 @@ libtimewarp freeze realtime
 libtimewarp thaw realtime
 ```
 
-`freeze` stores the rate to return to under `$XDG_STATE_HOME/libtimewarp`,
-or `~/.local/state/libtimewarp`, and `LIBTIMEWARP_STATE_DIR` names another
-directory. Freezing a family twice keeps the rate from the first freeze.
-Remember that [thawing leaves sleeping threads asleep](COVERAGE.md#sleeps-timeouts-and-timers).
+`freeze` remembers each family's rate before setting it to `0`, and `thaw`
+sets the remembered rate back. Freezing a family twice keeps the rate from
+the first freeze. Thawing a family with no remembered rate fails and changes
+nothing; set its rate with `set-rate` instead. Remember that
+[thawing leaves sleeping threads asleep](COVERAGE.md#sleeps-timeouts-and-timers).
+
+The remembered rates are kept in a state file, one per session, at
+`<state directory>/frozen/<session file name>`, with one `<family>=<rate>`
+line per family:
+
+```text
+realtime=10
+monotonic=1
+```
+
+The state directory is `LIBTIMEWARP_STATE_DIR`, else
+`$XDG_STATE_HOME/libtimewarp`, else `~/.local/state/libtimewarp`. `thaw`
+removes the lines it uses, and the file once it is empty.
 
 ## Output
 
@@ -64,12 +112,52 @@ A non-empty `fault` means a program of the session hit a
 [wrong value](CONFIGURATION.md#when-a-value-is-wrong) and the session runs
 on real time; `fault-pid` is that program.
 
-A refused command prints the reason to standard error and exits with
-status 1:
+A change prints each family it touched once, in the order the family first
+appears on the command line: what the family shows after a `shift` or
+`set-time`, then its rate after a `set-rate`:
+
+```console
+$ libtimewarp shift realtime -2h set-rate realtime 10 set-rate monotonic 10
+realtime.ns=1791769112769441040
+realtime.iso=2026-10-12T01:38:32.769441040Z
+realtime.rate=10.000000000
+monotonic.rate=10.000000000
+```
+
+`freeze` prints each family's new rate and the rate it remembers:
+
+```console
+$ libtimewarp freeze
+realtime.rate=0.000000000
+realtime.remembered=10.000000000
+monotonic.rate=0.000000000
+monotonic.remembered=10.000000000
+boottime.rate=0.000000000
+boottime.remembered=1.000000000
+```
+
+## Exit Status
+
+| Status | Meaning |
+| --- | --- |
+| 0 | The command succeeded. |
+| 1 | The command failed. The reason is on standard error. |
+| 2 | The command line is wrong. The usage line follows the reason on standard error. |
+
+A command the session refuses prints the [error code](CONTROL.md#errors)
+and the reason:
 
 ```console
 $ libtimewarp shift monotonic -1d
 libtimewarp: would_go_backwards: Monotonic refuses a move to a value it has already shown
+```
+
+Any other failure, such as a value that does not parse, prints the reason
+alone:
+
+```console
+$ libtimewarp set-time realtime 2020-01-01T00:00:00
+libtimewarp: "2020-01-01T00:00:00" is not a time: an RFC 3339 timestamp with an offset such as 2020-01-01T00:00:00Z, @ and Unix seconds, or a duration
 ```
 
 ## Picking the Session

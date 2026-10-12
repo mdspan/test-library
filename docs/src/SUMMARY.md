@@ -15,7 +15,6 @@
 - [Sessions](SESSIONS.md)
 - [Changing Time Live](CONTROL.md)
   - [The Command-Line Tool](CLI.md)
-  - [The Libraries](API.md)
 - [Hooks](HOOKS.md)
 - [Logging and Troubleshooting](TROUBLESHOOTING.md)
 - [Platform Notes](PLATFORMS.md)

@@ -62,5 +62,5 @@ using its session, and the controller can no longer find a deleted one.
 
 A session file written by a different version of libtimewarp may have a
 different layout. A program that tries to join such a session logs an
-error and runs on real time, and the controller reports `BadSessionFile`.
+error and runs on real time, and the controller reports `bad_session_file`.
 Delete the old session file and start the program again.
