@@ -930,7 +930,12 @@ fn copy_params(from: &layout::Params, to: &layout::Params) {
 /// [`SessionError::Io`] when a step fails outright.
 pub fn attach(path: &Path) -> Result<Session, SessionError> {
     if let Some(dir) = path.parent() {
-        check_dir(dir)?;
+        // A bare file name has an empty parent: the working directory.
+        check_dir(if dir.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            dir
+        })?;
     }
 
     let c_path = cstring(path)?;
