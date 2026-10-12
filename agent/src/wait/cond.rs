@@ -6,7 +6,9 @@
 //!
 //! [`crate::clocks`] holds the table and the rule that a variable built with `CLOCK_REALTIME` is
 //! one we need not keep: that is the default, and it is what a variable built from
-//! `PTHREAD_COND_INITIALIZER` has without ever reaching `pthread_cond_init`.
+//! `PTHREAD_COND_INITIALIZER` has without ever reaching `pthread_cond_init`. So once the table has
+//! been too full to keep a variable, one with nothing kept could be either, and its clock is
+//! unknown.
 
 use crate::clocks::Table;
 
@@ -29,9 +31,9 @@ pub(crate) fn forget(cond: *const libc::pthread_cond_t) {
     TABLE.forget(key_of(cond));
 }
 
-/// The clock `cond` reads its deadlines on: the one it was built with, or `CLOCK_REALTIME`, which
-/// is both the default and what an unknown variable gets.
-pub(crate) fn clock_of(cond: *const libc::pthread_cond_t) -> libc::clockid_t {
+/// The clock `cond` reads its deadlines on: the one it was built with, `CLOCK_REALTIME` where
+/// nothing was kept and the table has always had room, and `None` once it has not.
+pub(crate) fn clock_of(cond: *const libc::pthread_cond_t) -> Option<libc::clockid_t> {
     TABLE.clock_of(key_of(cond))
 }
 
@@ -58,23 +60,23 @@ mod tests {
 
     #[test]
     fn a_variable_nobody_named_reads_the_default() {
-        assert_eq!(clock_of(cond(1)), clock::REALTIME);
-        assert_eq!(clock_of(std::ptr::null()), clock::REALTIME);
+        assert_eq!(clock_of(cond(1)), Some(clock::REALTIME));
+        assert_eq!(clock_of(std::ptr::null()), Some(clock::REALTIME));
     }
 
     #[test]
     fn a_variable_keeps_its_clock_until_it_is_destroyed() {
         remember(cond(2), clock::MONOTONIC);
-        assert_eq!(clock_of(cond(2)), clock::MONOTONIC);
+        assert_eq!(clock_of(cond(2)), Some(clock::MONOTONIC));
         forget(cond(2));
-        assert_eq!(clock_of(cond(2)), clock::REALTIME);
+        assert_eq!(clock_of(cond(2)), Some(clock::REALTIME));
     }
 
     #[test]
     fn re_initialising_with_the_default_forgets_the_clock() {
         remember(cond(3), boottime());
-        assert_eq!(clock_of(cond(3)), boottime());
+        assert_eq!(clock_of(cond(3)), Some(boottime()));
         remember(cond(3), clock::REALTIME);
-        assert_eq!(clock_of(cond(3)), clock::REALTIME);
+        assert_eq!(clock_of(cond(3)), Some(clock::REALTIME));
     }
 }

@@ -39,6 +39,8 @@ use common::session::timer_remaining;
 use common::time::Nanos;
 
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+use crate::clocks;
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use crate::wait::duration_of;
 use crate::wait::{self, MICROS_PER_SECOND, NANOS_PER_MICRO, unsupported};
 use crate::{genuine, state};
@@ -78,12 +80,20 @@ fn armed(
     } else {
         wait::genuine_duration(func, clock, expiry)?
     };
-    let genuine_interval = if interval.0 == 0 {
-        Nanos::ZERO
-    } else {
-        still_set(wait::genuine_duration(func, clock, interval)?)
-    };
-    Some((still_set(genuine_expiry), genuine_interval))
+    Some((
+        still_set(genuine_expiry),
+        genuine_interval(func, clock, interval)?,
+    ))
+}
+
+/// The genuine interval a fake one becomes: nothing for a timer that does not repeat, and at least
+/// a nanosecond for one that does.
+#[inline]
+fn genuine_interval(func: Func, clock: libc::clockid_t, interval: Nanos) -> Option<Nanos> {
+    if interval.0 == 0 {
+        return Some(Nanos::ZERO);
+    }
+    Some(still_set(wait::genuine_duration(func, clock, interval)?))
 }
 
 /// A converted field of an arm, at least a nanosecond, because the program set the field and a
@@ -338,6 +348,75 @@ unsafe fn armed_itimerspec(
     })
 }
 
+/// The relative arm an absolute one becomes on a timer whose clock is unknown, or `None` when the
+/// arm passes through as the program wrote it: it disarms the timer, it is relative, so that only
+/// the timer's own family could say how to scale it, or nothing fakes the clock it is read on.
+///
+/// Of [`clocks::LIKELIEST`], the expiry is read on the one whose reading lies nearest it, as
+/// [`wait::nearest`] has it, and armed as the time that clock has left to reach it, which the
+/// kernel then counts down on the timer's own clock. So the arm comes due when that clock reaches
+/// the expiry, and at once where it already has.
+///
+/// # Safety
+/// `new_value` must be null or valid for reads of an `itimerspec`.
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+#[cold]
+unsafe fn armed_unrecorded(
+    func: Func,
+    new_value: *const libc::itimerspec,
+    absolute: bool,
+) -> Option<libc::itimerspec> {
+    if !absolute || new_value.is_null() {
+        return None;
+    }
+    // Safety: `new_value` is non-null, so the caller's guarantee makes it valid for this read.
+    let asked = unsafe { &*new_value };
+    let expiry = duration_of(&asked.it_value)?;
+    let interval = duration_of(&asked.it_interval)?;
+    if expiry.0 == 0 {
+        return None;
+    }
+    let (clock, showing) = wait::nearest(func, &clocks::LIKELIEST, expiry)?;
+    let remaining = Nanos(expiry.saturating_sub(showing).0.max(0));
+    let expiry = still_set(wait::genuine_duration(func, clock, remaining)?);
+    let interval = genuine_interval(func, clock, interval)?;
+    Some(libc::itimerspec {
+        it_interval: interval.to_timespec(),
+        it_value: expiry.to_timespec(),
+    })
+}
+
+/// What an arm hands the kernel in place of the program's own, and with which flags, or `None`
+/// when it passes through as the program wrote it. `clock` is `None` for a timer whose clock is
+/// unknown, whose absolute arm goes in as a relative one; `absolute_flag` is the bit that says an
+/// expiry is absolute.
+///
+/// # Safety
+/// `new_value` must be null or valid for reads of an `itimerspec`.
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+#[inline]
+unsafe fn arm_request(
+    func: Func,
+    clock: Option<libc::clockid_t>,
+    new_value: *const libc::itimerspec,
+    flags: libc::c_int,
+    absolute_flag: libc::c_int,
+) -> Option<(libc::itimerspec, libc::c_int)> {
+    let absolute = flags & absolute_flag != 0;
+    match clock {
+        // Safety: `new_value` is the caller's, under the same contract.
+        Some(clock) => Some((
+            unsafe { armed_itimerspec(func, clock, new_value, absolute) }?,
+            flags,
+        )),
+        // Safety: as above.
+        None => Some((
+            unsafe { armed_unrecorded(func, new_value, absolute) }?,
+            flags & !absolute_flag,
+        )),
+    }
+}
+
 /// Rewrites a `timespec` pair of remaining, as [`report_itimerval`] rewrites a `timeval` one.
 ///
 /// # Safety
@@ -370,16 +449,27 @@ pub(crate) unsafe fn timer_settime(
     old_value: *mut libc::itimerspec,
 ) -> libc::c_int {
     let clock = owner::timer_clock(timerid);
-    let absolute = flags & libc::TIMER_ABSTIME != 0;
     // Safety: `new_value` is the caller's, read only where it is non-null.
-    let converted = unsafe { armed_itimerspec(Func::TimerSettime, clock, new_value, absolute) };
-    let request = converted.as_ref().map_or(new_value, ptr::from_ref);
+    let converted = unsafe {
+        arm_request(
+            Func::TimerSettime,
+            clock,
+            new_value,
+            flags,
+            libc::TIMER_ABSTIME,
+        )
+    };
+    let (request, flags) = converted
+        .as_ref()
+        .map_or((new_value, flags), |(spec, flags)| {
+            (ptr::from_ref(spec), *flags)
+        });
     // Safety: the request is ours or the caller's, and the timer and `old_value` pass on unchanged.
     let Some(result) = (unsafe { genuine::timer_settime(timerid, flags, request, old_value) })
     else {
         return unsupported();
     };
-    if result == 0 {
+    if let (0, Some(clock)) = (result, clock) {
         // Safety: `old_value` is the caller's, written only where it is non-null.
         unsafe { report_itimerspec(Func::TimerSettime, clock, old_value) };
     }
@@ -398,11 +488,21 @@ pub(crate) unsafe fn timer_gettime(
     let Some(result) = (unsafe { genuine::timer_gettime(timerid, curr_value) }) else {
         return unsupported();
     };
-    if result == 0 {
+    if let (0, Some(clock)) = (result, owner::timer_clock(timerid)) {
         // Safety: `curr_value` is the caller's, written only where it is non-null.
-        unsafe { report_itimerspec(Func::TimerGettime, owner::timer_clock(timerid), curr_value) };
+        unsafe { report_itimerspec(Func::TimerGettime, clock, curr_value) };
     }
     result
+}
+
+/// Forgets which clock the timer was created on, before the id can go to another, and reads no
+/// time.
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+#[inline]
+pub(crate) fn timer_delete(timerid: libc::timer_t) -> libc::c_int {
+    owner::forget_timer(timerid);
+    // Safety: the call takes the timer the program named, passed on unchanged.
+    unsafe { genuine::timer_delete(timerid) }.unwrap_or_else(unsupported)
 }
 
 /// Learns which clock the timerfd this creates will arm against, and reads no time.
@@ -431,15 +531,26 @@ pub(crate) unsafe fn timerfd_settime(
     old_value: *mut libc::itimerspec,
 ) -> libc::c_int {
     let clock = owner::timerfd_clock(fd);
-    let absolute = flags & libc::TFD_TIMER_ABSTIME != 0;
     // Safety: `new_value` is the caller's, read only where it is non-null.
-    let converted = unsafe { armed_itimerspec(Func::TimerfdSettime, clock, new_value, absolute) };
-    let request = converted.as_ref().map_or(new_value, ptr::from_ref);
+    let converted = unsafe {
+        arm_request(
+            Func::TimerfdSettime,
+            clock,
+            new_value,
+            flags,
+            libc::TFD_TIMER_ABSTIME,
+        )
+    };
+    let (request, flags) = converted
+        .as_ref()
+        .map_or((new_value, flags), |(spec, flags)| {
+            (ptr::from_ref(spec), *flags)
+        });
     // Safety: the request is ours or the caller's, and `old_value` passes on unchanged.
     let Some(result) = (unsafe { genuine::timerfd_settime(fd, flags, request, old_value) }) else {
         return unsupported();
     };
-    if result == 0 {
+    if let (0, Some(clock)) = (result, clock) {
         // Safety: `old_value` is the caller's, written only where it is non-null.
         unsafe { report_itimerspec(Func::TimerfdSettime, clock, old_value) };
     }
@@ -458,9 +569,9 @@ pub(crate) unsafe fn timerfd_gettime(
     let Some(result) = (unsafe { genuine::timerfd_gettime(fd, curr_value) }) else {
         return unsupported();
     };
-    if result == 0 {
+    if let (0, Some(clock)) = (result, owner::timerfd_clock(fd)) {
         // Safety: `curr_value` is the caller's, written only where it is non-null.
-        unsafe { report_itimerspec(Func::TimerfdGettime, owner::timerfd_clock(fd), curr_value) };
+        unsafe { report_itimerspec(Func::TimerfdGettime, clock, curr_value) };
     }
     result
 }

@@ -653,3 +653,68 @@ pub(crate) const TIMER_LEEWAY: i64 = if cfg!(target_os = "macos") {
 } else {
     0
 };
+
+/// What `clock_objects` arms every timer and waits every wait for, in milliseconds of faketime.
+pub(crate) const OBJECT_MILLIS: i64 = 200;
+
+/// More live objects of one kind than the library keeps the clock of, which is 4096 to a table,
+/// so the last ones a case makes are ones it has to find the clock of with nothing recorded.
+pub(crate) const PAST_THE_TABLE: i64 = 5_000;
+
+/// The settings every `clock_objects` case runs under, each beside the rate the elapsed families
+/// run at in it: genuine time's own pace, which is where a wrong clock shows most plainly, and the
+/// elapsed families four times as fast with the wall clock a day ahead, which tells every family
+/// apart from every other. The wall clock runs at genuine pace in both.
+pub(crate) fn object_settings() -> [(i64, Vec<(&'static str, &'static str)>); 2] {
+    [
+        (1, Vec::new()),
+        (
+            4,
+            vec![
+                ("LIBTIMEWARP_MONOTONIC_RATE", "4"),
+                ("LIBTIMEWARP_BOOTTIME_RATE", "4"),
+                ("LIBTIMEWARP_SHIFT", "+1d"),
+            ],
+        ),
+    ]
+}
+
+/// One run of `clock_objects`: the case named, after `count` objects, under `env`.
+pub(crate) fn clock_objects(case: &str, count: i64, env: &[(&str, &str)]) -> Report {
+    let dir = tempfile::tempdir().unwrap();
+    let mut run = Run::new(program_linked_with("clock_objects", &["-pthread", "-lrt"]))
+        .without_library()
+        .session_dir(dir.path())
+        .arg(case)
+        .arg(count.to_string())
+        .arg(OBJECT_MILLIS.to_string())
+        .within(Duration::from_secs(120));
+    for (name, value) in env {
+        run = run.env(name, value);
+    }
+    run.run()
+}
+
+/// Asserts that the object under `key` fired, or its wait timed out, after about `expected`
+/// genuine nanoseconds: never at all is a clock read decades off, and at once or late by the rate
+/// is a clock of the wrong family.
+#[track_caller]
+pub(crate) fn assert_on_time(report: &Report, key: &str, expected: i64) {
+    assert_eq!(
+        report.get(&format!("{key}.fired")),
+        "1",
+        "{key} never came due\n{}",
+        report.stdout
+    );
+    let genuine = report.nanos(&format!("{key}.genuine"));
+    let low = expected * 3 / 5;
+    let high = expected * 2 + 60_000_000 + TIMER_LEEWAY;
+    assert!(
+        (low..=high).contains(&genuine),
+        "{key} came due after {} ms, which is not the {} ms it asked for ({}..={} ms)",
+        genuine / 1_000_000,
+        expected / 1_000_000,
+        low / 1_000_000,
+        high / 1_000_000,
+    );
+}

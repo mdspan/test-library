@@ -472,6 +472,10 @@ genuine! {
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     fn timer_gettime(timerid: libc::timer_t, curr_value: *mut libc::itimerspec) -> libc::c_int;
 
+    /// The genuine `timer_delete`, which reads no time either.
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    fn timer_delete(timerid: libc::timer_t) -> libc::c_int;
+
     /// The genuine `timerfd_create`, which reads no time either.
     #[cfg(target_os = "linux")]
     fn timerfd_create(clock: libc::clockid_t, flags: libc::c_int) -> libc::c_int;

@@ -5,21 +5,16 @@
 //! against whichever clock the timer was created on. So the clock is learned where it is chosen,
 //! at the call that creates the object, and looked up again at the call that waits or arms.
 //!
-//! A table is a fixed set of slots walked by linear probing. It is static in the caller, because a
-//! wait or an arm may be reached from anywhere the program can call one, and nothing here may
-//! allocate. Only an object that asked for something other than `CLOCK_REALTIME` is kept: that is
-//! the default, it is what an object nobody named reads, so keeping those would be keeping the
-//! answer we already give.
+//! A table is static in the caller, because a wait or an arm may be reached from anywhere the
+//! program can call one, and nothing here may allocate. [`table`] has the slots and the walk. A
+//! condition variable built with `CLOCK_REALTIME` is not kept: that is the default, it is what a
+//! variable nobody named reads, so keeping those would be keeping the answer we already give.
 //!
 //! macOS reaches for the same slots for something else: a Mach clock port is a name the kernel
 //! hands out and `clock_get_time` reads, so the clock it stands for is learned at
 //! `host_get_clock_service` and looked up again at the read. A port that named neither Mach clock
 //! has no answer of ours at all rather than the default one, which is what [`Table::kept`] is for
 //! beside [`Table::clock_of`].
-//!
-//! A key is whatever number names the object, and every number is one: a condition variable's
-//! address, a descriptor, a `timer_t`, which glibc counts up from zero, and a port. So a slot says
-//! whether it is occupied in a word of its own rather than by a key no object could have.
 
 // The condition variables and the timers are Linux's and FreeBSD's, and the clock ports are
 // macOS's, so no one platform reaches for the whole of this.
@@ -32,45 +27,36 @@
     )
 )]
 
-use std::sync::atomic::{AtomicI32, AtomicU32, AtomicUsize, Ordering};
+mod table;
 
-use common::platform::{clock, clock_id};
+#[cfg(all(test, loom))]
+mod interleavings;
 
-/// How many objects with a clock of their own one table holds at once.
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicUsize, Ordering};
+
+use common::platform::clock;
+use table::{EMPTY, Slot};
+
+/// The clocks an object whose clock is unknown is looked for among: the wall clock, which is the
+/// default, and the monotonic clock, which is the usual choice of a program that makes one, and
+/// the only other clock glibc lets a condition variable have. An object on any other clock has its
+/// deadlines read on whichever of these two lies nearer.
+pub(crate) const LIKELIEST: [libc::clockid_t; 2] = [clock::REALTIME, clock::MONOTONIC];
+
+/// How many objects one table holds at once: 64 KiB of zeroes per table, which the system pages in
+/// only as slots are used.
 ///
-/// A program past this many is one whose later objects read the default. That costs such an object
-/// the family it follows, and nothing else: the deadline or the arm still converts, on Realtime
-/// rather than on the clock the object named.
-const SLOTS: usize = 256;
+/// A table with every slot taken leaves a later object unrecorded, and from then on a lookup that
+/// finds nothing answers that the clock is unknown rather than the default. Such an object's
+/// absolute deadline is read on whichever of [`LIKELIEST`] reads nearer it: its own clock where it
+/// is one of the two and the deadline lies less than half the way to the other's reading, and
+/// otherwise the nearer of the two, which puts a `CLOCK_BOOTTIME` deadline off by the time the
+/// machine has spent suspended. A relative arm or a query of such a timer runs on genuine time. A
+/// table that has once been full also makes every lookup that finds nothing walk all of it.
+const SLOTS: usize = 4096;
 
-/// How far a lookup walks from the slot a key hashes to before it gives up. Past this the table is
-/// crowded enough that walking further costs more than the default answer.
-const PROBES: usize = 8;
-
-/// A slot nothing was ever put in. A lookup stops at one, because nothing past it was reached from
-/// this key.
-const EMPTY: u32 = 0;
-
-/// A slot holding one object, whose key and clock are both there to read.
-const TAKEN: u32 = 1;
-
-/// A slot whose object was forgotten. A lookup walks past one; an insert reuses it.
-const FREED: u32 = 2;
-
-/// A slot an insert has claimed and not yet filled. A lookup walks past one, and finds the object
-/// once the insert has published it.
-const CLAIMING: u32 = 3;
-
-/// One object's clock, and the word that says whether the other two are there to read.
-#[derive(Debug)]
-struct Slot {
-    /// [`EMPTY`], [`TAKEN`], [`FREED`], or [`CLAIMING`].
-    state: AtomicU32,
-    /// The key of the object this slot holds.
-    object: AtomicUsize,
-    /// The clock that object was built with.
-    clock: AtomicI32,
-}
+/// Every table the process keeps.
+pub(crate) type Table = table::Table<SLOTS>;
 
 impl Slot {
     const fn new() -> Self {
@@ -80,122 +66,22 @@ impl Slot {
             clock: AtomicI32::new(0),
         }
     }
-
-    /// The clock this slot holds for `key`, or `None` when it holds another object or none.
-    ///
-    /// The state is loaded Acquire and the other two words Relaxed, because the Release store that
-    /// published them is what this acquires. An insert that has claimed the slot and not yet
-    /// published is not [`TAKEN`], so nothing half-written is ever read.
-    fn held(&self, key: usize) -> Option<libc::clockid_t> {
-        (self.state.load(Ordering::Acquire) == TAKEN && self.object.load(Ordering::Relaxed) == key)
-            .then(|| clock_id(self.clock.load(Ordering::Relaxed)))
-    }
 }
 
-/// A fixed set of slots, walked by linear probing. The operations take the table they work on so a
-/// case can exercise one of its own rather than the process's.
-#[derive(Debug)]
-pub(crate) struct Table([Slot; SLOTS]);
-
-impl Table {
+impl<const N: usize> table::Table<N> {
     pub(crate) const fn new() -> Self {
-        Self([const { Slot::new() }; SLOTS])
-    }
-
-    /// The slot a key's `probe`th try lands in. Multiplicative hashing, because these objects come
-    /// in arrays and the low bits of neighbouring addresses differ by one stride.
-    fn slot(&self, key: usize, probe: usize) -> Option<&Slot> {
-        let mixed = u64::try_from(key)
-            .unwrap_or(0)
-            .wrapping_mul(0x9E37_79B9_7F4A_7C15);
-        let at = usize::try_from(mixed >> 32)
-            .unwrap_or(0)
-            .wrapping_add(probe)
-            % SLOTS;
-        self.0.get(at)
-    }
-
-    /// Remembers that the object at `key` was built with `clock`, or forgets it when that is the
-    /// default an unknown object already reads.
-    pub(crate) fn record(&self, key: usize, clock: libc::clockid_t) {
-        if clock == clock::REALTIME {
-            self.forget(key);
-        } else {
-            self.keep(key, clock);
+        Self {
+            slots: [const { Slot::new() }; N],
+            reach: AtomicUsize::new(0),
+            lost: AtomicBool::new(false),
         }
-    }
-
-    /// Remembers that the object at `key` was built with `clock`, whichever clock that is.
-    ///
-    /// What a caller needs when every clock is worth a slot, which is a clock port: the two Mach
-    /// clocks are the wall clock and an elapsed one, and a port naming the first has to be told
-    /// apart from a port nobody handed out.
-    ///
-    /// A table with no room leaves the object unknown, which is no answer rather than a wrong one.
-    pub(crate) fn keep(&self, key: usize, clock: libc::clockid_t) {
-        for probe in 0..PROBES {
-            let Some(slot) = self.slot(key, probe) else {
-                return;
-            };
-            if slot.held(key).is_some() {
-                slot.clock.store(clock_id(clock), Ordering::Relaxed);
-                return;
-            }
-            let state = slot.state.load(Ordering::Acquire);
-            if (state == EMPTY || state == FREED)
-                && slot
-                    .state
-                    .compare_exchange(state, CLAIMING, Ordering::AcqRel, Ordering::Relaxed)
-                    .is_ok()
-            {
-                slot.object.store(key, Ordering::Relaxed);
-                slot.clock.store(clock_id(clock), Ordering::Relaxed);
-                // The two words above are published by this one, so a lookup that sees the slot
-                // taken sees the whole of what is in it.
-                slot.state.store(TAKEN, Ordering::Release);
-                return;
-            }
-        }
-    }
-
-    /// Forgets the object at `key`.
-    pub(crate) fn forget(&self, key: usize) {
-        for probe in 0..PROBES {
-            let Some(slot) = self.slot(key, probe) else {
-                return;
-            };
-            if slot.state.load(Ordering::Acquire) == EMPTY {
-                return;
-            }
-            if slot.held(key).is_some() {
-                slot.state.store(FREED, Ordering::Release);
-                return;
-            }
-        }
-    }
-
-    /// The clock recorded for the object at `key`, or `None` when nothing recorded one.
-    pub(crate) fn kept(&self, key: usize) -> Option<libc::clockid_t> {
-        for probe in 0..PROBES {
-            let slot = self.slot(key, probe)?;
-            if slot.state.load(Ordering::Acquire) == EMPTY {
-                break;
-            }
-            if let Some(clock) = slot.held(key) {
-                return Some(clock);
-            }
-        }
-        None
-    }
-
-    /// The clock the object at `key` was built with, or the default when it is unknown.
-    pub(crate) fn clock_of(&self, key: usize) -> libc::clockid_t {
-        self.kept(key).unwrap_or(clock::REALTIME)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use common::platform::clock_id;
+
     use super::*;
 
     /// The key an object at the `which`th address of an array would have.
@@ -210,10 +96,20 @@ mod tests {
             .expect("every family but Cpu tracks a clock")
     }
 
+    /// `count` keys whose walks all start from the same slot of a table of `N`.
+    fn crowding<const N: usize>(count: usize) -> Vec<usize> {
+        let home = table::Table::<N>::home(key(0));
+        (0..)
+            .map(key)
+            .filter(|&key| table::Table::<N>::home(key) == home)
+            .take(count)
+            .collect()
+    }
+
     #[test]
     fn an_object_nobody_named_reads_the_default() {
         let table = Table::new();
-        assert_eq!(table.clock_of(key(1)), clock::REALTIME);
+        assert_eq!(table.clock_of(key(1)), Some(clock::REALTIME));
     }
 
     #[test]
@@ -223,7 +119,7 @@ mod tests {
         let table = Table::new();
         for key in [0, 1, usize::MAX, usize::MAX - 1] {
             table.record(key, clock::MONOTONIC);
-            assert_eq!(table.clock_of(key), clock::MONOTONIC, "{key}");
+            assert_eq!(table.clock_of(key), Some(clock::MONOTONIC), "{key}");
         }
     }
 
@@ -231,44 +127,46 @@ mod tests {
     fn an_object_with_a_clock_of_its_own_keeps_it_until_it_is_forgotten() {
         let table = Table::new();
         table.record(key(2), clock::MONOTONIC);
-        assert_eq!(table.clock_of(key(2)), clock::MONOTONIC);
+        assert_eq!(table.clock_of(key(2)), Some(clock::MONOTONIC));
         table.forget(key(2));
-        assert_eq!(table.clock_of(key(2)), clock::REALTIME);
+        assert_eq!(table.clock_of(key(2)), Some(clock::REALTIME));
     }
 
     #[test]
     fn recording_the_default_forgets_the_clock() {
         let table = Table::new();
         table.record(key(3), boottime());
-        assert_eq!(table.clock_of(key(3)), boottime());
+        assert_eq!(table.clock_of(key(3)), Some(boottime()));
         table.record(key(3), clock::REALTIME);
-        assert_eq!(table.clock_of(key(3)), clock::REALTIME);
+        assert_eq!(table.clock_of(key(3)), Some(clock::REALTIME));
         // And recording it afresh puts it back, which is what a descriptor reused is.
         table.record(key(3), clock::MONOTONIC);
-        assert_eq!(table.clock_of(key(3)), clock::MONOTONIC);
+        assert_eq!(table.clock_of(key(3)), Some(clock::MONOTONIC));
     }
 
     #[test]
     fn a_forgotten_slot_is_reused_and_the_walk_still_reaches_past_it() {
         let table = Table::new();
-        // Two keys one probe apart, so the second sits past the first and finds it on the way.
-        let (first, second) = (key(4), key(5));
+        // Two keys with one home, so the second sits past the first and finds it on the way.
+        let [first, second] = crowding::<SLOTS>(2)[..] else {
+            panic!("two keys share a home");
+        };
         table.record(first, clock::MONOTONIC);
         table.record(second, boottime());
-        assert_eq!(table.clock_of(first), clock::MONOTONIC);
-        assert_eq!(table.clock_of(second), boottime());
+        assert_eq!(table.clock_of(first), Some(clock::MONOTONIC));
+        assert_eq!(table.clock_of(second), Some(boottime()));
 
         table.forget(first);
-        assert_eq!(table.clock_of(first), clock::REALTIME);
+        assert_eq!(table.clock_of(first), Some(clock::REALTIME));
         assert_eq!(
             table.clock_of(second),
-            boottime(),
+            Some(boottime()),
             "the walk stopped at the forgotten slot"
         );
 
         table.record(first, clock::MONOTONIC);
-        assert_eq!(table.clock_of(first), clock::MONOTONIC);
-        assert_eq!(table.clock_of(second), boottime());
+        assert_eq!(table.clock_of(first), Some(clock::MONOTONIC));
+        assert_eq!(table.clock_of(second), Some(boottime()));
     }
 
     #[test]
@@ -282,27 +180,89 @@ mod tests {
         assert_eq!(table.kept(key(7)), Some(clock::MONOTONIC));
         assert_eq!(table.kept(key(8)), None);
         // And the default answer is still the default for whoever wants one.
-        assert_eq!(table.clock_of(key(8)), clock::REALTIME);
-        assert_eq!(table.clock_of(key(7)), clock::MONOTONIC);
+        assert_eq!(table.clock_of(key(8)), Some(clock::REALTIME));
+        assert_eq!(table.clock_of(key(7)), Some(clock::MONOTONIC));
     }
 
     #[test]
-    fn a_full_table_leaves_an_object_on_the_default_rather_than_a_wrong_clock() {
-        let table = Table::new();
-        let planted: Vec<usize> = (0..4 * SLOTS).map(key).collect();
+    fn keys_that_share_a_home_fill_the_whole_table_before_one_goes_unrecorded() {
+        let table = table::Table::<16>::new();
+        let crowd = crowding::<16>(17);
+        for (which, &key) in crowd.iter().enumerate() {
+            table.keep(key, clock_id(which));
+        }
+        // The first sixteen took every slot between them, the last of them sixteen probes from
+        // home, and each is found where its walk put it.
+        for (which, &key) in crowd.iter().take(16).enumerate() {
+            assert_eq!(table.kept(key), Some(clock_id(which)), "{which}");
+        }
+        assert_eq!(table.reach.load(Ordering::Relaxed), 16);
+        assert_eq!(table.kept(crowd[16]), None);
+        assert!(table.lost.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn a_lookup_walks_as_far_as_the_farthest_insert_and_no_farther_than_it_must() {
+        let table = table::Table::<16>::new();
+        assert_eq!(table.reach.load(Ordering::Relaxed), 0);
+        let crowd = crowding::<16>(3);
+        table.keep(crowd[0], clock::MONOTONIC);
+        assert_eq!(table.reach.load(Ordering::Relaxed), 1);
+        table.keep(crowd[1], clock::MONOTONIC);
+        table.keep(crowd[2], boottime());
+        assert_eq!(table.reach.load(Ordering::Relaxed), 3);
+        // A walk that got that far stays reachable after the slots before it are freed.
+        table.forget(crowd[0]);
+        table.forget(crowd[1]);
+        assert_eq!(table.kept(crowd[2]), Some(boottime()));
+        // And a slot freed on the way is where the next key from that home lands.
+        table.keep(crowd[1], clock::MONOTONIC);
+        assert_eq!(table.reach.load(Ordering::Relaxed), 3);
+        assert_eq!(table.kept(crowd[1]), Some(clock::MONOTONIC));
+    }
+
+    #[test]
+    fn a_full_table_says_the_clock_of_an_object_it_never_recorded_is_unknown() {
+        let table = table::Table::<16>::new();
+        let planted: Vec<usize> = (0..64).map(key).collect();
         for &key in &planted {
             table.record(key, clock::MONOTONIC);
         }
-        // More objects than slots, so some were never recorded. Each reads either the clock it
-        // asked for or the default, and never somebody else's.
+        // Every slot went to an object before any was left out, and each object reads the clock it
+        // asked for or none at all, never somebody else's and never the default.
         let mut recorded = 0;
         for &key in &planted {
             match table.clock_of(key) {
-                clock::MONOTONIC => recorded += 1,
-                clock::REALTIME => {}
-                other => panic!("{key:x} reads {other}, which is nobody's"),
+                Some(clock::MONOTONIC) => recorded += 1,
+                None => {}
+                other => panic!("{key:x} reads {other:?}, which is nobody's"),
             }
         }
-        assert!(recorded > 0 && recorded <= SLOTS, "{recorded} recorded");
+        assert_eq!(recorded, 16);
+        // A variable built with the default clock reaches no slot, so once the table has been full
+        // it is as unknown as the ones left out, and stays so after room is made.
+        assert_eq!(table.clock_of(key(1_000)), None);
+        for &key in &planted {
+            table.forget(key);
+        }
+        table.record(key(1_001), clock::REALTIME);
+        assert_eq!(table.clock_of(key(1_001)), None);
+        table.record(key(1_002), clock::MONOTONIC);
+        assert_eq!(table.clock_of(key(1_002)), Some(clock::MONOTONIC));
+    }
+
+    #[test]
+    fn a_full_table_takes_an_object_again_once_one_is_forgotten() {
+        let table = table::Table::<4>::new();
+        let crowd = crowding::<4>(5);
+        for &key in &crowd[..4] {
+            table.keep(key, clock::MONOTONIC);
+        }
+        table.forget(crowd[2]);
+        table.keep(crowd[4], boottime());
+        assert!(!table.lost.load(Ordering::Relaxed));
+        assert_eq!(table.kept(crowd[4]), Some(boottime()));
+        assert_eq!(table.kept(crowd[2]), None);
+        assert_eq!(table.kept(crowd[3]), Some(clock::MONOTONIC));
     }
 }

@@ -449,6 +449,12 @@ pub(super) unsafe extern "C" fn timer_gettime(
     unsafe { timer::timer_gettime(timerid, curr_value) }
 }
 
+/// Reads no time either: it forgets which clock the timer it deletes was created on.
+#[unsafe(no_mangle)]
+pub(super) extern "C" fn timer_delete(timerid: libc::timer_t) -> libc::c_int {
+    timer::timer_delete(timerid)
+}
+
 // The file timestamps. A read converts the buffer the genuine call filled, and a set converts a
 // copy of what the program asked for; `stamp` has the rules. The buffer here carries a birth time
 // besides the three POSIX names, which is faked with the rest.

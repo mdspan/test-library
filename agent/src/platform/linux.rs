@@ -688,6 +688,12 @@ pub(super) unsafe extern "C" fn timer_gettime(
     unsafe { timer::timer_gettime(timerid, curr_value) }
 }
 
+/// Reads no time either: it forgets which clock the timer it deletes was created on.
+#[unsafe(no_mangle)]
+pub(super) extern "C" fn timer_delete(timerid: libc::timer_t) -> libc::c_int {
+    timer::timer_delete(timerid)
+}
+
 /// Reads no time either: it learns which clock the timerfd it creates arms against.
 #[unsafe(no_mangle)]
 pub(super) extern "C" fn timerfd_create(clock: libc::clockid_t, flags: libc::c_int) -> libc::c_int {

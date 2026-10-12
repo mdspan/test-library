@@ -43,6 +43,8 @@ use common::platform::{self, clock, monotonic_timebase};
 use common::session::wait_duration;
 use common::time::Nanos;
 
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+use crate::clocks;
 use crate::{genuine, interpose, state};
 
 /// Milliseconds as nanoseconds, the unit a `poll` or `epoll` timeout arrives in.
@@ -122,11 +124,35 @@ pub(crate) fn genuine_duration(func: Func, clock: libc::clockid_t, fake: Nanos) 
 /// early breaks it.
 #[inline]
 pub(crate) fn deadline(func: Func, clock: libc::clockid_t, at: Nanos) -> Option<Nanos> {
-    let showing = interpose::reading(func, clock)?;
+    deadline_from(func, clock, at, interpose::reading(func, clock)?)
+}
+
+/// The same, from a reading of `clock` the caller already took.
+#[inline]
+fn deadline_from(func: Func, clock: libc::clockid_t, at: Nanos, showing: Nanos) -> Option<Nanos> {
     let remaining = Nanos(at.saturating_sub(showing).0.max(0));
     let wait = converted(func, clock, remaining)?;
     let genuine_now = platform::genuine_nanos(clock)?;
     Some(genuine_now.saturating_add(wait.genuine))
+}
+
+/// The clock among `candidates` whose reading, as the program sees it, lies nearest `at`, with
+/// that reading, or `None` when none of them can be read.
+///
+/// What a deadline is read on when the object it belongs to has a clock nobody recorded. A program
+/// sets a deadline a short way past a reading of the object's own clock, and the clocks an object
+/// can be built on read far apart, the wall clock decades from the elapsed ones. So the nearest is
+/// the object's own for any deadline that lies nearer it than half the way to another.
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+pub(crate) fn nearest(
+    func: Func,
+    candidates: &[libc::clockid_t],
+    at: Nanos,
+) -> Option<(libc::clockid_t, Nanos)> {
+    candidates
+        .iter()
+        .filter_map(|&clock| Some((clock, interpose::reading(func, clock)?)))
+        .min_by_key(|&(_, showing)| at.0.abs_diff(showing.0))
 }
 
 /// The instant a deadline's `timespec` names, or `None` when the pair is one the genuine function
@@ -796,7 +822,10 @@ pub(crate) unsafe fn pthread_cond_timedwait(
     // The clock the variable was built with where one could be chosen, and the wall clock where
     // the platform reads every such deadline on it and has no attribute to say otherwise.
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-    let on = cond::clock_of(cond);
+    let Some(on) = cond::clock_of(cond) else {
+        // Safety: the caller's contract, passed on whole.
+        return unsafe { unrecorded_cond_timedwait(cond, mutex, abstime) };
+    };
     #[cfg(target_os = "macos")]
     let on = clock::REALTIME;
     // Safety: `abstime` is the caller's, read only where it is non-null.
@@ -804,6 +833,77 @@ pub(crate) unsafe fn pthread_cond_timedwait(
     let abstime = converted.as_ref().map_or(abstime, ptr::from_ref);
     // Safety: the variable and the mutex are the caller's, passed on unchanged.
     unsafe { genuine::pthread_cond_timedwait(cond, mutex, abstime) }.unwrap_or(libc::ENOSYS)
+}
+
+/// A wait on a variable whose clock is unknown, because the table had no room to keep it.
+///
+/// The deadline is read on whichever of [`clocks::LIKELIEST`] reads nearest it, as [`nearest`]
+/// has it. Where libc can wait on a clock it is handed, the wait is measured on that
+/// one, whichever the variable was built with. Elsewhere, on FreeBSD, musl and a glibc before 2.30,
+/// it is measured on the variable's own clock, which is that one for every deadline the rule reads
+/// right.
+///
+/// # Safety
+/// As [`pthread_cond_timedwait`].
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+#[cold]
+unsafe fn unrecorded_cond_timedwait(
+    cond: *mut libc::pthread_cond_t,
+    mutex: *mut libc::pthread_mutex_t,
+    abstime: *const libc::timespec,
+) -> libc::c_int {
+    let func = Func::PthreadCondTimedwait;
+    // Safety: `abstime` is the caller's, read only where it is non-null.
+    let asked = (!abstime.is_null())
+        .then(|| instant_of(unsafe { &*abstime }))
+        .flatten();
+    let converted = asked.and_then(|at| {
+        let (on, showing) = nearest(func, &clocks::LIKELIEST, at)?;
+        Some((on, deadline_from(func, on, at, showing)?.to_timespec()))
+    });
+    let Some((on, at)) = converted else {
+        // Safety: the variable, the mutex and the deadline are the caller's, passed on unchanged.
+        return unsafe { genuine::pthread_cond_timedwait(cond, mutex, abstime) }
+            .unwrap_or(libc::ENOSYS);
+    };
+    // Safety: the variable and the mutex are the caller's, and the deadline is our own.
+    unsafe { cond_wait_on(cond, mutex, on, &at) }
+}
+
+/// Waits on `cond` until `on` reaches `at`, through the call that names the clock where libc has
+/// it, and on the variable's own clock where it does not.
+///
+/// # Safety
+/// The variable and the mutex must be the caller's live ones.
+#[cfg(target_os = "linux")]
+unsafe fn cond_wait_on(
+    cond: *mut libc::pthread_cond_t,
+    mutex: *mut libc::pthread_mutex_t,
+    on: libc::clockid_t,
+    at: &libc::timespec,
+) -> libc::c_int {
+    // Safety: the variable and the mutex are the caller's, and the deadline is a live one.
+    if let Some(answer) = unsafe { genuine::pthread_cond_clockwait(cond, mutex, on, at) } {
+        return answer;
+    }
+    // Safety: as above.
+    unsafe { genuine::pthread_cond_timedwait(cond, mutex, at) }.unwrap_or(libc::ENOSYS)
+}
+
+/// The same where libc has no call that names the clock, so the wait is measured on the variable's
+/// own.
+///
+/// # Safety
+/// The variable and the mutex must be the caller's live ones.
+#[cfg(target_os = "freebsd")]
+unsafe fn cond_wait_on(
+    cond: *mut libc::pthread_cond_t,
+    mutex: *mut libc::pthread_mutex_t,
+    _on: libc::clockid_t,
+    at: &libc::timespec,
+) -> libc::c_int {
+    // Safety: the variable and the mutex are the caller's, and the deadline is a live one.
+    unsafe { genuine::pthread_cond_timedwait(cond, mutex, at) }.unwrap_or(libc::ENOSYS)
 }
 
 /// # Safety
@@ -1111,6 +1211,23 @@ mod tests {
             asked: Nanos(asked),
             genuine: Nanos(genuine),
         }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    #[test]
+    fn a_deadline_is_read_on_the_clock_whose_reading_lies_nearest_it() {
+        // No session is installed in this process, so every clock reads as the genuine one, and
+        // the wall clock reads decades from the elapsed ones.
+        let func = Func::PthreadCondTimedwait;
+        let candidates = [clock::REALTIME, clock::MONOTONIC];
+        for clock in candidates {
+            let now = platform::genuine_nanos(clock).expect("the clock reads");
+            for ahead in [0, 50_000_000, Nanos::SECOND * 3_600, -Nanos::SECOND] {
+                let picked = nearest(func, &candidates, Nanos(now.0 + ahead)).map(|(on, _)| on);
+                assert_eq!(picked, Some(clock), "{clock} {ahead}");
+            }
+        }
+        assert_eq!(nearest(func, &[], Nanos(0)), None);
     }
 
     #[test]

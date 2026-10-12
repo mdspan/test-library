@@ -653,3 +653,17 @@ fn a_wait_asked_for_nothing_answers_at_once_on_a_frozen_clock() {
         .run();
     assert_answered_at_once(&report);
 }
+
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn a_condition_variable_among_more_live_ones_than_the_library_keeps_times_out_on_its_own_clock() {
+    // Below the table's size and past it, where a variable made last has no clock recorded, and
+    // neither has one built by the static initialiser, which reads the wall clock.
+    for count in [300, harness::PAST_THE_TABLE] {
+        for (rate, env) in harness::object_settings() {
+            let report = harness::clock_objects("cond_crowd", count, &env);
+            harness::assert_on_time(&report, "cond_crowd", harness::OBJECT_MILLIS * MILLI / rate);
+            harness::assert_on_time(&report, "cond_crowd_wall", harness::OBJECT_MILLIS * MILLI);
+        }
+    }
+}

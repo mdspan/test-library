@@ -721,3 +721,63 @@ fn every_timer_reaches_the_hook_as_an_arm_or_a_query_with_its_familys_clock() {
         );
     }
 }
+
+// Timers whose clock the library learns when they are made, made in the numbers and the ways that
+// test whether it still knows it when they are armed. Each is armed for an absolute expiry on its
+// own clock, which a clock of the wrong family reads decades off or at once.
+
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn a_timer_created_after_hundreds_were_deleted_fires_on_its_own_clock() {
+    for (rate, env) in harness::object_settings() {
+        let report = harness::clock_objects("timer_churn", 300, &env);
+        harness::assert_on_time(
+            &report,
+            "timer_churn",
+            harness::OBJECT_MILLIS * MILLI / rate,
+        );
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn a_timer_created_among_more_live_ones_than_the_library_keeps_fires_on_its_own_clock() {
+    // Below the table's size and past it. FreeBSD allows a process 32 timers, so there the crowd
+    // stops well short of either, and the case is the plain one.
+    for count in [300, harness::PAST_THE_TABLE] {
+        for (rate, env) in harness::object_settings() {
+            let report = harness::clock_objects("timer_crowd", count, &env);
+            harness::assert_on_time(
+                &report,
+                "timer_crowd",
+                harness::OBJECT_MILLIS * MILLI / rate,
+            );
+            harness::assert_on_time(&report, "timer_crowd_wall", harness::OBJECT_MILLIS * MILLI);
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_timerfd_arms_on_its_own_clock_under_every_number_it_is_given() {
+    for (rate, env) in harness::object_settings() {
+        let report = harness::clock_objects("timerfd_numbers", 0, &env);
+        for key in [
+            "timerfd_dup",
+            "timerfd_dup2",
+            "timerfd_dup3",
+            "timerfd_fcntl_dupfd",
+            "timerfd_fcntl_dupfd_cloexec",
+            "timerfd_after_close",
+            "timerfd_relative",
+        ] {
+            harness::assert_on_time(&report, key, harness::OBJECT_MILLIS * MILLI / rate);
+        }
+        // A wall-clock timerfd on a number a monotonic one was made under.
+        harness::assert_on_time(
+            &report,
+            "timerfd_renumbered",
+            harness::OBJECT_MILLIS * MILLI,
+        );
+    }
+}
