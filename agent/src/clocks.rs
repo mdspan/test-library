@@ -32,7 +32,7 @@ mod table;
 #[cfg(all(test, loom))]
 mod interleavings;
 
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering, fence};
 
 use common::platform::clock;
 use table::{EMPTY, Slot};
@@ -61,9 +61,8 @@ pub(crate) type Table = table::Table<SLOTS>;
 impl Slot {
     const fn new() -> Self {
         Self {
-            state: AtomicU32::new(EMPTY),
+            state: AtomicU64::new(EMPTY),
             object: AtomicUsize::new(0),
-            clock: AtomicI32::new(0),
         }
     }
 }
@@ -167,6 +166,46 @@ mod tests {
         table.record(first, clock::MONOTONIC);
         assert_eq!(table.clock_of(first), Some(clock::MONOTONIC));
         assert_eq!(table.clock_of(second), Some(boottime()));
+    }
+
+    #[test]
+    fn a_key_recorded_again_behind_a_freed_slot_is_forgotten_whole() {
+        let table = Table::new();
+        let [first, second] = crowding::<SLOTS>(2)[..] else {
+            panic!("two keys share a home");
+        };
+        table.record(first, clock::MONOTONIC);
+        table.record(second, clock::MONOTONIC);
+        // The first key's slot is free and lies on the second's walk, ahead of where it is held.
+        table.record(first, clock::REALTIME);
+        table.record(second, clock::MONOTONIC);
+        assert_eq!(table.holders(second), 1);
+        assert_eq!(table.clock_of(second), Some(clock::MONOTONIC));
+        table.record(second, clock::REALTIME);
+        assert_eq!(table.holders(second), 0);
+        assert_eq!(table.clock_of(second), Some(clock::REALTIME));
+        assert_eq!(table.clock_of(first), Some(clock::REALTIME));
+    }
+
+    #[test]
+    fn a_key_kept_again_behind_a_freed_slot_takes_the_new_clock_and_is_forgotten_whole() {
+        let table = Table::new();
+        let [first, second] = crowding::<SLOTS>(2)[..] else {
+            panic!("two keys share a home");
+        };
+        table.keep(first, clock::MONOTONIC);
+        table.keep(second, clock::MONOTONIC);
+        table.forget(first);
+        table.keep(second, boottime());
+        assert_eq!(table.holders(second), 1);
+        assert_eq!(table.kept(second), Some(boottime()));
+        // The slot ahead of it is still free for the next key from that home.
+        table.keep(first, clock::REALTIME);
+        assert_eq!(table.kept(first), Some(clock::REALTIME));
+        assert_eq!(table.kept(second), Some(boottime()));
+        table.forget(second);
+        assert_eq!(table.kept(second), None);
+        assert_eq!(table.kept(first), Some(clock::REALTIME));
     }
 
     #[test]

@@ -1,13 +1,15 @@
 //! The table under every interleaving `loom` drives: two inserts claiming slots on one walk, a
 //! lookup racing an insert, a lookup the program has ordered after one, a forget racing an insert
-//! from the same home, and two inserts racing for the last free slot.
+//! from the same home, two keeps of one key, alone and racing a forget of it, a keep racing a
+//! forget of its key, keeps of two keys from one home, a keep whose slot is freed and taken by
+//! another key under it, and two inserts racing for the last free slot.
 //!
 //! The source is the process's own table, mounted a second time over loom's atomics, in a table of
 //! a slot or two so that every walk crosses another.
 
 use common::platform::clock;
 use loom::sync::Arc;
-use loom::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicUsize, Ordering};
+use loom::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering, fence};
 use loom::thread;
 
 #[path = "table.rs"]
@@ -23,9 +25,8 @@ impl<const N: usize> Table<N> {
     fn new() -> Self {
         Self {
             slots: std::array::from_fn(|_| Slot {
-                state: AtomicU32::new(EMPTY),
+                state: AtomicU64::new(EMPTY),
                 object: AtomicUsize::new(0),
-                clock: AtomicI32::new(0),
             }),
             reach: AtomicUsize::new(0),
             lost: AtomicBool::new(false),
@@ -121,6 +122,140 @@ fn a_forget_racing_an_insert_from_the_same_home_leaves_the_insert_found() {
         assert_eq!(table.kept(first), None);
         assert_eq!(table.kept(second), Some(clock::MONOTONIC));
         assert!(!table.lost.load(Ordering::Relaxed));
+    });
+}
+
+#[test]
+fn two_keeps_of_one_key_leave_it_held_once() {
+    loom::model(|| {
+        let table = Arc::new(Table::<2>::new());
+        let key = 0x1_0000;
+        let other = {
+            let table = Arc::clone(&table);
+            thread::spawn(move || table.keep(key, clock::PROCESS_CPUTIME))
+        };
+        table.keep(key, clock::MONOTONIC);
+        other.join().expect("the other keep ran");
+
+        assert_eq!(
+            table.holders(key),
+            1,
+            "two keeps left the key in both slots"
+        );
+        let seen = table.kept(key);
+        assert!(
+            matches!(seen, Some(clock::MONOTONIC | clock::PROCESS_CPUTIME)),
+            "two keeps left {seen:?}"
+        );
+        table.forget(key);
+        assert_eq!(table.holders(key), 0);
+    });
+}
+
+#[test]
+fn two_keeps_of_one_key_racing_a_forget_of_it_leave_it_held_once_at_most() {
+    loom::model(|| {
+        let table = Arc::new(Table::<2>::new());
+        let key = 0x1_0000;
+        let keeps = [clock::MONOTONIC, clock::PROCESS_CPUTIME].map(|clock| {
+            let table = Arc::clone(&table);
+            thread::spawn(move || table.keep(key, clock))
+        });
+        table.forget(key);
+        for keep in keeps {
+            keep.join().expect("a keep ran");
+        }
+
+        assert!(
+            table.holders(key) <= 1,
+            "two keeps and a forget left two slots"
+        );
+        table.forget(key);
+        assert_eq!(table.holders(key), 0);
+    });
+}
+
+#[test]
+fn a_keep_racing_a_forget_leaves_the_new_clock_or_none_and_never_the_old() {
+    loom::model(|| {
+        let table = Arc::new(Table::<2>::new());
+        let (first, second) = sharing_a_home::<2>().expect("two keys share a home");
+        table.keep(first, clock::REALTIME);
+        table.keep(second, clock::PROCESS_CPUTIME);
+        // The slot ahead of the second key's is free when the race starts.
+        table.forget(first);
+        let other = {
+            let table = Arc::clone(&table);
+            thread::spawn(move || table.forget(second))
+        };
+        table.keep(second, clock::MONOTONIC);
+        other.join().expect("the forget ran");
+
+        assert!(
+            table.holders(second) <= 1,
+            "a keep racing a forget left two slots"
+        );
+        let seen = table.kept(second);
+        assert!(
+            matches!(seen, None | Some(clock::MONOTONIC)),
+            "a keep racing a forget left {seen:?}"
+        );
+        table.forget(second);
+        assert_eq!(table.holders(second), 0);
+    });
+}
+
+#[test]
+fn keeps_of_two_keys_from_one_home_leave_each_held_once() {
+    loom::model(|| {
+        let table = Arc::new(Table::<2>::new());
+        let (first, second) = sharing_a_home::<2>().expect("two keys share a home");
+        table.keep(first, clock::PROCESS_CPUTIME);
+        table.keep(second, clock::PROCESS_CPUTIME);
+        table.forget(first);
+        let other = {
+            let table = Arc::clone(&table);
+            thread::spawn(move || table.keep(first, clock::REALTIME))
+        };
+        table.keep(second, clock::MONOTONIC);
+        other.join().expect("the other keep ran");
+
+        assert_eq!(table.holders(first), 1);
+        assert_eq!(table.holders(second), 1);
+        assert_eq!(table.kept(first), Some(clock::REALTIME));
+        assert_eq!(table.kept(second), Some(clock::MONOTONIC));
+        table.forget(second);
+        assert_eq!(table.kept(second), None);
+        assert_eq!(table.kept(first), Some(clock::REALTIME));
+        assert!(!table.lost.load(Ordering::Relaxed));
+    });
+}
+
+#[test]
+fn a_keep_that_loses_its_entry_to_a_forget_leaves_the_next_object_in_the_slot_its_own_clock() {
+    loom::model(|| {
+        let table = Arc::new(Table::<2>::new());
+        let (first, second) = sharing_a_home::<2>().expect("two keys share a home");
+        table.keep(first, clock::PROCESS_CPUTIME);
+        let other = {
+            let table = Arc::clone(&table);
+            thread::spawn(move || {
+                table.forget(first);
+                // Lands in the slot just freed, unless the keep it races has taken that again.
+                table.keep(second, clock::REALTIME);
+            })
+        };
+        table.keep(first, clock::MONOTONIC);
+        other.join().expect("the forget and the other keep ran");
+
+        assert_eq!(table.holders(second), 1);
+        assert!(table.holders(first) <= 1);
+        assert_eq!(table.kept(second), Some(clock::REALTIME));
+        let seen = table.kept(first);
+        assert!(
+            matches!(seen, None | Some(clock::MONOTONIC)),
+            "a keep racing a forget left {seen:?}"
+        );
     });
 }
 

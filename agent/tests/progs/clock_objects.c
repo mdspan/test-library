@@ -18,6 +18,13 @@
      moved onto a number a monotonic one had. The count is unused.
    - `cond_crowd`: keeps that many monotonic condition variables alive, then waits on a new one and
      on one built by the static initialiser, which reads the wall clock.
+   - `cond_reinit`: builds that many monotonic condition variables, initialises all but the last
+     `REST` again with the wall clock, the last `REST` again with the monotonic clock and then the
+     wall clock, each without destroying it first, as a program does that reuses the memory of a
+     variable it never destroyed, and waits on each of the last for an eighth of argv[3] on the
+     wall clock. In place of the keys above it reports `cond_reinit.waits`, how many it meant to
+     wait on, and `cond_reinit.on_time`, how many timed out no sooner than half that before the
+     first that did not.
 
    Linked against the library rather than preloading it, so the genuine clock comes from the
    library's own symbol. */
@@ -67,12 +74,15 @@ static long long genuine_mono(void) {
     return nanos(&ts);
 }
 
-/* `clock` as the program sees it, plus the duration every arm and wait asks for. */
-static struct timespec deadline_on(clockid_t clock) {
+/* `clock` as the program sees it, plus `ahead_ns`. */
+static struct timespec ahead_on(clockid_t clock, long long ahead_ns) {
     struct timespec ts;
     clock_gettime(clock, &ts);
-    return spec_of(nanos(&ts) + base_ns);
+    return spec_of(nanos(&ts) + ahead_ns);
 }
+
+/* `clock` as the program sees it, plus the duration every arm and wait asks for. */
+static struct timespec deadline_on(clockid_t clock) { return ahead_on(clock, base_ns); }
 
 static long long started;
 
@@ -278,8 +288,10 @@ static void *watchdog(void *arg) {
     return NULL;
 }
 
-/* Waits on `cond` for the deadline on `clock` and reports what came of it. */
-static void wait_on(const char *key, pthread_cond_t *cond, clockid_t clock) {
+/* Waits on `cond` for `ahead_ns` past what `clock` shows and answers what the wait did, or -1
+   when it could not wait. Reports what came of it under `key` unless that is null. */
+static int watched_wait(const char *key, pthread_cond_t *cond, clockid_t clock,
+                        long long ahead_ns) {
     pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
     struct watch watch;
     struct timespec deadline;
@@ -287,7 +299,7 @@ static void wait_on(const char *key, pthread_cond_t *cond, clockid_t clock) {
     int stop[2], rc;
 
     if (pipe(stop) != 0) {
-        return;
+        return -1;
     }
     watch.mutex = &mutex;
     watch.cond = cond;
@@ -295,19 +307,27 @@ static void wait_on(const char *key, pthread_cond_t *cond, clockid_t clock) {
     pthread_mutex_lock(&mutex);
     if (pthread_create(&thread, NULL, watchdog, &watch) != 0) {
         pthread_mutex_unlock(&mutex);
-        return;
+        return -1;
     }
-    deadline = deadline_on(clock);
+    deadline = ahead_on(clock, ahead_ns);
     begin();
     rc = pthread_cond_timedwait(cond, &mutex, &deadline);
-    printf("%s.rc=%d\n", key, rc);
-    done(key, rc == ETIMEDOUT);
+    if (key != NULL) {
+        printf("%s.rc=%d\n", key, rc);
+        done(key, rc == ETIMEDOUT);
+    }
     pthread_mutex_unlock(&mutex);
     if (write(stop[1], "", 1) == 1) {
         pthread_join(thread, NULL);
     }
     close(stop[0]);
     close(stop[1]);
+    return rc;
+}
+
+/* Waits on `cond` for the deadline on `clock` and reports what came of it. */
+static void wait_on(const char *key, pthread_cond_t *cond, clockid_t clock) {
+    watched_wait(key, cond, clock, base_ns);
 }
 
 static int cond_crowd(long count) {
@@ -333,6 +353,49 @@ static int cond_crowd(long count) {
     return 0;
 }
 
+/* How many variables `cond_reinit` gives their clocks again and waits on. */
+#define REST 32
+
+static int cond_reinit(long count) {
+    pthread_cond_t *conds = calloc((size_t)count, sizeof *conds);
+    pthread_condattr_t steady;
+    long long ahead = base_ns / 8;
+    long made, waited;
+    int rc;
+
+    if (conds == NULL || count < REST) {
+        return 3;
+    }
+    pthread_condattr_init(&steady);
+    if (pthread_condattr_setclock(&steady, CLOCK_MONOTONIC) != 0) {
+        return 3;
+    }
+    for (made = 0; made < count; made++) {
+        if (pthread_cond_init(&conds[made], &steady) != 0) {
+            return 3;
+        }
+    }
+    /* Each of these frees a slot that may lie on the walk of one of the last, ahead of its own. */
+    for (made = 0; made < count - REST; made++) {
+        pthread_cond_init(&conds[made], NULL);
+    }
+    for (made = count - REST; made < count; made++) {
+        pthread_cond_init(&conds[made], &steady);
+    }
+    for (made = count - REST; made < count; made++) {
+        pthread_cond_init(&conds[made], NULL);
+    }
+    printf("cond_reinit.waits=%d\n", REST);
+    for (waited = 0; waited < REST; waited++) {
+        rc = watched_wait(NULL, &conds[count - REST + waited], CLOCK_REALTIME, ahead);
+        if (rc != ETIMEDOUT || genuine_mono() - started < ahead / 2) {
+            break;
+        }
+    }
+    printf("cond_reinit.on_time=%ld\n", waited);
+    return 0;
+}
+
 int main(int argc, char **argv) {
     long count;
 
@@ -354,6 +417,9 @@ int main(int argc, char **argv) {
 #endif
     if (strcmp(argv[1], "cond_crowd") == 0) {
         return cond_crowd(count);
+    }
+    if (strcmp(argv[1], "cond_reinit") == 0) {
+        return cond_reinit(count);
     }
     return 2;
 }

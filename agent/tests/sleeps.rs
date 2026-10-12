@@ -667,3 +667,22 @@ fn a_condition_variable_among_more_live_ones_than_the_library_keeps_times_out_on
         }
     }
 }
+
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn a_condition_variable_given_its_clock_again_and_then_the_default_times_out_on_the_wall_clock() {
+    // Most of the table, so the last variables made sit past slots that others gave up when they
+    // went back to the wall clock, ahead of their own on their walks. Where the families run
+    // apart, a wall-clock deadline read on the monotonic clock comes due at once.
+    for (_, env) in harness::object_settings() {
+        let report = harness::clock_objects("cond_reinit", 3_000, &env);
+        let waits = report.nanos("cond_reinit.waits");
+        assert!(waits > 0, "no wait was made\n{}", report.stdout);
+        assert_eq!(
+            report.nanos("cond_reinit.on_time"),
+            waits,
+            "a wall-clock deadline was read on another clock\n{}",
+            report.stdout
+        );
+    }
+}

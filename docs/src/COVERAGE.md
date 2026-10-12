@@ -65,11 +65,13 @@ microsecond.
 
 **Timers and condition variables keep the clock they were made with.** A
 POSIX timer, a timerfd, and a condition variable are measured against the
-clock they were created on, however many a program makes. On Linux a
-timerfd's clock comes from `/proc`, so a copy made with `dup`, `dup2`,
-`dup3`, or `fcntl` follows it too. The library keeps the clock of up to
-4096 live POSIX timers, and of as many condition variables built on a clock
-other than the wall clock. Past that, a deadline on one it could not keep is
+clock they were created on, however many a program makes. A condition
+variable initialized again follows the clock it was given last, whether or
+not it was destroyed in between. On Linux a timerfd's clock comes from
+`/proc`, so a copy made with `dup`, `dup2`, `dup3`, or `fcntl` follows it
+too. The library keeps the clock of up to 4096 live POSIX timers, and of as
+many condition variables built on a clock other than the wall clock. Past
+that, a deadline on one it could not keep is
 read on whichever of `CLOCK_REALTIME` and `CLOCK_MONOTONIC` reads nearer
 the deadline, which is the right one unless the deadline is decades away or
 you set the wall clock close to the monotonic clock's reading; one made on
