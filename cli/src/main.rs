@@ -5,6 +5,7 @@
 
 mod args;
 mod commands;
+mod directory;
 mod failure;
 mod family;
 mod format;

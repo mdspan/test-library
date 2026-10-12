@@ -28,11 +28,19 @@ pub(crate) struct Invocation {
 pub(crate) struct Picking {
     /// `--session PATH`: the session file, outright.
     pub(crate) session: Option<PathBuf>,
+    /// `--creator PID`: only the sessions that process created.
+    pub(crate) creator: Option<u32>,
+    /// `--newest`: the session created last.
+    pub(crate) newest: bool,
+    /// `--dir DIR`: the directory to look in, in place of the computed one.
+    pub(crate) dir: Option<PathBuf>,
 }
 
 /// A command and its arguments, as typed. Values are checked when the command runs.
 #[derive(Debug)]
 pub(crate) enum Command {
+    /// `list`.
+    List,
     /// `info`.
     Info,
     /// `get <family>`.
@@ -44,8 +52,20 @@ pub(crate) enum Command {
 pub(crate) struct Usage(pub(crate) String);
 
 /// One line of `--help` per option and per command: the spelling, then what it does.
-const OPTIONS: &[(&str, &str)] = &[("--session PATH", "the path of the session file, outright")];
+const OPTIONS: &[(&str, &str)] = &[
+    (
+        "--creator PID",
+        "the session that process created; for the program you started",
+    ),
+    ("--newest", "the session created last"),
+    ("--session PATH", "the path of the session file, outright"),
+    (
+        "--dir DIR",
+        "look for sessions in DIR, not the usual directory",
+    ),
+];
 const COMMANDS: &[(&str, &str)] = &[
+    ("list", "every session in the directory"),
     (
         "info",
         "how the session was set up and what went wrong with it",
@@ -95,6 +115,10 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Parsed, 
         match name {
             "-h" | "--help" => return Ok(Parsed::Help),
             "--session" => picking.session = Some(value(name, attached, &mut tokens)?.into()),
+            "--dir" => picking.dir = Some(value(name, attached, &mut tokens)?.into()),
+            "--creator" => picking.creator = Some(pid(name, &value(name, attached, &mut tokens)?)?),
+            "--newest" if attached.is_none() => picking.newest = true,
+            "--newest" => return Err(Usage("--newest takes no value".to_owned())),
             _ => return Err(Usage(format!("unknown option {}", token.to_string_lossy()))),
         }
     };
@@ -108,6 +132,10 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Parsed, 
 /// The command `word` names, with its arguments.
 fn command(word: &str, rest: Vec<String>) -> Result<Command, Usage> {
     match word {
+        "list" => {
+            exactly::<0>(word, rest)?;
+            Ok(Command::List)
+        }
         "info" => {
             exactly::<0>(word, rest)?;
             Ok(Command::Info)
@@ -159,6 +187,19 @@ fn value(
         .map(OsStr::to_os_string)
         .or_else(|| tokens.next())
         .ok_or_else(|| Usage(format!("{name} takes a value")))
+}
+
+/// The value of the option `name` as a process id.
+fn pid(name: &str, value: &OsStr) -> Result<u32, Usage> {
+    value
+        .to_str()
+        .and_then(|text| text.parse().ok())
+        .ok_or_else(|| {
+            Usage(format!(
+                "{name} takes a process id, not {}",
+                value.to_string_lossy()
+            ))
+        })
 }
 
 /// A token that has to be text: the command word and its arguments.

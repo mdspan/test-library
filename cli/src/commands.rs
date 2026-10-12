@@ -10,22 +10,47 @@ use controller::{Controller, Info};
 use crate::args::{Command, Invocation, Picking};
 use crate::failure::Failure;
 use crate::output::Output;
-use crate::{family, format};
+use crate::{directory, family, format};
 
 /// Runs the command of `invocation`.
 pub(crate) fn run<W: Write>(invocation: &Invocation, out: &mut Output<W>) -> Result<(), Failure> {
     match &invocation.command {
+        Command::List => list(&invocation.picking, out),
         Command::Info => info(&invocation.picking, out),
         Command::Get { family } => get(&invocation.picking, family, out),
     }
 }
 
-/// The session file the command acts on.
+/// The directory sessions are looked for in: `--dir`, else the one the library computes.
+fn directory(picking: &Picking) -> PathBuf {
+    picking.dir.clone().unwrap_or_else(directory::session_dir)
+}
+
+/// The session file the command acts on: `--session`, else the pick out of the directory.
 fn chosen(picking: &Picking) -> Result<PathBuf, Failure> {
-    picking
-        .session
-        .clone()
-        .ok_or_else(|| Failure::Other("no session named; pass --session PATH".to_owned()))
+    picking.session.clone().map_or_else(
+        || {
+            directory::select(&directory(picking), picking.creator, picking.newest)
+                .map(|found| found.path)
+        },
+        Ok,
+    )
+}
+
+fn list<W: Write>(picking: &Picking, out: &mut Output<W>) -> Result<(), Failure> {
+    let dir = directory(picking);
+    out.say_bytes("directory", dir.as_os_str().as_bytes())?;
+    let found = directory::sessions(&dir);
+    for (index, one) in found.iter().enumerate() {
+        let key = |name: &str| format!("session.{index}.{name}");
+        out.say_bytes(&key("path"), one.path.as_os_str().as_bytes())?;
+        out.say(&key("creator-pid"), one.info.creator_pid)?;
+        out.say(&key("created"), format::instant(one.info.creation_time))?;
+        out.say(&key("created-ns"), one.info.creation_time.0)?;
+        out.say(&key("keeper"), format::keeper(one.info.keeper))?;
+        out.say(&key("fault"), format::fault(one.info.fault))?;
+    }
+    out.say("count", found.len())
 }
 
 fn info<W: Write>(picking: &Picking, out: &mut Output<W>) -> Result<(), Failure> {

@@ -6,12 +6,15 @@
 )]
 
 use std::collections::BTreeMap;
-use std::ffi::OsStr;
-use std::path::Path;
+use std::ffi::{OsStr, OsString};
+use std::fs::OpenOptions;
+use std::mem::offset_of;
+use std::os::unix::fs::FileExt;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
-use common::session::layout::{Fault, Keeper};
+use common::session::layout::{Fault, Header, Keeper};
 use common::session::{self, Session, Setup};
 
 /// A case that creates a session takes this: the lock file a reader probes is named once per
@@ -22,10 +25,12 @@ pub(crate) fn one_at_a_time() -> MutexGuard<'static, ()> {
     ONE_AT_A_TIME.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// A directory of our own with one session in it, kept mapped so the file stays whole.
+/// A directory of our own with one session in it, and any added later, kept mapped so the files
+/// stay whole.
 pub(crate) struct Fixture {
-    _dir: tempfile::TempDir,
+    dir: tempfile::TempDir,
     pub(crate) session: Session,
+    others: Vec<Session>,
 }
 
 impl Fixture {
@@ -40,23 +45,39 @@ impl Fixture {
 
     fn build(keeper: Keeper, fault: Option<Fault>) -> Self {
         let dir = tempfile::tempdir().expect("a temporary directory");
-        // These cases are not about posing as the vDSO, so it is off.
-        let setup = Setup {
-            keeper,
-            emulate_vdso: false,
-            ..Setup::plain(dir.path().join("libtimewarp"))
-        };
-        let session = fault
-            .map_or_else(
-                || session::create(&setup),
-                |fault| session::create_faulted(&setup, fault),
-            )
-            .expect("a session of our own");
-        Self { _dir: dir, session }
+        let session = create(&dir.path().join("libtimewarp"), keeper, fault);
+        Self {
+            dir,
+            session,
+            others: Vec::new(),
+        }
     }
 
     pub(crate) fn path(&self) -> &Path {
         self.session.path()
+    }
+
+    /// The temporary directory: what `LIBTIMEWARP_SESSION_DIR` names to reach the sessions.
+    pub(crate) fn dir(&self) -> &Path {
+        self.dir.path()
+    }
+
+    /// The directory the session files are in.
+    pub(crate) fn session_dir(&self) -> PathBuf {
+        self.dir().join("libtimewarp")
+    }
+
+    /// Creates one more session in the same directory and gives its path.
+    pub(crate) fn another(&mut self, keeper: Keeper) -> PathBuf {
+        let added = create(&self.session_dir(), keeper, None);
+        let path = added.path().to_path_buf();
+        self.others.push(added);
+        path
+    }
+
+    /// The tool with `LIBTIMEWARP_SESSION_DIR` naming this fixture's directory.
+    pub(crate) fn tool(&self) -> Tool {
+        Tool::new().env("LIBTIMEWARP_SESSION_DIR", self.dir())
     }
 
     /// Runs the tool with `--session` naming this fixture's file, then `args`.
@@ -67,12 +88,78 @@ impl Fixture {
     }
 }
 
+fn create(dir: &Path, keeper: Keeper, fault: Option<Fault>) -> Session {
+    // These cases are not about posing as the vDSO, so it is off.
+    let setup = Setup {
+        keeper,
+        emulate_vdso: false,
+        ..Setup::plain(dir.to_path_buf())
+    };
+    fault
+        .map_or_else(
+            || session::create(&setup),
+            |fault| session::create_faulted(&setup, fault),
+        )
+        .expect("a session of our own")
+}
+
+/// Rewrites the creator pid and creation time in the header of the session file at `path`, so
+/// sessions made by one process can stand for several.
+pub(crate) fn restamp(path: &Path, creator_pid: u32, creation_time: i64) {
+    let file = OpenOptions::new()
+        .write(true)
+        .open(path)
+        .expect("the session file opens for writing");
+    let at = |offset: usize| u64::try_from(offset).expect("an offset inside the header");
+    file.write_all_at(
+        &creator_pid.to_ne_bytes(),
+        at(offset_of!(Header, creator_pid)),
+    )
+    .expect("the creator pid is written");
+    file.write_all_at(
+        &creation_time.to_ne_bytes(),
+        at(offset_of!(Header, creation_time)),
+    )
+    .expect("the creation time is written");
+}
+
+/// The binary under test in an environment of the case's own: nothing inherited, so the session
+/// directory and the configuration file are what the case sets.
+pub(crate) struct Tool {
+    env: Vec<(OsString, OsString)>,
+}
+
+impl Tool {
+    /// An environment with `XDG_CONFIG_HOME` naming a directory with no configuration file in it.
+    pub(crate) fn new() -> Self {
+        Self { env: Vec::new() }.env("XDG_CONFIG_HOME", "/nonexistent")
+    }
+
+    /// The same environment with `name` set to `value`.
+    pub(crate) fn env(mut self, name: impl AsRef<OsStr>, value: impl AsRef<OsStr>) -> Self {
+        self.env
+            .push((name.as_ref().to_owned(), value.as_ref().to_owned()));
+        self
+    }
+
+    /// Runs the tool with `args` after the program name.
+    pub(crate) fn run<S: AsRef<OsStr>>(&self, args: &[S]) -> Run {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_libtimewarp"));
+        command
+            .env_clear()
+            .envs(self.env.iter().cloned())
+            .args(args);
+        finished(&mut command)
+    }
+}
+
 /// One run of the binary under test, with `args` after the program name.
 pub(crate) fn run<S: AsRef<OsStr>>(args: &[S]) -> Run {
-    let output = Command::new(env!("CARGO_BIN_EXE_libtimewarp"))
-        .args(args)
-        .output()
-        .expect("the tool ran");
+    finished(Command::new(env!("CARGO_BIN_EXE_libtimewarp")).args(args))
+}
+
+fn finished(command: &mut Command) -> Run {
+    let output = command.output().expect("the tool ran");
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     Run {
         facts: stdout

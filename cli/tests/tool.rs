@@ -1,7 +1,9 @@
 //! The `libtimewarp` binary, run against sessions of the suite's own.
 #![expect(
     clippy::expect_used,
-    reason = "test support: a failed assumption should fail the test loudly"
+    dead_code,
+    reason = "test support: a failed assumption should fail the test loudly, and not every helper \
+              is used by every case"
 )]
 
 mod fixture;
@@ -201,7 +203,15 @@ fn help_lists_the_commands_and_exits_zero() {
             "{}",
             help.stdout
         );
-        for word in ["info", "get", "--session"] {
+        for word in [
+            "list",
+            "info",
+            "get",
+            "--creator",
+            "--newest",
+            "--session",
+            "--dir",
+        ] {
             assert!(
                 help.stdout.contains(word),
                 "no `{word}` in:\n{}",
