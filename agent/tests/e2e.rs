@@ -196,7 +196,10 @@ fn a_relative_session_directory_still_reaches_a_child_after_a_change_of_director
     report.assert_wall_clock("after", -2 * HOUR);
     let shared = Path::new(report.get("before.shared"));
     assert!(shared.is_absolute(), "{}", shared.display());
-    assert!(shared.starts_with(dir.path().join("sessions/libtimewarp")));
+    assert_eq!(
+        std::fs::canonicalize(shared.parent().unwrap()).unwrap(),
+        std::fs::canonicalize(dir.path().join("sessions/libtimewarp")).unwrap()
+    );
     assert_eq!(report.get("after.shared"), report.get("before.shared"));
 }
 
@@ -222,7 +225,12 @@ fn a_relative_inherited_path_still_reaches_a_child_after_a_change_of_directory()
 
     report.assert_wall_clock("before", -2 * HOUR);
     report.assert_wall_clock("after", -2 * HOUR);
-    assert_eq!(Path::new(report.get("after.shared")), created);
+    let shared = Path::new(report.get("after.shared"));
+    assert!(shared.is_absolute(), "{}", shared.display());
+    assert_eq!(
+        std::fs::canonicalize(shared).unwrap(),
+        std::fs::canonicalize(created).unwrap()
+    );
 }
 
 #[test]
