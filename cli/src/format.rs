@@ -93,7 +93,7 @@ const fn civil_from_days(days: i64) -> (i64, i64, i64) {
 
 #[cfg(test)]
 mod tests {
-    use common::config::parse_timestamp;
+    use common::config::{parse_duration, parse_timestamp};
 
     use super::*;
 
@@ -134,9 +134,38 @@ mod tests {
     }
 
     #[test]
+    fn elapsed_reads_back_through_the_library() {
+        for nanos in [0, 1, -1, 5_400 * Nanos::SECOND, -7_200 * Nanos::SECOND] {
+            let text = elapsed(Nanos(nanos));
+            assert_eq!(parse_duration(&text), Ok(nanos), "{text}");
+        }
+    }
+
+    #[test]
     fn timebases_go_by_name_or_number() {
         assert_eq!(timebase(None), "");
         assert_eq!(timebase(Some(clock::REALTIME)), "CLOCK_REALTIME");
+        assert_eq!(timebase(Some(libc::CLOCK_MONOTONIC)), "CLOCK_MONOTONIC");
         assert_eq!(timebase(Some(12_345)), "12345");
+    }
+
+    /// FreeBSD spells `CLOCK_BOOTTIME` as `CLOCK_UPTIME` through 14.x and as `CLOCK_MONOTONIC` from
+    /// 15.0. Where it is a clock of its own, or absent, this checks nothing.
+    #[test]
+    fn an_id_with_two_names_goes_by_the_one_that_is_not_an_alias() {
+        let id_of = |wanted: &str| {
+            clock::named()
+                .iter()
+                .find(|&&(name, _)| name == wanted)
+                .map(|&(_, id)| id)
+        };
+        let Some(boottime) = id_of("CLOCK_BOOTTIME") else {
+            return;
+        };
+        for name in ["CLOCK_UPTIME", "CLOCK_MONOTONIC"] {
+            if id_of(name) == Some(boottime) {
+                assert_eq!(timebase(Some(boottime)), name);
+            }
+        }
     }
 }

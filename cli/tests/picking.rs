@@ -8,6 +8,7 @@
 mod fixture;
 
 use std::fs;
+use std::os::unix::fs::MetadataExt;
 
 use common::session::layout::Keeper;
 
@@ -109,6 +110,22 @@ fn list_on_an_empty_directory_counts_none() {
     assert_eq!(listed.get("directory"), dir.path().to_string_lossy());
     assert_eq!(listed.number("count"), 0);
     assert_eq!(listed.keys(), ["directory", "count"]);
+}
+
+#[test]
+fn the_temp_directory_is_the_one_the_environment_names() {
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let euid = fs::metadata(dir.path())
+        .expect("the directory exists")
+        .uid();
+
+    let listed = Tool::new().env("TMPDIR", dir.path()).run(&["list"]).ok();
+    assert_eq!(
+        listed.get("directory"),
+        dir.path()
+            .join(format!("libtimewarp-{euid}"))
+            .to_string_lossy()
+    );
 }
 
 #[test]

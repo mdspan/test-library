@@ -432,6 +432,7 @@ mod tests {
         assert_eq!(parse_duration("90s"), Ok(90_000_000_000));
         assert_eq!(parse_duration("2m"), Ok(120_000_000_000));
         assert_eq!(parse_duration("-2h"), Ok(-7_200_000_000_000));
+        assert_eq!(parse_duration("+2h"), Ok(7_200_000_000_000));
         assert_eq!(parse_duration("365d"), Ok(365 * 86_400 * 1_000_000_000));
     }
 
@@ -451,7 +452,19 @@ mod tests {
 
     #[test]
     fn junk_is_refused() {
-        for bad in ["", "h", "2x", "1.2.3", "1e9", "two", "1 000s", "--1s"] {
+        for bad in [
+            "",
+            "h",
+            "2x",
+            "2y",
+            "2 hours",
+            "1.2.3",
+            "1e9",
+            "two",
+            "yesterday",
+            "1 000s",
+            "--1s",
+        ] {
             assert_eq!(
                 parse_duration(bad),
                 Err(ParseError),

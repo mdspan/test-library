@@ -106,6 +106,29 @@ fn info_reports_the_fault_of_a_null_session() {
 }
 
 #[test]
+fn a_null_session_reads_the_genuine_clock_and_refuses_a_rate() {
+    let _one = one_at_a_time();
+    let session = Fixture::on(Keeper::Null);
+
+    let info = session.run(&["info"]).ok();
+    assert_eq!(info.get("keeper"), "null");
+    assert_eq!(info.get("fault"), "");
+
+    let before = genuine(Family::Realtime);
+    let got = session.run(&["get", "realtime"]).ok().number("realtime.ns");
+    let after = genuine(Family::Realtime);
+    assert!(
+        (before..=after).contains(&got),
+        "realtime read {got}, outside [{before}, {after}]"
+    );
+
+    let refused = session
+        .run(&["set-rate", "realtime", "2"])
+        .refused(1, "libtimewarp: unsupported_for_keeper: ");
+    assert_eq!(refused.stdout, "");
+}
+
+#[test]
 fn get_answers_between_two_genuine_readings() {
     let _one = one_at_a_time();
     let session = Fixture::on(Keeper::Affine);
