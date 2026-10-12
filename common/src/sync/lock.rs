@@ -16,6 +16,7 @@ use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use crate::platform;
+use crate::session::naming;
 
 /// The one writer this process may have.
 ///
@@ -95,6 +96,9 @@ fn open_checked(path: &Path) -> io::Result<CString> {
 
 /// Names the lock file this process's readers probe, creating it if it is missing.
 ///
+/// A relative `path` is taken against the working directory of this call, so the probe still finds
+/// the file after the process changes directory.
+///
 /// Called once by whoever creates or attaches to the session, which is also where the file's half
 /// of the session's security checks happens: a reader's probe is three syscalls and no more, so
 /// the file it will open is vetted here instead, once.
@@ -104,9 +108,10 @@ fn open_checked(path: &Path) -> io::Result<CString> {
 /// sessions open at once is unaffected.
 ///
 /// # Errors
-/// [`io::Error`] when the file cannot be created or opened, or is not one of ours.
+/// [`io::Error`] when the file cannot be created or opened, or is not one of ours, or when `path`
+/// is relative and the working directory cannot be learned.
 pub fn install(path: &Path) -> io::Result<()> {
-    let c_path = open_checked(path)?;
+    let c_path = open_checked(&naming::absolute(path)?)?;
     PROBE_PATH.store(c_path.into_raw(), Ordering::Release);
     Ok(())
 }

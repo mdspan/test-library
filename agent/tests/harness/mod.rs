@@ -350,6 +350,7 @@ pub(crate) struct Run {
     preload: bool,
     library: Option<PathBuf>,
     session_dir: Option<PathBuf>,
+    current_dir: Option<PathBuf>,
     through: Vec<String>,
 }
 
@@ -362,6 +363,7 @@ impl Run {
             preload: true,
             library: None,
             session_dir: None,
+            current_dir: None,
             through: Vec::new(),
         }
     }
@@ -384,6 +386,12 @@ impl Run {
     /// Where sessions this run creates should land.
     pub(crate) fn session_dir(mut self, dir: &Path) -> Self {
         self.session_dir = Some(dir.to_path_buf());
+        self
+    }
+
+    /// The working directory the run starts in.
+    pub(crate) fn current_dir(mut self, dir: &Path) -> Self {
+        self.current_dir = Some(dir.to_path_buf());
         self
     }
 
@@ -446,6 +454,9 @@ impl Run {
         }
         if let Some(dir) = &self.session_dir {
             command.env("LIBTIMEWARP_SESSION_DIR", dir);
+        }
+        if let Some(dir) = &self.current_dir {
+            command.current_dir(dir);
         }
         for (name, value) in &self.env {
             command.env(name, value);

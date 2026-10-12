@@ -1,11 +1,14 @@
 #include "report.h"
 
-/* argv[1] is the probe to exec. */
+/* argv[1] is the probe to exec; argv[2], if given, is a directory to change to first. */
 int main(int argc, char **argv) {
     char *args[3];
 
     report("before");
     if (argc < 2) {
+        return 1;
+    }
+    if (argc > 2 && chdir(argv[2]) != 0) {
         return 1;
     }
     args[0] = argv[1];

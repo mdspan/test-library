@@ -27,8 +27,12 @@ pub(crate) fn run<W: Write>(invocation: &Invocation, out: &mut Output<W>) -> Res
 }
 
 /// The directory sessions are looked for in: `--dir`, else the one the library computes.
-fn directory(picking: &Picking) -> PathBuf {
-    directory::tidy(&picking.dir.clone().unwrap_or_else(directory::session_dir))
+fn directory(picking: &Picking) -> Result<PathBuf, Failure> {
+    let dir = match &picking.dir {
+        Some(dir) => dir.clone(),
+        None => directory::session_dir()?,
+    };
+    Ok(directory::tidy(&dir))
 }
 
 /// The session file the command acts on: `--session`, else the one `--pid` carries, else the pick
@@ -40,11 +44,11 @@ fn chosen(picking: &Picking) -> Result<PathBuf, Failure> {
     if let Some(pid) = picking.pid {
         return environ::shared_file_of(pid).map(|path| directory::tidy(&path));
     }
-    directory::select(&directory(picking), picking.creator, picking.newest).map(|found| found.path)
+    directory::select(&directory(picking)?, picking.creator, picking.newest).map(|found| found.path)
 }
 
 fn list<W: Write>(picking: &Picking, out: &mut Output<W>) -> Result<(), Failure> {
-    let dir = directory(picking);
+    let dir = directory(picking)?;
     out.say_bytes("directory", dir.as_os_str().as_bytes())?;
     let found = directory::sessions(&dir);
     for (index, one) in found.iter().enumerate() {
@@ -141,7 +145,7 @@ fn thaw<W: Write>(picking: &Picking, names: &[String], out: &mut Output<W>) -> R
     let path = chosen(picking)?;
     let file = StateFile::of(&path)?;
     let session = Controller::attach(&path)?;
-    frozen::thaw(&session, &file, &families)?;
+    frozen::thaw(&session, &path, &file, &families)?;
     let info = session.info();
     for family in families {
         out.say(

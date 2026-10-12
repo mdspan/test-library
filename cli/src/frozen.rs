@@ -212,9 +212,10 @@ pub(crate) fn freeze(
 
 /// Puts back the rate `file` has for each of `families` in one transaction of `session`, and
 /// removes those rates from the file. A family with no rate in the file fails the whole run with
-/// nothing changed.
+/// nothing changed, naming the session by `path`, the path the session was picked by.
 pub(crate) fn thaw(
     session: &Controller,
+    path: &Path,
     file: &StateFile,
     families: &[Family],
 ) -> Result<(), Failure> {
@@ -232,7 +233,7 @@ pub(crate) fn thaw(
         return Err(Failure::Other(format!(
             "no remembered rate for {} of {}; set the rate outright with set-rate",
             missing.join(", "),
-            session.path().display()
+            path.display()
         )));
     }
     let steps: Vec<Step> = restored

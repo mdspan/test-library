@@ -409,6 +409,43 @@ fn a_file_whose_ready_flag_never_landed_is_refused() {
     );
 }
 
+/// `path`, spelled relative to the working directory.
+fn relative(path: &Path) -> PathBuf {
+    let cwd = std::env::current_dir().unwrap();
+    let up = cwd.components().skip(1).map(|_| "..").collect::<PathBuf>();
+    up.join(path.strip_prefix("/").unwrap())
+}
+
+#[test]
+fn a_session_created_under_a_relative_directory_has_an_absolute_path() {
+    let tmp = tempfile::tempdir().unwrap();
+    let setup = Setup::plain(relative(&tmp.path().join("libtimewarp")));
+    let session = create(&setup).unwrap();
+    assert!(session.path().is_absolute(), "{}", session.path().display());
+    assert!(
+        fs::canonicalize(session.path())
+            .unwrap()
+            .starts_with(fs::canonicalize(tmp.path()).unwrap())
+    );
+}
+
+#[test]
+fn a_session_attached_by_a_relative_path_has_an_absolute_path() {
+    let tmp = tempfile::tempdir().unwrap();
+    let created = create(&setup_in(tmp.path())).unwrap();
+
+    let attached = attach(&relative(created.path())).unwrap();
+    assert!(
+        attached.path().is_absolute(),
+        "{}",
+        attached.path().display()
+    );
+    assert_eq!(
+        fs::canonicalize(attached.path()).unwrap(),
+        fs::canonicalize(created.path()).unwrap()
+    );
+}
+
 #[test]
 fn a_planted_symlink_is_refused() {
     let tmp = tempfile::tempdir().unwrap();

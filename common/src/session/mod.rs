@@ -486,7 +486,8 @@ impl Session {
         unsafe { &*header_ptr(self.base) }
     }
 
-    /// Where the session file lives.
+    /// Where the session file lives, always [absolute](naming::absolute), so it still names the
+    /// file after the process changes directory.
     #[must_use]
     pub fn path(&self) -> &Path {
         &self.path
@@ -698,7 +699,8 @@ pub fn create_named(
     name: &str,
     fault: Option<Fault>,
 ) -> Result<Session, SessionError> {
-    ensure_dir(&setup.dir)?;
+    let dir = naming::absolute(&setup.dir)?;
+    ensure_dir(&dir)?;
     // Before anything is on disk, so a creator that cannot set up what it was asked for leaves the
     // directory clean.
     let plan = match setup.keeper {
@@ -707,7 +709,7 @@ pub fn create_named(
     };
     let mut build = Build::new(setup, fault)?;
 
-    let (path, tmp) = naming::session_paths(&setup.dir, name);
+    let (path, tmp) = naming::session_paths(&dir, name);
     let len = build.len;
 
     let c_tmp = cstring(&tmp)?;
@@ -922,23 +924,20 @@ fn copy_params(from: &layout::Params, to: &layout::Params) {
     to.store(&from.load());
 }
 
-/// Maps an existing session file, applying the security checks.
+/// Maps an existing session file, applying the security checks. A relative `path` is taken against
+/// the working directory.
 ///
 /// # Errors
 /// [`SessionError::NoSession`] when the path holds nothing, [`SessionError::NotOurs`] or
 /// [`SessionError::BadSessionFile`] when what it holds is not a session of ours, and
 /// [`SessionError::Io`] when a step fails outright.
 pub fn attach(path: &Path) -> Result<Session, SessionError> {
+    let path = naming::absolute(path)?;
     if let Some(dir) = path.parent() {
-        // A bare file name has an empty parent: the working directory.
-        check_dir(if dir.as_os_str().is_empty() {
-            Path::new(".")
-        } else {
-            dir
-        })?;
+        check_dir(dir)?;
     }
 
-    let c_path = cstring(path)?;
+    let c_path = cstring(&path)?;
     // A planted symlink is refused, and a planted FIFO returns instead of blocking us inside
     // somebody's constructor.
     // Safety: `c_path` is a live NUL-terminated path.
@@ -986,7 +985,7 @@ pub fn attach(path: &Path) -> Result<Session, SessionError> {
     let session = Session {
         base,
         len,
-        path: path.to_path_buf(),
+        path,
         hook: None,
     };
     if let Err(why) = session.header().validate(len, platform::PLATFORM_TAG) {
@@ -994,7 +993,7 @@ pub fn attach(path: &Path) -> Result<Session, SessionError> {
     }
     // So this process's readers can probe the write lock. A session made by an older process
     // always has the file; one that somehow does not gets it here.
-    sync::install(&naming::lock_path(path))?;
+    sync::install(&naming::lock_path(session.path()))?;
     Ok(session)
 }
 

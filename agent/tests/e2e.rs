@@ -180,6 +180,52 @@ fn an_exec_reattaches_by_the_inherited_path() {
 }
 
 #[test]
+fn a_relative_session_directory_still_reaches_a_child_after_a_change_of_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("sessions")).unwrap();
+    let probe = harness::program("probe");
+    let report = Run::prog("execer")
+        .arg(probe.to_string_lossy())
+        .arg("/")
+        .current_dir(dir.path())
+        .env("LIBTIMEWARP_SESSION_DIR", "sessions")
+        .env("LIBTIMEWARP_SHIFT", "-2h")
+        .run();
+
+    report.assert_wall_clock("before", -2 * HOUR);
+    report.assert_wall_clock("after", -2 * HOUR);
+    let shared = Path::new(report.get("before.shared"));
+    assert!(shared.is_absolute(), "{}", shared.display());
+    assert!(shared.starts_with(dir.path().join("sessions/libtimewarp")));
+    assert_eq!(report.get("after.shared"), report.get("before.shared"));
+}
+
+#[test]
+fn a_relative_inherited_path_still_reaches_a_child_after_a_change_of_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    let first = Run::prog("probe")
+        .session_dir(dir.path())
+        .env("LIBTIMEWARP_SHIFT", "-2h")
+        .run();
+    let created = Path::new(first.get("probe.shared"));
+
+    let probe = harness::program("probe");
+    let report = Run::prog("execer")
+        .arg(probe.to_string_lossy())
+        .arg("/")
+        .current_dir(created.parent().unwrap())
+        .env(
+            "LIBTIMEWARP__SHARED_FILE",
+            created.file_name().unwrap().to_string_lossy(),
+        )
+        .run();
+
+    report.assert_wall_clock("before", -2 * HOUR);
+    report.assert_wall_clock("after", -2 * HOUR);
+    assert_eq!(Path::new(report.get("after.shared")), created);
+}
+
+#[test]
 fn the_inherited_path_wins_over_the_rest_of_the_environment() {
     let dir = tempfile::tempdir().unwrap();
     let first = Run::prog("probe")

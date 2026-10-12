@@ -1,5 +1,6 @@
 //! Where a session file lives and what it is called.
 
+use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::config::{ENV_SESSION_DIR, ENV_XDG_RUNTIME_DIR, EnvLookup};
@@ -25,12 +26,26 @@ pub fn session_dir(env: &impl EnvLookup, euid: u32, tmp: &Path) -> PathBuf {
     tmp.join(format!("libtimewarp-{euid}"))
 }
 
-/// The directory this process would use, given what `env` says.
-#[must_use]
-pub fn session_dir_from_env(env: &impl EnvLookup) -> PathBuf {
+/// The directory this process would use, given what `env` says, made [`absolute`].
+///
+/// # Errors
+/// [`io::Error`] when the directory is relative and the working directory cannot be learned.
+pub fn session_dir_from_env(env: &impl EnvLookup) -> io::Result<PathBuf> {
     // Safety: `geteuid` reads process state and cannot fail.
     let euid = unsafe { libc::geteuid() };
-    session_dir(env, euid, &std::env::temp_dir())
+    absolute(&session_dir(env, euid, &std::env::temp_dir()))
+}
+
+/// `path` against the working directory, so it names the same file after the process changes
+/// directory.
+///
+/// Lexical only: symlinks and `..` stay for the kernel to resolve at each use, so the security
+/// checks still see them, and `.` components and repeated slashes go.
+///
+/// # Errors
+/// [`io::Error`] when `path` is empty, or relative while the working directory cannot be learned.
+pub fn absolute(path: &Path) -> io::Result<PathBuf> {
+    std::path::absolute(path)
 }
 
 /// The session's name: `pid-<pid>-<uuid>`, which the user does not get to pick. The pid alone
@@ -139,6 +154,31 @@ mod tests {
             Path::new("/tmp"),
         );
         assert_eq!(dir, Path::new("/tmp/libtimewarp-5"));
+    }
+
+    #[test]
+    fn a_relative_directory_is_taken_against_the_working_directory() {
+        let dir = session_dir_from_env(&env(&[(ENV_SESSION_DIR, "sessions")])).unwrap();
+        let cwd = std::env::current_dir().unwrap();
+        assert_eq!(dir, cwd.join("sessions/libtimewarp"));
+    }
+
+    #[test]
+    fn a_path_is_made_absolute_without_resolving_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink("/", &link).unwrap();
+        assert_eq!(
+            absolute(&link.join(".//x/../y.session")).unwrap(),
+            link.join("x/../y.session")
+        );
+
+        let cwd = std::env::current_dir().unwrap();
+        assert_eq!(
+            absolute(Path::new("./y.session")).unwrap(),
+            cwd.join("y.session")
+        );
+        assert!(absolute(Path::new("")).is_err());
     }
 
     #[test]

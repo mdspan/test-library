@@ -130,7 +130,14 @@ fn attach_or_create() {
         // The inherited path always wins, whatever else the environment says: a session built from
         // this environment instead would fake something nobody asked for.
         match session::attach(Path::new(&inherited)) {
-            Ok(session) => join(session),
+            Ok(session) => {
+                // The children get the session's absolute path, which a relative inherited one
+                // would stop matching once a process changes directory.
+                if session.path() != Path::new(&inherited) {
+                    name_for_children(session.path());
+                }
+                join(session);
+            }
             // The session the parent named is gone or unusable, so there is none to record the
             // failure in either.
             Err(reason) => report_failure(&settings, &reason),
@@ -138,7 +145,12 @@ fn attach_or_create() {
         return;
     }
 
-    let dir = naming::session_dir_from_env(&settings);
+    let dir = match naming::session_dir_from_env(&settings) {
+        Ok(dir) => dir,
+        // A relative directory with no working directory to take it against is as unusable as a
+        // directory that cannot be made.
+        Err(err) => return report_failure(&settings, &SessionError::Io(err)),
+    };
     let created = Setup::from_env(&settings, dir.clone())
         .map_err(SessionError::from)
         .and_then(|setup| session::create(&setup));
@@ -153,10 +165,16 @@ fn attach_or_create() {
 /// Installs the session and names it for whatever this process execs, so its children attach to it
 /// rather than making one of their own.
 fn publish(session: session::Session) {
+    name_for_children(session.path());
+    install(session);
+}
+
+/// Names `path`, which [`session::Session::path`] keeps absolute, as the session whatever this
+/// process execs attaches to.
+fn name_for_children(path: &Path) {
     // Safety: a constructor runs before `main`, so nothing in the program is reading `environ` yet
     // to race this write.
-    unsafe { std::env::set_var(ENV_SHARED_FILE, session.path()) };
-    install(session);
+    unsafe { std::env::set_var(ENV_SHARED_FILE, path) };
 }
 
 /// Hands the session to the process for good: the mapped header, the hook in front of its keeper,

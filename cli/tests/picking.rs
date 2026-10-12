@@ -130,6 +130,22 @@ fn the_temp_directory_is_the_one_the_environment_names() {
 }
 
 #[test]
+fn a_relative_session_directory_is_listed_against_the_working_directory() {
+    let dir = tempfile::tempdir().expect("a temporary directory");
+
+    let listed = Tool::new()
+        .env("LIBTIMEWARP_SESSION_DIR", "sessions")
+        .within(dir.path())
+        .run(&["list"])
+        .ok();
+    let physical = fs::canonicalize(dir.path()).expect("the directory exists");
+    assert_eq!(
+        listed.get("directory"),
+        physical.join("sessions/libtimewarp").to_string_lossy()
+    );
+}
+
+#[test]
 fn dir_replaces_the_computed_directory() {
     let _one = one_at_a_time();
     let session = Fixture::on(Keeper::Affine);

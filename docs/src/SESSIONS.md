@@ -31,6 +31,12 @@ directories that applies:
 3. `$TMPDIR/libtimewarp-<uid>`, or `/tmp/libtimewarp-<uid>` when `TMPDIR`
    is unset.
 
+A relative directory is taken against the working directory of the program
+that creates the session. The library passes the session on to child programs
+by its absolute path, so a program that changes directory and then starts
+another one keeps both on the same session. Symbolic links in the path are
+kept as they are.
+
 Beside each session file is a small lock file with the same name, ending in
 `.lock`.
 

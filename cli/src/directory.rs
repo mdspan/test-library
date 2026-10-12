@@ -12,11 +12,12 @@ use crate::failure::Failure;
 
 /// The directory the library puts sessions in: the environment over the configuration file, or the
 /// environment alone when the file is refused.
-pub(crate) fn session_dir() -> PathBuf {
-    Settings::load(ProcessEnv).map_or_else(
+pub(crate) fn session_dir() -> Result<PathBuf, Failure> {
+    let dir = Settings::load(ProcessEnv).map_or_else(
         |_| session_dir_from_env(&ProcessEnv),
         |settings| session_dir_from_env(&settings),
-    )
+    );
+    dir.map_err(|err| Failure::Refused(err.into()))
 }
 
 /// `path` without `.` components or repeated and trailing slashes.

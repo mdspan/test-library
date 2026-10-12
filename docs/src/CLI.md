@@ -187,4 +187,5 @@ run it with the same `LIBTIMEWARP_SESSION_DIR`, `XDG_RUNTIME_DIR`, and
 `TMPDIR` as the faked programs, or pass `--dir`. It reads
 `LIBTIMEWARP_SESSION_DIR` from the
 [configuration file](CONFIGURATION.md#the-configuration-file) too, when
-the environment leaves it unset.
+the environment leaves it unset. A relative directory is taken against the
+directory the tool runs in, and `list` prints it as an absolute path.

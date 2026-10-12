@@ -233,6 +233,7 @@ to load there for instance, exits too.
 ## Variables the Library Sets
 
 `LIBTIMEWARP__SHARED_FILE`, with two underscores, is how the programs of a
-session find it. The library sets it; you never need to. Unset it to start
+session find it. The library sets it to the absolute path of the session
+file; you never need to. Unset it to start
 a fresh session from inside a faked shell; see
 [Sessions](SESSIONS.md#one-clock-per-process-tree).
