@@ -2,9 +2,9 @@
 //! back what the target printed.
 
 use std::collections::BTreeMap;
-use std::io::Read;
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::{Child, ChildStdout, Command, Output, Stdio};
 use std::sync::{Mutex, OnceLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -735,4 +735,86 @@ pub(crate) fn assert_on_time(report: &Report, key: &str, expected: i64) {
         low / 1_000_000,
         high / 1_000_000,
     );
+}
+
+/// One call of `holds` under the library, started in a session directory of its own and read as
+/// far as the line that says the call is about to block. Dropping it kills the program.
+pub(crate) struct Held {
+    /// The call, for a failure to name.
+    call: String,
+    child: Child,
+    output: BufReader<ChildStdout>,
+    /// What the program reported before the call.
+    pub(crate) facts: BTreeMap<String, String>,
+    /// Where its session lives, for a case to attach to.
+    pub(crate) dir: tempfile::TempDir,
+}
+
+/// Starts `holds` on `call`, asking for `millis` of faketime under `env`, and waits until the call
+/// is about to block.
+pub(crate) fn hold(call: &str, millis: i64, env: &[(&str, &str)]) -> Held {
+    let dir = tempfile::tempdir().unwrap();
+    let mut command = Command::new(program("holds"));
+    command
+        .arg(call)
+        .arg(millis.to_string())
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env(PRELOAD, library())
+        .env("LIBTIMEWARP_SESSION_DIR", dir.path())
+        .stdout(Stdio::piped());
+    for (name, value) in env {
+        command.env(name, value);
+    }
+    let mut child = command.spawn().unwrap();
+    let mut output = BufReader::new(child.stdout.take().unwrap());
+    let mut facts = BTreeMap::new();
+    let mut line = String::new();
+    while !line.starts_with("waiting=") {
+        line.clear();
+        assert!(
+            output.read_line(&mut line).unwrap() > 0,
+            "holds left before {call} was made: {facts:?}"
+        );
+        if let Some((key, value)) = line.trim().split_once('=') {
+            facts.insert(key.to_owned(), value.to_owned());
+        }
+    }
+    Held {
+        call: call.to_owned(),
+        child,
+        output,
+        facts,
+        dir,
+    }
+}
+
+impl Held {
+    /// Asserts the call has not returned, and says what it answered if it has.
+    #[track_caller]
+    pub(crate) fn assert_holding(&mut self, when: &str) {
+        if let Some(status) = self.child.try_wait().unwrap() {
+            let mut rest = String::new();
+            drop(self.output.read_to_string(&mut rest));
+            panic!(
+                "{} returned {when}, and the program left with {status}:\n{rest}",
+                self.call
+            );
+        }
+    }
+
+    /// One number the program reported before the call.
+    pub(crate) fn fact(&self, key: &str) -> i64 {
+        let value = self.facts.get(key);
+        value
+            .and_then(|value| value.parse().ok())
+            .unwrap_or_else(|| panic!("{} reported no number `{key}`: {:?}", self.call, self.facts))
+    }
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        drop(self.child.kill());
+        drop(self.child.wait());
+    }
 }

@@ -25,6 +25,11 @@
 //! longest duration there is, and a query must not turn a disarmed timer into an armed one. Nor
 //! may a field with something in it come to nothing: an arm converts to at least a nanosecond, and
 //! a `timeval` field rounds up to the microsecond, in both directions.
+//!
+//! Nor may a field carry more than the kernel takes. macOS refuses an interval timer field past
+//! 10^8 seconds and FreeBSD one past `INT32_MAX / 2`, both far short of the longest duration a
+//! frozen family converts to, so a field converted past the limit is armed as the limit, by the
+//! rule [`wait::Longest`] gives.
 
 // Which clock a POSIX timer or a timerfd was created on, which is a question only where there
 // are such timers to create.
@@ -42,7 +47,7 @@ use common::time::Nanos;
 use crate::clocks;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use crate::wait::duration_of;
-use crate::wait::{self, MICROS_PER_SECOND, NANOS_PER_MICRO, unsupported};
+use crate::wait::{self, Longest, MICROS_PER_SECOND, NANOS_PER_MICRO, takes, unsupported, within};
 use crate::{genuine, state};
 
 /// The clock of the family an interval timer follows, or `None` for a `which` the genuine call
@@ -138,11 +143,24 @@ fn remaining(func: Func, clock: libc::clockid_t, genuine: Nanos) -> Option<Nanos
     })
 }
 
+/// The most seconds the kernel takes in either field of an interval timer: XNU passes both
+/// through `itimerfix`, which refuses more than 10^8, and FreeBSD's `kern_setitimer` refuses more
+/// than `INT32_MAX / 2`.
+const ITIMER_LONGEST: Longest = if cfg!(target_os = "macos") {
+    Some(100_000_000)
+} else if cfg!(target_os = "freebsd") {
+    Some(i32::MAX as libc::time_t / 2)
+} else {
+    None
+};
+
 /// The duration a `timeval` field names, or `None` when the pair is one the genuine call would
 /// refuse.
 fn interval_of(tv: &libc::timeval) -> Option<Nanos> {
-    (tv.tv_sec >= 0 && (0..MICROS_PER_SECOND).contains(&tv.tv_usec))
-        .then(|| Nanos::from_timeval(tv))
+    (tv.tv_sec >= 0
+        && (0..MICROS_PER_SECOND).contains(&tv.tv_usec)
+        && takes(ITIMER_LONGEST, tv.tv_sec))
+    .then(|| Nanos::from_timeval(tv))
 }
 
 /// The genuine `itimerval` a fake one becomes, or `None` when the arm passes through as the program
@@ -166,8 +184,8 @@ unsafe fn armed_itimerval(
     // An interval timer's expiry is always relative: `setitimer` has no absolute form.
     let (expiry, interval) = armed(func, clock, expiry, interval, false)?;
     Some(libc::itimerval {
-        it_interval: timeval_of(interval),
-        it_value: timeval_of(expiry),
+        it_interval: timeval_of(within(ITIMER_LONGEST, interval)),
+        it_value: timeval_of(within(ITIMER_LONGEST, expiry)),
     })
 }
 
@@ -706,5 +724,18 @@ mod tests {
             through_timeval(Nanos(slow.scale(3 * NANOS_PER_MICRO))),
             Nanos(NANOS_PER_MICRO)
         );
+    }
+
+    #[test]
+    fn a_frozen_field_arms_for_the_longest_the_kernel_takes() {
+        // XNU's limit and FreeBSD's, each taken with nothing past the whole seconds.
+        for most in [100_000_000, libc::time_t::from(i32::MAX) / 2] {
+            let field = timeval_of(within(Some(most), still_set(Nanos(i64::MAX))));
+            assert_eq!((field.tv_sec, field.tv_usec), (most, 0));
+            assert!(takes(Some(most), field.tv_sec));
+        }
+        // Where the kernel takes any field, the longest duration there is goes in as it is.
+        let field = timeval_of(within(None, Nanos(i64::MAX)));
+        assert_eq!(field.tv_sec, i64::MAX / Nanos::SECOND);
     }
 }

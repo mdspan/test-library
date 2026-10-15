@@ -371,6 +371,9 @@ fn arming(
         if let Some(value) = line.strip_prefix("disarmed=") {
             disarmed = value.trim().parse().unwrap();
         }
+        if let Some(errno) = line.strip_prefix("refused=") {
+            panic!("the target's arm was refused with errno {}", errno.trim());
+        }
     }
     (child, printing, disarmed)
 }
@@ -456,6 +459,53 @@ fn a_frozen_clock_holds_a_timer_and_thawing_does_not_release_it() {
     // Killing the process is the only exit, which is what the design says to expect.
     child.kill().unwrap();
     drop(child.wait());
+}
+
+/// The interval timers `holds` arms: the wall-clock one under both of its names, and on macOS and
+/// FreeBSD one of the two that count consumption. The kernels there refuse a field past a limit of
+/// their own, far short of the longest duration a frozen family converts to. Linux takes any field,
+/// and reads back a consumption timer armed for that longest duration as having nothing left.
+#[cfg(target_os = "linux")]
+const HELD_TIMERS: &[&str] = &["setitimer", "alarm"];
+#[cfg(not(target_os = "linux"))]
+const HELD_TIMERS: &[&str] = &["setitimer", "alarm", "setitimer_virtual"];
+
+#[test]
+fn a_frozen_clock_arms_every_interval_timer_however_little_its_kernel_takes() {
+    let frozen = [("LIBTIMEWARP_RATE", "0"), ("LIBTIMEWARP_CPU_RATE", "0")];
+    let mut held: Vec<_> = HELD_TIMERS
+        .iter()
+        .map(|call| (call, harness::hold(call, 50, &frozen)))
+        .collect();
+    for (call, timer) in &held {
+        assert_eq!(
+            timer.fact("armed.rc"),
+            0,
+            "{call} was refused with errno {}",
+            timer.fact("armed.errno")
+        );
+        // A timer that was not armed has nothing left, and `alarm` hears nothing of one either.
+        assert!(timer.fact("armed.left") > 0, "{call} armed nothing");
+    }
+
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    for (_, timer) in &mut held {
+        timer.assert_holding("on a frozen clock");
+    }
+
+    // The longest a kernel takes is still years, so thawing reaches none of them.
+    for (_, timer) in &held {
+        let controller = attach_to_session(timer.dir.path());
+        let mut transaction = controller.begin().unwrap();
+        for family in [Family::Realtime, Family::Monotonic, Family::Boottime] {
+            transaction.set_rate(family, 1.0).unwrap();
+        }
+        transaction.commit().unwrap();
+    }
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    for (_, timer) in &mut held {
+        timer.assert_holding("after the thaw");
+    }
 }
 
 #[cfg(not(target_os = "macos"))]

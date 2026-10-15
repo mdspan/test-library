@@ -81,14 +81,17 @@ queried, runs on real time. Where `/proc` cannot be read, a timerfd under a
 number some other timerfd was created under follows that one's clock.
 
 **Freezing is one way.** A sleep that starts or is running under rate 0
-gets the longest wait there is, about 292 years, and setting the rate back
-leaves it asleep. A thread sleeping when you freeze stays asleep until the
-program is killed, and so does every thread that sleeps while the clock is
-frozen. A zero-length sleep or timeout still returns at once, as does a wait
-for a deadline the frozen clock has already reached, and a timer armed for
-such a deadline fires at once. Plan on restarting a frozen program,
-or freeze the wall clock alone with `LIBTIMEWARP_REALTIME_RATE=0`, which
-leaves the waits that follow the monotonic clocks running.
+gets the longest wait there is, about 292 years, or the longest the system
+lets that call wait where that is shorter: about 24 days for `poll`, and
+about three years for `select` and the interval timers on macOS. Setting
+the rate back leaves it asleep. A thread sleeping when you freeze stays
+asleep until the program is killed, and so does every thread that sleeps
+while the clock is frozen. A zero-length sleep or timeout still returns at
+once, as does a wait for a deadline the frozen clock has already reached,
+and a timer armed for such a deadline fires at once. Plan on restarting a
+frozen program, or freeze the wall clock alone with
+`LIBTIMEWARP_REALTIME_RATE=0`, which leaves the waits that follow the
+monotonic clocks running.
 
 ## File Timestamps
 

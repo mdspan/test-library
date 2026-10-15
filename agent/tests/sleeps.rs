@@ -416,6 +416,67 @@ fn a_frozen_clock_holds_a_sleeper_and_thawing_does_not_release_it() {
     drop(child.wait());
 }
 
+/// The waits `holds` makes here: the relative timeouts, and on macOS each spelling of `select`
+/// and `pselect` that has a row. macOS refuses a `select`, `pselect`, `kevent` or `kevent64`
+/// timeout past a limit of its own, far short of the longest duration a frozen family converts to.
+#[cfg(target_os = "linux")]
+const HELD_WAITS: &[&str] = &["nanosleep", "poll", "select", "pselect"];
+#[cfg(target_os = "freebsd")]
+const HELD_WAITS: &[&str] = &["nanosleep", "poll", "select", "pselect", "kevent"];
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+const HELD_WAITS: &[&str] = &[
+    "nanosleep",
+    "poll",
+    "select",
+    "select_conforming",
+    "select_legacy",
+    "pselect",
+    "pselect_conforming",
+    "kevent",
+    "kevent64",
+];
+#[cfg(all(target_os = "macos", not(target_arch = "x86_64")))]
+const HELD_WAITS: &[&str] = &[
+    "nanosleep",
+    "poll",
+    "select",
+    "select_conforming",
+    "pselect",
+    "pselect_conforming",
+    "kevent",
+    "kevent64",
+];
+
+#[test]
+fn a_frozen_clock_holds_every_timeout_however_little_its_kernel_takes() {
+    let mut held: Vec<_> = HELD_WAITS
+        .iter()
+        .map(|call| harness::hold(call, 50, &[("LIBTIMEWARP_RATE", "0")]))
+        .collect();
+
+    // Fifty milliseconds of faketime is what each asked for, and this is many times that. A
+    // timeout the kernel refused would have returned at once.
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    for call in &mut held {
+        call.assert_holding("on a frozen clock");
+    }
+
+    // The longest a kernel takes is still years, so thawing reaches none of them, as it reaches no
+    // other wait.
+    for call in &held {
+        let controller = attach_to_session(call.dir.path());
+        let mut transaction = controller.begin().unwrap();
+        for family in [Family::Realtime, Family::Monotonic, Family::Boottime] {
+            transaction.set_rate(family, 1.0).unwrap();
+        }
+        transaction.commit().unwrap();
+    }
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    for call in &mut held {
+        call.assert_holding("after the thaw");
+    }
+}
+
 /// Every function of the sleeps and timeouts rows Linux and FreeBSD both have, the number the ABI
 /// gives it, and the clock of the family it follows.
 ///

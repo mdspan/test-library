@@ -28,6 +28,12 @@
 //! Every path here converts and then blocks in the genuine function. Nothing is written to shared
 //! memory, nothing is allocated, and nothing recurses into a symbol we took over.
 //!
+//! What the genuine function is handed stays within what its kernel takes. macOS refuses a
+//! `select` timeout past 10^8 seconds and a `pselect` or `kevent` timeout past `INT32_MAX`, far
+//! short of the longest duration a frozen family converts to, so a conversion past either goes in
+//! as the limit; [`Longest`] has the rule. Every other wait here takes any duration, or cuts one
+//! down itself.
+//!
 //! A timer converts by the same rules when it is armed, so [`crate::timer`] reaches these
 //! conversions through [`genuine_duration`] and [`deadline`] rather than building its own.
 
@@ -56,6 +62,49 @@ pub(crate) const NANOS_PER_MICRO: i64 = 1_000;
 /// The first microsecond a `timeval`'s fraction may not name, in the width the field has.
 pub(crate) const MICROS_PER_SECOND: libc::suseconds_t = 1_000_000;
 
+/// The most whole seconds the kernel takes in one call's relative timeout, or in one field of a
+/// timer, before it refuses the call with `EINVAL`, or `None` for a call that takes any duration
+/// there is.
+///
+/// A frozen family converts a wait or an arm to the longest duration there is, and a slow rate or a
+/// hook can carry one past a kernel's limit as well. Such a conversion goes in as the limit, the
+/// longest the call can name, so the call blocks or arms rather than failing. A timeout the program
+/// itself wrote past the limit passes through as written, for the kernel to refuse as it would
+/// without us.
+pub(crate) type Longest = Option<libc::time_t>;
+
+/// `select`'s: XNU passes the timeout through `itimerfix`, which refuses more than 10^8 seconds.
+const SELECT_LONGEST: Longest = if cfg!(target_os = "macos") {
+    Some(100_000_000)
+} else {
+    None
+};
+
+/// `pselect`'s, `kevent`'s and `kevent64`'s: XNU passes the timeout through `timespec_is_valid`,
+/// which refuses more than `INT32_MAX` seconds.
+const TIMESPEC_LONGEST: Longest = if cfg!(target_os = "macos") {
+    Some(i32::MAX as libc::time_t)
+} else {
+    None
+};
+
+/// Whether the kernel takes `secs` whole seconds as a timeout or timer field under `longest`.
+pub(crate) const fn takes(longest: Longest, secs: libc::time_t) -> bool {
+    match longest {
+        Some(most) => secs <= most,
+        None => true,
+    }
+}
+
+/// A converted duration as the kernel takes it under `longest`: itself, or the limit where it
+/// carries more seconds than that.
+pub(crate) const fn within(longest: Longest, genuine: Nanos) -> Nanos {
+    match longest {
+        Some(most) if genuine.seconds() > most => Nanos(most.saturating_mul(Nanos::SECOND)),
+        _ => genuine,
+    }
+}
+
 /// One wait's conversion: the fake duration the program asked for, and the genuine duration it
 /// blocks in.
 #[derive(Debug, Clone, Copy)]
@@ -80,6 +129,15 @@ impl Wait {
         let left = i128::from(genuine_left.0.max(0)) * i128::from(self.asked.0)
             / i128::from(self.genuine.0);
         Nanos(i64::try_from(left).unwrap_or(i64::MAX))
+    }
+
+    /// The same conversion with the genuine side as the kernel takes it under `longest`, so a
+    /// remainder is reported in the proportion of what the call actually blocked in.
+    const fn within(self, longest: Longest) -> Self {
+        Self {
+            asked: self.asked,
+            genuine: within(longest, self.genuine),
+        }
     }
 }
 
@@ -172,7 +230,8 @@ pub(crate) fn duration_of(ts: &libc::timespec) -> Option<Nanos> {
 
 /// The genuine timeout a relative `timespec` timeout becomes, or `None` when the call passes
 /// through as the program wrote it: no timeout at all, a pair the genuine function would refuse,
-/// or a wait nothing fakes.
+/// or a wait nothing fakes. `longest` is the call's own limit, which the genuine timeout is kept
+/// within.
 ///
 /// # Safety
 /// `timeout` must be null or valid for reads of a `timespec`.
@@ -181,13 +240,15 @@ unsafe fn relative_timeout(
     func: Func,
     clock: libc::clockid_t,
     timeout: *const libc::timespec,
+    longest: Longest,
 ) -> Option<libc::timespec> {
     if timeout.is_null() {
         return None;
     }
     // Safety: `timeout` is non-null, so the caller's guarantee makes it valid for this read.
-    let fake = duration_of(unsafe { &*timeout })?;
-    Some(converted(func, clock, fake)?.genuine.to_timespec())
+    let asked = unsafe { &*timeout };
+    let fake = duration_of(asked).filter(|_| takes(longest, asked.tv_sec))?;
+    Some(within(longest, converted(func, clock, fake)?.genuine).to_timespec())
 }
 
 /// The genuine deadline an absolute `timespec` deadline becomes, under the same rules.
@@ -540,7 +601,7 @@ pub(crate) unsafe fn ppoll(
     sigmask: *const libc::sigset_t,
 ) -> libc::c_int {
     // Safety: `timeout` is the caller's, read only where it is non-null.
-    let converted = unsafe { relative_timeout(Func::Ppoll, monotonic_timebase(), timeout) };
+    let converted = unsafe { relative_timeout(Func::Ppoll, monotonic_timebase(), timeout, None) };
     let timeout = converted.as_ref().map_or(timeout, ptr::from_ref);
     // Safety: every other argument is the caller's, passed on unchanged.
     unsafe { genuine::ppoll(fds, nfds, timeout, sigmask) }.unwrap_or_else(unsupported)
@@ -585,9 +646,12 @@ pub(crate) unsafe fn select(
     } else {
         // Safety: `timeout` is non-null, so the caller's guarantee makes it valid for this read.
         let tv = unsafe { &*timeout };
-        (tv.tv_sec >= 0 && (0..MICROS_PER_SECOND).contains(&tv.tv_usec))
-            .then(|| Nanos::from_timeval(tv))
-            .and_then(|fake| converted(Func::Select, monotonic_timebase(), fake))
+        (tv.tv_sec >= 0
+            && (0..MICROS_PER_SECOND).contains(&tv.tv_usec)
+            && takes(SELECT_LONGEST, tv.tv_sec))
+        .then(|| Nanos::from_timeval(tv))
+        .and_then(|fake| converted(Func::Select, monotonic_timebase(), fake))
+        .map(|wait| wait.within(SELECT_LONGEST))
     };
     let Some(wait) = asked else {
         // Safety: every argument is the caller's, passed on unchanged.
@@ -622,7 +686,14 @@ pub(crate) unsafe fn pselect(
     sigmask: *const libc::sigset_t,
 ) -> libc::c_int {
     // Safety: `timeout` is the caller's, read only where it is non-null.
-    let converted = unsafe { relative_timeout(Func::Pselect, monotonic_timebase(), timeout) };
+    let converted = unsafe {
+        relative_timeout(
+            Func::Pselect,
+            monotonic_timebase(),
+            timeout,
+            TIMESPEC_LONGEST,
+        )
+    };
     let timeout = converted.as_ref().map_or(timeout, ptr::from_ref);
     // Safety: every other argument is the caller's, passed on unchanged.
     unsafe { spelling(nfds, readfds, writefds, exceptfds, timeout, sigmask) }
@@ -677,7 +748,8 @@ pub(crate) unsafe fn epoll_pwait2(
     sigmask: *const libc::sigset_t,
 ) -> libc::c_int {
     // Safety: `timeout` is the caller's, read only where it is non-null.
-    let converted = unsafe { relative_timeout(Func::EpollPwait2, monotonic_timebase(), timeout) };
+    let converted =
+        unsafe { relative_timeout(Func::EpollPwait2, monotonic_timebase(), timeout, None) };
     let timeout = converted.as_ref().map_or(timeout, ptr::from_ref);
     // Safety: every other argument is the caller's, passed on unchanged.
     unsafe { genuine::epoll_pwait2(epfd, events, maxevents, timeout, sigmask) }
@@ -701,7 +773,14 @@ pub(crate) unsafe fn kevent(
     timeout: *const libc::timespec,
 ) -> libc::c_int {
     // Safety: `timeout` is the caller's, read only where it is non-null.
-    let converted = unsafe { relative_timeout(Func::Kevent, monotonic_timebase(), timeout) };
+    let converted = unsafe {
+        relative_timeout(
+            Func::Kevent,
+            monotonic_timebase(),
+            timeout,
+            TIMESPEC_LONGEST,
+        )
+    };
     let timeout = converted.as_ref().map_or(timeout, ptr::from_ref);
     // Safety: every other argument is the caller's, passed on unchanged.
     unsafe { genuine::kevent(kq, changelist, nchanges, eventlist, nevents, timeout) }
@@ -726,7 +805,14 @@ pub(crate) unsafe fn kevent64(
     timeout: *const libc::timespec,
 ) -> libc::c_int {
     // Safety: `timeout` is the caller's, read only where it is non-null.
-    let converted = unsafe { relative_timeout(Func::Kevent64, monotonic_timebase(), timeout) };
+    let converted = unsafe {
+        relative_timeout(
+            Func::Kevent64,
+            monotonic_timebase(),
+            timeout,
+            TIMESPEC_LONGEST,
+        )
+    };
     let timeout = converted.as_ref().map_or(timeout, ptr::from_ref);
     // Safety: every other argument is the caller's, passed on unchanged.
     unsafe { genuine::kevent64(kq, changelist, nchanges, eventlist, nevents, flags, timeout) }
@@ -1100,7 +1186,8 @@ pub(crate) unsafe fn sigtimedwait(
     timeout: *const libc::timespec,
 ) -> libc::c_int {
     // Safety: `timeout` is the caller's, read only where it is non-null.
-    let converted = unsafe { relative_timeout(Func::Sigtimedwait, monotonic_timebase(), timeout) };
+    let converted =
+        unsafe { relative_timeout(Func::Sigtimedwait, monotonic_timebase(), timeout, None) };
     let timeout = converted.as_ref().map_or(timeout, ptr::from_ref);
     // Safety: the set and the slot for the signal are the caller's, passed on unchanged.
     unsafe { genuine::sigtimedwait(set, info, timeout) }.unwrap_or_else(unsupported)
@@ -1116,7 +1203,8 @@ pub(crate) unsafe fn aio_suspend(
     timeout: *const libc::timespec,
 ) -> libc::c_int {
     // Safety: `timeout` is the caller's, read only where it is non-null.
-    let converted = unsafe { relative_timeout(Func::AioSuspend, monotonic_timebase(), timeout) };
+    let converted =
+        unsafe { relative_timeout(Func::AioSuspend, monotonic_timebase(), timeout, None) };
     let timeout = converted.as_ref().map_or(timeout, ptr::from_ref);
     // Safety: the list is the caller's, passed on unchanged.
     unsafe { genuine::aio_suspend(list, nent, timeout) }.unwrap_or_else(unsupported)
@@ -1302,6 +1390,63 @@ mod tests {
         // A frozen family arrives with the longest duration there is and leaves with the longest
         // such a timeout can name.
         assert_eq!(to_millis(Nanos(i64::MAX)), libc::c_int::MAX);
+    }
+
+    /// The limits the kernels set: XNU's `itimerfix`, XNU's `timespec_is_valid`, and FreeBSD's
+    /// `kern_setitimer`.
+    const LIMITS: [Longest; 3] = [
+        Some(100_000_000),
+        Some(i32::MAX as libc::time_t),
+        Some(i32::MAX as libc::time_t / 2),
+    ];
+
+    #[test]
+    fn a_conversion_past_the_kernels_limit_goes_in_as_the_limit() {
+        for longest in LIMITS {
+            let most = longest.unwrap();
+            let limit = Nanos(most * Nanos::SECOND);
+            // A frozen family's longest duration, and anything else whose seconds are past it.
+            assert_eq!(within(longest, Nanos(i64::MAX)), limit);
+            assert_eq!(within(longest, Nanos((most + 1) * Nanos::SECOND)), limit);
+            // The limit's own seconds are taken with any fraction, so a duration there stands.
+            let last = Nanos(limit.0 + Nanos::SECOND - 1);
+            assert_eq!(within(longest, last), last);
+            for short in [Nanos::ZERO, Nanos(1), Nanos(Nanos::SECOND), limit] {
+                assert_eq!(within(longest, short), short);
+            }
+        }
+        // A call that takes any duration is handed the conversion as it is.
+        assert_eq!(within(None, Nanos(i64::MAX)), Nanos(i64::MAX));
+    }
+
+    #[test]
+    fn a_timeout_the_program_wrote_past_the_limit_is_left_for_the_kernel_to_refuse() {
+        for longest in LIMITS {
+            let most = longest.unwrap();
+            assert!(takes(longest, 0));
+            assert!(takes(longest, most));
+            assert!(!takes(longest, most + 1));
+            assert!(!takes(longest, libc::time_t::MAX));
+        }
+        assert!(takes(None, libc::time_t::MAX));
+    }
+
+    #[test]
+    fn a_frozen_wait_cut_to_the_limit_reports_back_what_was_asked() {
+        // Frozen: a second asked for is the longest duration there is, which goes in as the limit.
+        let longest = Some(100_000_000);
+        let wait = converting(Nanos::SECOND, i64::MAX).within(longest);
+        assert_eq!(wait.genuine, Nanos(100_000_000 * Nanos::SECOND));
+        // A kernel that leaves the timeout as it found it leaves the limit there, which is all of
+        // what the program asked for, and half of it is half.
+        assert_eq!(wait.remaining(wait.genuine), Nanos(Nanos::SECOND));
+        assert_eq!(
+            wait.remaining(Nanos(wait.genuine.0 / 2)),
+            Nanos(Nanos::SECOND / 2)
+        );
+        // Within the limit the conversion stands.
+        let short = converting(Nanos::SECOND, Nanos::SECOND / 10).within(longest);
+        assert_eq!(short.genuine, Nanos(Nanos::SECOND / 10));
     }
 
     #[test]

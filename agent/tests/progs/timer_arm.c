@@ -15,7 +15,8 @@
    timer for an absolute expiry one nanosecond after its clock's epoch instead, a deadline already
    gone, which macOS, with no absolute form, refuses. `disarmed=` goes out first, carrying what a
    timer disarmed on this session reports it has left, and `armed=1` after the conversion, so a
-   case knows exactly when to make its change. */
+   case knows exactly when to make its change. An arm the call refuses ends the program with
+   `refused=` and the errno instead. */
 #define _GNU_SOURCE
 #include <errno.h>
 #include <signal.h>
@@ -64,11 +65,11 @@ static int make_timer(void) {
     return timer >= 0 ? 0 : -1;
 }
 
-static void arm(long long ns) {
+static int arm(long long ns) {
     struct itimerspec value;
     memset(&value, 0, sizeof value);
     value.it_value = spec_of(ns);
-    timerfd_settime(timer, 0, &value, NULL);
+    return timerfd_settime(timer, 0, &value, NULL);
 }
 
 static int arm_at(long long ns) {
@@ -108,11 +109,11 @@ static struct timeval val_of(long long ns) {
     return tv;
 }
 
-static void arm(long long ns) {
+static int arm(long long ns) {
     struct itimerval value;
     memset(&value, 0, sizeof value);
     value.it_value = val_of(ns);
-    setitimer(ITIMER_REAL, &value, NULL);
+    return setitimer(ITIMER_REAL, &value, NULL);
 }
 
 static int arm_at(long long ns) {
@@ -155,11 +156,11 @@ static int make_timer(void) {
     return timer_create(CLOCK_MONOTONIC, &event, &timer);
 }
 
-static void arm(long long ns) {
+static int arm(long long ns) {
     struct itimerspec value;
     memset(&value, 0, sizeof value);
     value.it_value = spec_of(ns);
-    timer_settime(timer, 0, &value, NULL);
+    return timer_settime(timer, 0, &value, NULL);
 }
 
 static int arm_at(long long ns) {
@@ -186,6 +187,13 @@ static int await(void) {
 }
 #endif
 
+/* Says why an arm failed, for a case to report, and gives the exit status that says so. */
+static int refused(void) {
+    printf("refused=%d\n", errno);
+    fflush(stdout);
+    return 6;
+}
+
 int main(int argc, char **argv) {
     long long fake, started;
 
@@ -200,8 +208,9 @@ int main(int argc, char **argv) {
 
     /* Armed and then disarmed: a timer with nothing left reports nothing left, whatever the rate,
        so a freeze cannot turn a disarm into the longest duration there is. */
-    arm(fake);
-    arm(0);
+    if (arm(fake) != 0 || arm(0) != 0) {
+        return refused();
+    }
     printf("disarmed=%lld\n", left());
 
     printf("fake=%lld\n", fake);
@@ -209,8 +218,8 @@ int main(int argc, char **argv) {
         if (arm_at(1) != 0) {
             return 5;
         }
-    } else {
-        arm(fake);
+    } else if (arm(fake) != 0) {
+        return refused();
     }
     printf("armed=1\n");
     fflush(stdout);
