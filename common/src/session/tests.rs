@@ -14,31 +14,6 @@ fn setup_in(dir: &Path) -> Setup {
     Setup::plain(dir.join("libtimewarp"))
 }
 
-/// [`super::create`], taking turns with the sync cases: it names this process's probe file, which
-/// they read back.
-fn create(setup: &Setup) -> Result<Session, SessionError> {
-    let _turn = sync::one_at_a_time();
-    super::create(setup)
-}
-
-/// [`super::create_faulted`], taking turns the way [`create`] does.
-fn create_faulted(setup: &Setup, fault: Fault) -> Result<Session, SessionError> {
-    let _turn = sync::one_at_a_time();
-    super::create_faulted(setup, fault)
-}
-
-/// [`super::create_named`], taking turns the way [`create`] does.
-fn create_named(setup: &Setup, name: &str, fault: Option<Fault>) -> Result<Session, SessionError> {
-    let _turn = sync::one_at_a_time();
-    super::create_named(setup, name, fault)
-}
-
-/// [`super::attach`], taking turns the way [`create`] does.
-fn attach(path: &Path) -> Result<Session, SessionError> {
-    let _turn = sync::one_at_a_time();
-    super::attach(path)
-}
-
 /// The clock a family tracks by default here. FreeBSD picks between two columns of the family
 /// table by the running kernel's version, so a case that names a family's clock asks for it rather
 /// than spelling it.

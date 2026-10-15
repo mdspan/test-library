@@ -16,7 +16,7 @@ use common::platform::{default_timebase, genuine_nanos};
 use common::session::layout::{Fault, FaultCode, Keeper};
 use common::time::{Family, Nanos};
 
-use fixture::{Fixture, one_at_a_time, run, timebase_name};
+use fixture::{Fixture, run, timebase_name};
 
 fn genuine(family: Family) -> i64 {
     genuine_nanos(default_timebase(family).expect("a family with a timebase"))
@@ -26,7 +26,6 @@ fn genuine(family: Family) -> i64 {
 
 #[test]
 fn info_reports_every_key_of_an_affine_session_in_order() {
-    let _one = one_at_a_time();
     let session = Fixture::on(Keeper::Affine);
 
     let info = session.run(&["info"]).ok();
@@ -85,7 +84,6 @@ fn info_reports_every_key_of_an_affine_session_in_order() {
 
 #[test]
 fn info_reports_the_fault_of_a_null_session() {
-    let _one = one_at_a_time();
     let session = Fixture::faulted(Keeper::Null, Fault::new(FaultCode::BadValue, 4242));
 
     let info = session.run(&["info"]).ok();
@@ -96,7 +94,6 @@ fn info_reports_the_fault_of_a_null_session() {
 
 #[test]
 fn a_null_session_reads_the_genuine_clock_and_refuses_a_rate() {
-    let _one = one_at_a_time();
     let session = Fixture::on(Keeper::Null);
 
     let info = session.run(&["info"]).ok();
@@ -119,7 +116,6 @@ fn a_null_session_reads_the_genuine_clock_and_refuses_a_rate() {
 
 #[test]
 fn get_answers_between_two_genuine_readings() {
-    let _one = one_at_a_time();
     let session = Fixture::on(Keeper::Affine);
 
     for (label, family) in [
@@ -151,7 +147,6 @@ fn get_answers_between_two_genuine_readings() {
 
 #[test]
 fn get_cpu_is_the_controllers_refusal() {
-    let _one = one_at_a_time();
     let session = Fixture::on(Keeper::Affine);
 
     let cpu = session
@@ -162,7 +157,6 @@ fn get_cpu_is_the_controllers_refusal() {
 
 #[test]
 fn an_unknown_family_names_the_four() {
-    let _one = one_at_a_time();
     let session = Fixture::on(Keeper::Affine);
 
     let run = session
@@ -173,7 +167,6 @@ fn an_unknown_family_names_the_four() {
 
 #[test]
 fn a_path_with_no_session_is_no_session() {
-    let _one = one_at_a_time();
     let session = Fixture::on(Keeper::Affine);
     let missing = session.path().with_file_name("nothing.session");
 
@@ -241,7 +234,6 @@ fn help_lists_the_commands_and_exits_zero() {
 
 #[test]
 fn a_closed_stdout_ends_the_run_quietly() {
-    let _one = one_at_a_time();
     let session = Fixture::on(Keeper::Affine);
     let (reader, writer) = std::io::pipe().expect("a pipe");
     drop(reader);

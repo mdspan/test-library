@@ -17,5 +17,3 @@ pub use write::{Anchor, WRITE_SETTLE_NS, begin};
 
 #[cfg(test)]
 mod tests;
-#[cfg(test)]
-pub(crate) use tests::one_at_a_time;

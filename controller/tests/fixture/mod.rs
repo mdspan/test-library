@@ -26,9 +26,9 @@ pub(crate) fn timebase_of(family: Family) -> libc::clockid_t {
     default_timebase(family).unwrap_or(clock::REALTIME)
 }
 
-/// Every case takes this, for two reasons. A fork while another thread of this process is inside a
-/// transaction would hand the child the in-process half of the write lock already held, and the
-/// child would wait on it forever. And the lock file a reader probes is named once per process.
+/// Every case takes this: a fork while another thread of this process is inside a transaction would
+/// hand the child the in-process half of the write lock already held, and the child would wait on
+/// it forever.
 static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
 
 pub(crate) fn one_at_a_time() -> MutexGuard<'static, ()> {

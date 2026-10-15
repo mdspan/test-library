@@ -47,10 +47,10 @@ mod verdict {
     pub(crate) const WRONG_VALUE: i32 = 6;
 }
 
-/// The lock file a reader probes is named once per process, so a case whose readers probed another
-/// case's lock file would wait on a writer that has nothing to do with them. Taken for the length
-/// of every case here, poison and all: a case that already failed should not turn the next one into
-/// a second failure.
+/// The cases here fork writers, and a writer forked while a thread of another case holds a write
+/// lock would start with the in-process half of the lock already held, so its own `begin` would
+/// never return. Taken for the length of every case here, poison and all: a case that already
+/// failed should not turn the next one into a second failure.
 static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
 
 fn one_at_a_time() -> MutexGuard<'static, ()> {
@@ -266,7 +266,7 @@ fn a_held_lock_answers_the_probe_the_same_way_wherever_it_is_asked() {
     let _one = one_at_a_time();
     let fixture = fixture().unwrap();
     let lock_path = fixture.lock_path();
-    assert_eq!(probe_held(), Some(false));
+    assert_eq!(probe_held(fixture.header()), Some(false));
 
     // The holder is a process of its own, so this really is the kernel's answer rather than ours.
     let doorbell = Doorbell::new();
@@ -280,11 +280,11 @@ fn a_held_lock_answers_the_probe_the_same_way_wherever_it_is_asked() {
     let answered = probe_of(&lock_path);
     assert_ne!(i64::from(answered.l_type), i64::from(libc::F_UNLCK));
     assert_eq!(answered.l_pid, -1, "the answer named a pid");
-    assert_eq!(probe_held(), Some(true));
+    assert_eq!(probe_held(fixture.header()), Some(true));
 
     // And death releases it, which is the whole reason a reader may ask.
     kill_and_reap(holder);
-    assert_eq!(probe_held(), Some(false));
+    assert_eq!(probe_held(fixture.header()), Some(false));
     assert_eq!(
         i64::from(probe_of(&lock_path).l_type),
         i64::from(libc::F_UNLCK)
@@ -412,4 +412,85 @@ fn a_writer_killed_with_its_shadow_whole_hands_everyone_the_value_it_meant_to_pu
     assert_eq!(header.seqlock.sequence.load(Ordering::Acquire) % 2, 0);
 
     all_whole(readers);
+}
+
+/// A writer that opens a section on `header` and stops inside it until it is killed, holding the
+/// write lock the whole time. Returns once the section is open.
+fn stalled_writer(header: &Header, lock_path: &Path) -> libc::pid_t {
+    let doorbell = Doorbell::new();
+    let writer = fork_child(|| {
+        let Ok(lock) = begin(header, lock_path) else {
+            return 1;
+        };
+        let published = lock.publish::<()>(header, |_, _| {
+            doorbell.ring();
+            wait_to_be_killed()
+        });
+        i32::from(published.is_err())
+    });
+    doorbell.wait();
+    writer
+}
+
+/// Far past a reader's patience, so a fallback that was going to be taken has been taken by then.
+const PAST_PATIENCE: std::time::Duration = std::time::Duration::from_millis(200);
+
+#[test]
+fn a_read_waits_out_its_own_session_s_stalled_writer_whatever_was_attached_after_it() {
+    let _one = one_at_a_time();
+    // Read from the session made first, so the session made after it is the one a probe that
+    // followed the latest attach would ask about, and its lock is free.
+    let read_from = fixture().unwrap();
+    let _made_after = fixture().unwrap();
+    let header = read_from.header();
+    let live = header.live.load();
+    let writer = stalled_writer(header, &read_from.lock_path());
+
+    let (early, returned) = std::thread::scope(|scope| {
+        let reader = scope.spawn(|| read(header, Params::load));
+        std::thread::sleep(PAST_PATIENCE);
+        // A live writer stopped inside its section is waited out for as long as it takes.
+        let early = reader.is_finished();
+        kill_and_reap(writer);
+        (early, reader.join().unwrap())
+    });
+    assert!(!early, "the read returned while its session's writer lived");
+    // Once it is dead the fallback answers, and the flag never went up, so with the live words.
+    assert_eq!(returned, live);
+}
+
+#[test]
+fn a_read_past_its_own_session_s_dead_writer_returns_while_another_session_s_lock_is_held() {
+    let _one = one_at_a_time();
+    let read_from = fixture().unwrap();
+    let made_after = fixture().unwrap();
+    let header = read_from.header();
+    let live = header.live.load();
+
+    // The session made after holds its lock in a process of its own, for the whole case.
+    let doorbell = Doorbell::new();
+    let other_lock = made_after.lock_path();
+    let holder = fork_child(|| {
+        let _lock = WriteLock::acquire(&other_lock).unwrap();
+        doorbell.ring();
+        wait_to_be_killed()
+    });
+    doorbell.wait();
+    // The session read from loses its writer inside a section: the counter stays odd, and the
+    // lock is released.
+    kill_and_reap(stalled_writer(header, &read_from.lock_path()));
+
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let returned = std::thread::scope(|scope| {
+        scope.spawn(move || sender.send(read(header, Params::load)).ok());
+        let returned = receiver.recv_timeout(10 * PAST_PATIENCE).ok();
+        // Released either way, so the reader leaves before the scope waits on it.
+        kill_and_reap(holder);
+        returned
+    });
+    assert_eq!(
+        returned,
+        Some(live),
+        "the read waited on another session's lock"
+    );
 }

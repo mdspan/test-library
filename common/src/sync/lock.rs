@@ -12,10 +12,11 @@ use std::os::raw::c_char;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::ptr;
-use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicPtr, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use crate::platform;
+use crate::session::layout::Header;
 use crate::session::naming;
 
 /// The one writer this process may have.
@@ -26,24 +27,39 @@ use crate::session::naming;
 /// sessions at once a wait it did not need and is otherwise the same lock.
 static WRITERS: Mutex<()> = Mutex::new(());
 
-/// How many write locks this process is holding.
+/// One mapped session this process may read, and the lock file a reader of it probes.
 ///
-/// What a probe answers from when it is nonzero, in place of asking the kernel. FreeBSD's probe
-/// reports the byte held even to the process holding it, so a self-probe there says nothing, and
-/// a process that is itself the writer already knows: only a reader has a question for the kernel.
-///
-/// The count goes up after the kernel grants the lock and down before the descriptor closes, so
-/// the window it covers sits inside the kernel's own and an answer of "held" is never ahead of
-/// one. It covers the process rather than a single session, like the mutex above it, so a process
-/// writing one session while reading another spins a moment longer before its fallback.
-static HELD_HERE: AtomicUsize = AtomicUsize::new(0);
+/// Nodes are pushed onto [`PROBES`] and never unlinked or freed, so the fallback walks the list
+/// with no lock and never meets freed memory. The path is leaked as well: a reader can be inside
+/// `open` with the old pointer while a later mapping at the same address replaces it.
+struct Probe {
+    /// The address of the mapped header, which is what a reader holds.
+    header: usize,
+    /// The lock file, NUL-terminated and ready for `open`.
+    path: AtomicPtr<c_char>,
+    /// The node pushed before this one, or null. Set before this node is published.
+    next: *const Self,
+}
 
-/// The lock file a reader probes, NUL-terminated and ready for `open`.
+/// Every mapping [`install`] has named a lock file for, newest first.
+static PROBES: AtomicPtr<Probe> = AtomicPtr::new(ptr::null_mut());
+
+/// The node naming the lock file of the session mapped at `header`, if [`install`] made one.
 ///
-/// A pointer rather than a buffer, so the fallback needs no copy and no stack of its own. What it
-/// points at is leaked on purpose: a reader can be inside `open` with the old pointer while this
-/// one is replaced, and there is no moment at which freeing it would be safe.
-static PROBE_PATH: AtomicPtr<c_char> = AtomicPtr::new(ptr::null_mut());
+/// A load per node and no writes, so the fallback can walk it inside a signal handler.
+fn probe_for(header: &Header) -> Option<&'static Probe> {
+    let key = ptr::from_ref(header).addr();
+    let mut node = PROBES.load(Ordering::Acquire);
+    // Safety: every node was leaked by `install`, is never freed, and had `next` set before the
+    // release that published it.
+    while let Some(probe) = unsafe { node.as_ref() } {
+        if probe.header == key {
+            return Some(probe);
+        }
+        node = probe.next.cast_mut();
+    }
+    None
+}
 
 /// The question every acquire and every probe asks: the write lock, byte 0, length 1.
 ///
@@ -94,26 +110,42 @@ fn open_checked(path: &Path) -> io::Result<CString> {
     Ok(c_path)
 }
 
-/// Names the lock file this process's readers probe, creating it if it is missing.
+/// Names the lock file a reader of the session mapped at `header` probes, creating it if it is
+/// missing.
 ///
 /// A relative `path` is taken against the working directory of this call, so the probe still finds
 /// the file after the process changes directory.
 ///
-/// Called once by whoever creates or attaches to the session, which is also where the file's half
-/// of the session's security checks happens: a reader's probe is three syscalls and no more, so
-/// the file it will open is vetted here instead, once.
+/// Called once per mapping by whoever creates or attaches to the session, which is also where the
+/// file's half of the session's security checks happens: a reader's probe is three syscalls and no
+/// more, so the file it will open is vetted here instead, once.
 ///
-/// One path per process, because a process reads the clock from one session: the path a target
-/// attached to. A writer names the lock file it wants outright, so a controller holding several
-/// sessions open at once is unaffected.
+/// The name belongs to the mapping, so a process holding several sessions probes, for each read,
+/// the lock of the session that read is of. A mapping placed where an earlier one was replaces the
+/// earlier one's name.
 ///
 /// # Errors
 /// [`io::Error`] when the file cannot be created or opened, or is not one of ours, or when `path`
-/// is relative and the working directory cannot be learned.
-pub fn install(path: &Path) -> io::Result<()> {
-    let c_path = open_checked(&naming::absolute(path)?)?;
-    PROBE_PATH.store(c_path.into_raw(), Ordering::Release);
-    Ok(())
+/// is relative and the working directory cannot be learned. The mapping keeps whatever name it had.
+pub fn install(header: &Header, path: &Path) -> io::Result<()> {
+    let c_path = open_checked(&naming::absolute(path)?)?.into_raw();
+    if let Some(probe) = probe_for(header) {
+        probe.path.store(c_path, Ordering::Release);
+        return Ok(());
+    }
+    let probe = Box::leak(Box::new(Probe {
+        header: ptr::from_ref(header).addr(),
+        path: AtomicPtr::new(c_path),
+        next: ptr::null(),
+    }));
+    let mut head = PROBES.load(Ordering::Relaxed);
+    loop {
+        probe.next = head;
+        match PROBES.compare_exchange_weak(head, probe, Ordering::Release, Ordering::Relaxed) {
+            Ok(_) => return Ok(()),
+            Err(now) => head = now,
+        }
+    }
 }
 
 /// How a reader opens the lock file. `O_NOFOLLOW` refuses a planted symlink and `O_NONBLOCK` keeps
@@ -122,32 +154,25 @@ pub fn install(path: &Path) -> io::Result<()> {
 const READ_FLAGS: libc::c_int =
     libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK;
 
-/// **R6**: whether the write lock is held, asked of the kernel and taking nothing.
+/// **R6**: whether the write lock of the session mapped at `header` is held, asked of the kernel
+/// and taking nothing.
 ///
-/// `None` when there is no lock file to ask about, which a caller reads as an unanswered question
-/// rather than as a released lock.
+/// `None` when [`install`] named no lock file for this mapping, or the file cannot be asked about,
+/// which a caller reads as an unanswered question rather than as a released lock.
 ///
-/// A process that holds the lock itself answers from [`HELD_HERE`] and asks nobody: on FreeBSD the
-/// kernel reports the byte held to its holder too, so a self-probe would be a syscall that told it
-/// nothing it did not already know. Only a process holding nothing has a question for the kernel.
+/// A process holding the lock asks the kernel too, and hears held: the probe goes through a
+/// description of its own, which the holder's description-owned lock conflicts with on every
+/// platform, FreeBSD's `flock` against its `F_GETLK` included.
 ///
-/// Async-signal-safe: an `open`, one `fcntl`, and a `close`, which is every syscall this makes.
-/// The file was vetted by [`install`], so nothing here has to. The descriptor is opened here and
-/// closed before returning, so it is never a number the program can see, and a daemon that closes
-/// every descriptor after startup leaves nothing of ours behind. Read-only, because the question
-/// needs no write access, and the answer carries no pid, so pid recycling and pid namespaces
-/// cannot make it wrong.
+/// Async-signal-safe: a walk of loads, an `open`, one `fcntl`, and a `close`, which is every
+/// syscall this makes. The file was vetted by [`install`], so nothing here has to. The descriptor
+/// is opened here and closed before returning, so it is never a number the program can see, and a
+/// daemon that closes every descriptor after startup leaves nothing of ours behind. Read-only,
+/// because the question needs no write access, and the answer carries no pid, so pid recycling and
+/// pid namespaces cannot make it wrong.
 #[must_use]
-pub fn probe_held() -> Option<bool> {
-    if HELD_HERE.load(Ordering::Acquire) > 0 {
-        // A writer of ours holds it, so the answer is here rather than in the kernel. This is the
-        // one answer a self-probe could not give: FreeBSD reports the byte held to its holder too.
-        return Some(true);
-    }
-    let path = PROBE_PATH.load(Ordering::Acquire);
-    if path.is_null() {
-        return None;
-    }
+pub fn probe_held(header: &Header) -> Option<bool> {
+    let path = probe_for(header)?.path.load(Ordering::Acquire);
     // Safety: `path` is a NUL-terminated path leaked by `install`, so it outlives this call.
     let fd = unsafe { libc::open(path, READ_FLAGS) };
     if fd < 0 {
@@ -201,8 +226,6 @@ impl WriteLock {
                 return Err(err);
             }
         }
-        // Only once the kernel has granted it, so a refused acquire leaves the count where it was.
-        HELD_HERE.fetch_add(1, Ordering::Release);
         Ok(Self {
             fd: Cell::new(fd),
             _writers: writers,
@@ -218,9 +241,6 @@ impl WriteLock {
     pub fn close_in_forked_child(&self) {
         let fd = self.fd.replace(-1);
         if fd >= 0 {
-            // The count goes first: from here on this process is a reader of the lock like any
-            // other, and its probe belongs to the kernel again.
-            HELD_HERE.fetch_sub(1, Ordering::Release);
             // Safety: this child inherited the descriptor and nothing else here holds it.
             unsafe { libc::close(fd) };
         }

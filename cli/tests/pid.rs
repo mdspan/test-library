@@ -8,11 +8,10 @@ mod fixture;
 
 use common::session::layout::Keeper;
 
-use fixture::{Fixture, Member, one_at_a_time};
+use fixture::{Fixture, Member};
 
 #[test]
 fn the_tool_finds_a_session_through_a_process_of_the_tree() {
-    let _one = one_at_a_time();
     let session = Fixture::on(Keeper::Affine);
     let member = Member::of(session.path());
 
@@ -27,7 +26,6 @@ fn the_tool_finds_a_session_through_a_process_of_the_tree() {
 
 #[test]
 fn a_session_path_with_a_space_in_it_is_read_whole() {
-    let _one = one_at_a_time();
     let session = Fixture::spaced(Keeper::Affine);
     assert!(session.path().to_string_lossy().contains(' '));
     let member = Member::of(session.path());
@@ -41,7 +39,6 @@ fn a_session_path_with_a_space_in_it_is_read_whole() {
 
 #[test]
 fn a_process_without_the_variable_is_in_no_session() {
-    let _one = one_at_a_time();
     let session = Fixture::on(Keeper::Affine);
     let member = Member::outside();
     let pid = member.pid().to_string();
@@ -55,7 +52,6 @@ fn a_process_without_the_variable_is_in_no_session() {
 
 #[test]
 fn a_process_that_is_gone_names_the_pid_and_the_reason() {
-    let _one = one_at_a_time();
     let session = Fixture::on(Keeper::Affine);
     let pid = {
         let member = Member::outside();
@@ -71,7 +67,6 @@ fn a_process_that_is_gone_names_the_pid_and_the_reason() {
 
 #[test]
 fn session_wins_over_pid() {
-    let _one = one_at_a_time();
     let mut session = Fixture::on(Keeper::Affine);
     let other = session.another(Keeper::Affine);
     let member = Member::of(&other);
@@ -91,7 +86,6 @@ fn session_wins_over_pid() {
 
 #[test]
 fn pid_wins_over_the_directory() {
-    let _one = one_at_a_time();
     let mut session = Fixture::on(Keeper::Affine);
     let other = session.another(Keeper::Affine);
     let member = Member::of(&other);

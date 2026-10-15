@@ -773,7 +773,7 @@ pub fn create_named(
     // The lock file carries no data, so it is made here and never touched again: writers take the
     // lock on it and readers probe it, whichever generation of the state the session file holds. It
     // comes after the session file, so a creator that gives up leaves neither behind.
-    sync::install(&naming::lock_path(&path))?;
+    sync::install(header, &naming::lock_path(&path))?;
 
     let c_path = cstring(&path)?;
     // Safety: `c_tmp` and `c_path` are live NUL-terminated paths.
@@ -993,7 +993,7 @@ pub fn attach(path: &Path) -> Result<Session, SessionError> {
     }
     // So this process's readers can probe the write lock. A session made by an older process
     // always has the file; one that somehow does not gets it here.
-    sync::install(&naming::lock_path(session.path()))?;
+    sync::install(session.header(), &naming::lock_path(session.path()))?;
     Ok(session)
 }
 

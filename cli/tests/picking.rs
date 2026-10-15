@@ -13,7 +13,7 @@ use std::path::Path;
 
 use common::session::layout::Keeper;
 
-use fixture::{Fixture, Tool, one_at_a_time, restamp};
+use fixture::{Fixture, Tool, restamp};
 
 const SECOND: i64 = 1_000_000_000;
 
@@ -23,7 +23,6 @@ fn me() -> String {
 
 #[test]
 fn the_tool_finds_a_session_by_reading_the_directory() {
-    let _one = one_at_a_time();
     let session = Fixture::on(Keeper::Affine);
     let tool = session.tool();
 
@@ -56,7 +55,6 @@ fn the_tool_finds_a_session_by_reading_the_directory() {
 
 #[test]
 fn list_prints_every_key_of_each_session_newest_first() {
-    let _one = one_at_a_time();
     let mut session = Fixture::on(Keeper::Affine);
     let newer = session.another(Keeper::Null);
     restamp(session.path(), 100, 5 * SECOND);
@@ -147,7 +145,6 @@ fn a_relative_session_directory_is_listed_against_the_working_directory() {
 
 #[test]
 fn dir_replaces_the_computed_directory() {
-    let _one = one_at_a_time();
     let session = Fixture::on(Keeper::Affine);
     let elsewhere = tempfile::tempdir().expect("a temporary directory");
 
@@ -168,7 +165,6 @@ fn dir_replaces_the_computed_directory() {
 
 #[test]
 fn the_session_directory_comes_from_the_configuration_file_under_the_environment() {
-    let _one = one_at_a_time();
     let session = Fixture::on(Keeper::Affine);
     let config = session.dir().join("config.toml");
     fs::write(
@@ -202,7 +198,6 @@ fn the_session_directory_comes_from_the_configuration_file_under_the_environment
 
 #[test]
 fn a_refused_configuration_file_leaves_the_environment_to_say() {
-    let _one = one_at_a_time();
     let session = Fixture::on(Keeper::Affine);
     let config = session.dir().join("config.toml");
     fs::write(&config, "session_dir = [").expect("the configuration file is written");
@@ -238,7 +233,6 @@ fn no_session_in_the_directory_names_the_directory() {
 
 #[test]
 fn several_sessions_are_listed_rather_than_guessed_at() {
-    let _one = one_at_a_time();
     let mut session = Fixture::on(Keeper::Affine);
     let other = session.another(Keeper::Affine);
     restamp(session.path(), 100, 5 * SECOND);
@@ -271,7 +265,6 @@ fn several_sessions_are_listed_rather_than_guessed_at() {
 
 #[test]
 fn creator_and_newest_narrow_the_directory_down() {
-    let _one = one_at_a_time();
     let mut session = Fixture::on(Keeper::Affine);
     let newest = session.another(Keeper::Affine);
     let middle = session.another(Keeper::Affine);
@@ -298,7 +291,6 @@ fn creator_and_newest_narrow_the_directory_down() {
 
 #[test]
 fn paths_are_printed_without_dot_components_or_trailing_slashes() {
-    let _one = one_at_a_time();
     let session = Fixture::on(Keeper::Affine);
     let name = session.path().file_name().expect("a session file name");
 
@@ -330,7 +322,6 @@ fn paths_are_printed_without_dot_components_or_trailing_slashes() {
 
 #[test]
 fn session_wins_over_the_other_picking_options() {
-    let _one = one_at_a_time();
     let mut session = Fixture::on(Keeper::Affine);
     let newest = session.another(Keeper::Affine);
     restamp(session.path(), 100, 5 * SECOND);

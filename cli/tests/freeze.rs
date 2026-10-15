@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use common::session::layout::Keeper;
 use controller::Controller;
 
-use fixture::{Fixture, Run, Tool, one_at_a_time};
+use fixture::{Fixture, Run, Tool};
 
 /// A session and a state directory of the case's own.
 struct Case {
@@ -72,7 +72,6 @@ fn assert_empty(dir: &Path) {
 
 #[test]
 fn the_tool_remembers_the_rate_a_freeze_comes_back_to() {
-    let _one = one_at_a_time();
     let case = Case::on(Keeper::Affine);
 
     case.run(&["set-rate", "realtime", "7"]).ok();
@@ -94,7 +93,6 @@ fn the_tool_remembers_the_rate_a_freeze_comes_back_to() {
 
 #[test]
 fn a_freeze_with_no_family_named_stops_the_three_that_have_a_line() {
-    let _one = one_at_a_time();
     let case = Case::on(Keeper::Affine);
 
     let frozen = case.run(&["freeze"]).ok();
@@ -127,7 +125,6 @@ fn a_freeze_with_no_family_named_stops_the_three_that_have_a_line() {
 
 #[test]
 fn freezing_twice_keeps_the_first_rate() {
-    let _one = one_at_a_time();
     let case = Case::on(Keeper::Affine);
 
     case.run(&["set-rate", "realtime", "7"]).ok();
@@ -141,7 +138,6 @@ fn freezing_twice_keeps_the_first_rate() {
 
 #[test]
 fn a_thaw_with_nothing_remembered_leaves_the_rates_alone() {
-    let _one = one_at_a_time();
     let case = Case::on(Keeper::Affine);
 
     case.run(&["set-rate", "realtime", "3"]).ok();
@@ -156,7 +152,6 @@ fn a_thaw_with_nothing_remembered_leaves_the_rates_alone() {
 
 #[test]
 fn a_thaw_needs_every_family_it_names_remembered() {
-    let _one = one_at_a_time();
     let case = Case::on(Keeper::Affine);
 
     case.run(&["freeze", "realtime"]).ok();
@@ -168,7 +163,6 @@ fn a_thaw_needs_every_family_it_names_remembered() {
 
 #[test]
 fn a_thaw_forgets_what_it_put_back_and_the_file_goes_with_the_last_entry() {
-    let _one = one_at_a_time();
     let case = Case::on(Keeper::Affine);
 
     case.run(&["set-rate", "monotonic", "0.25"]).ok();
@@ -188,7 +182,6 @@ fn a_thaw_forgets_what_it_put_back_and_the_file_goes_with_the_last_entry() {
 
 #[test]
 fn a_freeze_by_relative_path_is_thawed_through_newest() {
-    let _one = one_at_a_time();
     let case = Case::on(Keeper::Affine);
     let name = case
         .session
@@ -215,7 +208,6 @@ fn a_freeze_by_relative_path_is_thawed_through_newest() {
 
 #[test]
 fn a_thaw_puts_back_the_exact_rate() {
-    let _one = one_at_a_time();
     let case = Case::on(Keeper::Affine);
     let rate = || {
         Controller::attach(case.session.path())
@@ -234,7 +226,6 @@ fn a_thaw_puts_back_the_exact_rate() {
 
 #[test]
 fn a_freeze_on_a_null_session_is_refused_and_remembers_nothing() {
-    let _one = one_at_a_time();
     let case = Case::on(Keeper::Null);
 
     case.run(&["freeze"]).refused(1, "unsupported_for_keeper");
@@ -243,7 +234,6 @@ fn a_freeze_on_a_null_session_is_refused_and_remembers_nothing() {
 
 #[test]
 fn a_freeze_of_cpu_is_refused_and_remembers_nothing() {
-    let _one = one_at_a_time();
     let case = Case::on(Keeper::Affine);
 
     let refused = case
@@ -256,7 +246,6 @@ fn a_freeze_of_cpu_is_refused_and_remembers_nothing() {
 
 #[test]
 fn an_unknown_family_is_refused_before_the_session_is_touched() {
-    let _one = one_at_a_time();
     let case = Case::on(Keeper::Affine);
 
     case.run(&["freeze", "wallclock"])
@@ -267,7 +256,6 @@ fn an_unknown_family_is_refused_before_the_session_is_touched() {
 
 #[test]
 fn a_state_file_that_does_not_parse_is_refused() {
-    let _one = one_at_a_time();
     let case = Case::on(Keeper::Affine);
     std::fs::create_dir_all(case.state.path().join("frozen")).expect("the frozen directory");
     std::fs::write(case.state_file(), "realtime=fast\n").expect("a broken state file");

@@ -5,26 +5,12 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
-use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use super::{Anchor, WRITE_SETTLE_NS, WriteLock, begin, probe_held, read};
 use crate::platform::{self, clock};
 use crate::session::layout::{Header, Params, ParamsValue, WriterState};
 use crate::session::{self, Session, SessionError, Setup, naming};
 use crate::time::{Nanos, Rate};
-
-/// The lock file a reader probes is named once per process, and a write lock is one per process
-/// too, so two of these cases running at once would ask about each other's session. Taken for the
-/// length of every case here, poison and all: a case that already failed should not turn the next
-/// one into a second failure.
-///
-/// Creating or attaching to a session names the probe's file too, so a case elsewhere in the crate
-/// that does either takes this around the call.
-static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
-
-pub(crate) fn one_at_a_time() -> MutexGuard<'static, ()> {
-    ONE_AT_A_TIME.lock().unwrap_or_else(PoisonError::into_inner)
-}
 
 /// A session of its own, in a directory that goes away with it.
 struct Fixture {
@@ -94,7 +80,6 @@ fn at_rate(anchor: &Anchor, live: ParamsValue, rate: Rate) -> ParamsValue {
 
 #[test]
 fn an_uncontended_read_returns_the_live_parameters() {
-    let _one = one_at_a_time();
     let fixture = fixture().unwrap();
     assert_eq!(fixture.counter() % 2, 0);
     assert_eq!(
@@ -105,7 +90,6 @@ fn an_uncontended_read_returns_the_live_parameters() {
 
 #[test]
 fn a_publish_writes_both_copies_and_closes_the_section() {
-    let _one = one_at_a_time();
     let fixture = fixture().unwrap();
     let opened = fixture.counter();
     let lock = begin(fixture.header(), &fixture.lock_path()).unwrap();
@@ -134,7 +118,6 @@ fn a_publish_writes_both_copies_and_closes_the_section() {
 
 #[test]
 fn a_refused_write_publishes_nothing_and_still_closes_the_section() {
-    let _one = one_at_a_time();
     let fixture = fixture().unwrap();
     let before = fixture.header().live.load();
     let opened = fixture.counter();
@@ -159,7 +142,6 @@ fn a_refused_write_publishes_nothing_and_still_closes_the_section() {
 
 #[test]
 fn the_anchor_is_sampled_a_settle_after_the_counter_goes_odd() {
-    let _one = one_at_a_time();
     let fixture = fixture().unwrap();
     let lock = begin(fixture.header(), &fixture.lock_path()).unwrap();
     let before = platform::genuine_nanos(clock::MONOTONIC).unwrap();
@@ -178,7 +160,6 @@ fn the_anchor_is_sampled_a_settle_after_the_counter_goes_odd() {
 
 #[test]
 fn every_timebase_in_use_is_sampled_once() {
-    let _one = one_at_a_time();
     let fixture = fixture().unwrap();
     let lock = begin(fixture.header(), &fixture.lock_path()).unwrap();
 
@@ -199,7 +180,6 @@ fn every_timebase_in_use_is_sampled_once() {
 
 #[test]
 fn a_write_section_runs_with_every_maskable_signal_blocked() {
-    let _one = one_at_a_time();
     let fixture = fixture().unwrap();
     let lock = begin(fixture.header(), &fixture.lock_path()).unwrap();
 
@@ -226,7 +206,6 @@ fn blocked(signal: libc::c_int) -> bool {
 
 #[test]
 fn a_repair_leaves_the_thread_s_signal_mask_as_it_found_it() {
-    let _one = one_at_a_time();
     let fixture = fixture().unwrap();
     fixture.abandon(true, &distinct(fixture.header().live.load()));
 
@@ -272,37 +251,75 @@ fn set_mask(mask: &libc::sigset_t) {
 
 #[test]
 fn the_probe_reports_the_write_lock_held_only_while_a_writer_holds_it() {
-    let _one = one_at_a_time();
     let fixture = fixture().unwrap();
-    assert_eq!(probe_held(), Some(false));
+    assert_eq!(probe_held(fixture.header()), Some(false));
 
+    // Held by this very process, and the answer is still the kernel's: the probe asks through a
+    // description of its own, which the holder's lock conflicts with.
     let lock = WriteLock::acquire(&fixture.lock_path()).unwrap();
-    assert_eq!(probe_held(), Some(true));
+    assert_eq!(probe_held(fixture.header()), Some(true));
 
     drop(lock);
-    assert_eq!(probe_held(), Some(false));
+    assert_eq!(probe_held(fixture.header()), Some(false));
 }
 
 #[test]
-fn a_process_holding_the_write_lock_never_asks_the_kernel_about_it() {
-    let _one = one_at_a_time();
+fn the_probe_asks_about_the_lock_of_the_session_it_is_given() {
+    // The second session is the one created last, which is the lock file a probe that followed the
+    // newest session would ask about whichever session it was given.
+    let first = fixture().unwrap();
+    let second = fixture().unwrap();
+
+    let lock = WriteLock::acquire(&first.lock_path()).unwrap();
+    assert_eq!(probe_held(first.header()), Some(true));
+    assert_eq!(probe_held(second.header()), Some(false));
+    drop(lock);
+
+    let lock = WriteLock::acquire(&second.lock_path()).unwrap();
+    assert_eq!(probe_held(first.header()), Some(false));
+    assert_eq!(probe_held(second.header()), Some(true));
+    drop(lock);
+}
+
+#[test]
+fn a_lock_file_that_is_gone_leaves_the_probe_without_an_answer() {
     let fixture = fixture().unwrap();
     let lock = WriteLock::acquire(&fixture.lock_path()).unwrap();
 
-    // With the file gone there is nothing to open, so an answer at all could only have come from
-    // this process's own state. FreeBSD's probe reports the byte held to its holder too, which is
-    // why a holder never asks.
+    // Not "released", which is the one answer that would let a reader past a writer. The holder
+    // gets no answer either, since it asks the kernel like anybody else.
     std::fs::remove_file(fixture.lock_path()).unwrap();
-    assert_eq!(probe_held(), Some(true));
-
-    // And once it is not the holder, the question is the kernel's again: no file, no answer.
+    assert_eq!(probe_held(fixture.header()), None);
     drop(lock);
-    assert_eq!(probe_held(), None);
+    assert_eq!(probe_held(fixture.header()), None);
+}
+
+#[test]
+fn a_reader_past_a_dead_writer_returns_while_this_process_holds_another_session_s_lock() {
+    let abandoned = fixture().unwrap();
+    let other = fixture().unwrap();
+    let live = abandoned.header().live.load();
+    abandoned.abandon(false, &distinct(live));
+    let _held = WriteLock::acquire(&other.lock_path()).unwrap();
+
+    assert_eq!(read_within(abandoned, READ_LIMIT), Some(live));
+}
+
+/// Far past a reader's patience, so a reader that has not returned by then is not going to.
+const READ_LIMIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// What a read of `fixture` returns within `limit`, or `None` when it is still spinning then. The
+/// read runs on a thread of its own, which a read that never returns leaves behind.
+fn read_within(fixture: Fixture, limit: std::time::Duration) -> Option<ParamsValue> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        sender.send(read(fixture.header(), Params::load)).ok();
+    });
+    receiver.recv_timeout(limit).ok()
 }
 
 #[test]
 fn a_reader_keeps_reading_while_a_writer_only_holds_the_lock() {
-    let _one = one_at_a_time();
     let fixture = fixture().unwrap();
     let live = fixture.header().live.load();
     let _lock = begin(fixture.header(), &fixture.lock_path()).unwrap();
@@ -314,7 +331,6 @@ fn a_reader_keeps_reading_while_a_writer_only_holds_the_lock() {
 
 #[test]
 fn a_reader_past_its_patience_returns_the_shadow_the_flag_names() {
-    let _one = one_at_a_time();
     let fixture = fixture().unwrap();
     let whole = distinct(fixture.header().live.load());
     fixture.abandon(true, &whole);
@@ -324,7 +340,6 @@ fn a_reader_past_its_patience_returns_the_shadow_the_flag_names() {
 
 #[test]
 fn a_reader_past_its_patience_returns_the_live_words_when_the_flag_is_clear() {
-    let _one = one_at_a_time();
     let fixture = fixture().unwrap();
     let live = fixture.header().live.load();
     // A shadow the dead writer never finished: whole-looking, and never to be returned.
@@ -335,7 +350,6 @@ fn a_reader_past_its_patience_returns_the_live_words_when_the_flag_is_clear() {
 
 #[test]
 fn the_successor_finishes_a_write_whose_shadow_was_whole() {
-    let _one = one_at_a_time();
     let fixture = fixture().unwrap();
     let whole = distinct(fixture.header().live.load());
     fixture.abandon(true, &whole);
@@ -356,7 +370,6 @@ fn the_successor_finishes_a_write_whose_shadow_was_whole() {
 
 #[test]
 fn the_successor_leaves_a_write_that_never_reached_the_flag_alone() {
-    let _one = one_at_a_time();
     let fixture = fixture().unwrap();
     let live = fixture.header().live.load();
     fixture.abandon(false, &distinct(live));
@@ -369,7 +382,6 @@ fn the_successor_leaves_a_write_that_never_reached_the_flag_alone() {
 
 #[test]
 fn a_second_writer_of_this_process_waits_rather_than_converting_the_lock() {
-    let _one = one_at_a_time();
     let fixture = fixture().unwrap();
     let lock = WriteLock::acquire(&fixture.lock_path()).unwrap();
 
@@ -388,18 +400,20 @@ fn a_second_writer_of_this_process_waits_rather_than_converting_the_lock() {
 
 #[test]
 fn a_lock_file_that_is_not_ours_is_refused() {
-    let _one = one_at_a_time();
+    let fixture = fixture().unwrap();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("a-directory-is-not-a-lock-file.lock");
     std::fs::create_dir(&path).unwrap();
 
     assert!(WriteLock::acquire(&path).is_err());
-    assert!(super::install(&path).is_err());
+    assert!(super::install(fixture.header(), &path).is_err());
+    // The refusal leaves the session's own lock file the one its readers probe.
+    let _lock = WriteLock::acquire(&fixture.lock_path()).unwrap();
+    assert_eq!(probe_held(fixture.header()), Some(true));
 }
 
 #[test]
 fn a_planted_fifo_in_a_lock_file_s_place_is_refused_rather_than_waited_on() {
-    let _one = one_at_a_time();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("planted.lock");
     let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
@@ -408,13 +422,13 @@ fn a_planted_fifo_in_a_lock_file_s_place_is_refused_rather_than_waited_on() {
 
     // Opening a FIFO without a writer blocks until one arrives, which for the probe would be
     // wherever a clock read can happen. Both doors return instead.
-    assert!(super::install(&path).is_err());
+    let fixture = fixture().unwrap();
+    assert!(super::install(fixture.header(), &path).is_err());
     assert!(WriteLock::acquire(&path).is_err());
 }
 
 #[test]
 fn the_lock_file_is_private_to_us() {
-    let _one = one_at_a_time();
     let fixture = fixture().unwrap();
     let mode = std::fs::metadata(fixture.lock_path())
         .unwrap()

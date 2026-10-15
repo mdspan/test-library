@@ -41,8 +41,7 @@ const DAY: i64 = 24 * HOUR;
 const BUDGET: i64 = 200_000;
 
 /// Both cases here fork, and a fork while another thread of this process is inside a transaction
-/// would hand the child the in-process half of the write lock already held. The lock file a reader
-/// probes is named once per process, too, so two sessions at once would cross their probes.
+/// would hand the child the in-process half of the write lock already held.
 static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
 
 fn one_at_a_time() -> MutexGuard<'static, ()> {

@@ -80,7 +80,7 @@ fn recover_held<T>(header: &Header, counter: u64, compute: &impl Fn(&Params) -> 
     let state = seq.writer_state.load(Ordering::Acquire); // R5
     // A lock we cannot ask about is one that might be held, which is the answer that keeps the
     // reader spinning rather than the one that lets it return.
-    if lock::probe_held().unwrap_or(true) {
+    if lock::probe_held(header).unwrap_or(true) {
         // R6
         hint::spin_loop();
         return None;

@@ -12,20 +12,12 @@ use std::mem::offset_of;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
+use std::sync::OnceLock;
 
 use common::platform::{self, default_timebase};
 use common::session::layout::{Fault, Header, Keeper};
 use common::session::{self, Session, Setup};
 use common::time::Family;
-
-/// A case that creates a session takes this: the lock file a reader probes is named once per
-/// process, so two sessions at once would cross their probes.
-static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
-
-pub(crate) fn one_at_a_time() -> MutexGuard<'static, ()> {
-    ONE_AT_A_TIME.lock().unwrap_or_else(PoisonError::into_inner)
-}
 
 /// A directory of our own with one session in it, and any added later, kept mapped so the files
 /// stay whole.

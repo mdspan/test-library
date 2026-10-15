@@ -11,7 +11,7 @@ use std::time::Instant;
 use common::session::layout::Keeper;
 use common::time::{Family, Nanos};
 
-use fixture::{Fixture, Run, one_at_a_time, timebase_name};
+use fixture::{Fixture, Run, timebase_name};
 
 const HOUR: i64 = 3_600 * Nanos::SECOND;
 
@@ -43,7 +43,6 @@ fn unchanged_by(session: &Fixture, args: &[&str], status: i32, needle: &str) -> 
 
 #[test]
 fn the_tool_reads_and_changes_a_session() {
-    let _one = one_at_a_time();
     let session = Fixture::on(Keeper::Affine);
 
     let started = Instant::now();
@@ -84,7 +83,6 @@ fn the_tool_reads_and_changes_a_session() {
 
 #[test]
 fn one_operation_prints_what_it_touched() {
-    let _one = one_at_a_time();
     let session = Fixture::on(Keeper::Affine);
 
     let shifted = session.run(&["shift", "realtime", "-2h"]).ok();
@@ -101,7 +99,6 @@ fn one_operation_prints_what_it_touched() {
 
 #[test]
 fn a_set_time_keeps_every_nanosecond() {
-    let _one = one_at_a_time();
     let session = Fixture::on(Keeper::Affine);
 
     let set = session
@@ -124,7 +121,6 @@ fn a_set_time_keeps_every_nanosecond() {
 
 #[test]
 fn set_time_takes_unix_seconds_and_durations() {
-    let _one = one_at_a_time();
     let session = frozen();
 
     let at = session.run(&["set-time", "realtime", "@1577836800.5"]).ok();
@@ -136,7 +132,6 @@ fn set_time_takes_unix_seconds_and_durations() {
 
 #[test]
 fn a_frozen_family_moves_by_exactly_the_shift() {
-    let _one = one_at_a_time();
     let session = frozen();
 
     let before = session.run(&["get", "realtime"]).ok().number("realtime.ns");
@@ -148,7 +143,6 @@ fn a_frozen_family_moves_by_exactly_the_shift() {
 
 #[test]
 fn a_timestamp_without_an_offset_is_refused() {
-    let _one = one_at_a_time();
     let session = frozen();
 
     for value in ["2020-01-01T00:00:00", "2020-01-01"] {
@@ -166,7 +160,6 @@ fn a_timestamp_without_an_offset_is_refused() {
 
 #[test]
 fn values_that_do_not_parse_change_nothing() {
-    let _one = one_at_a_time();
     let session = frozen();
 
     unchanged_by(&session, &["shift", "realtime", "2x"], 1, "duration");
@@ -187,7 +180,6 @@ fn values_that_do_not_parse_change_nothing() {
 
 #[test]
 fn a_refused_operation_applies_none_of_the_sequence() {
-    let _one = one_at_a_time();
     let session = frozen();
 
     unchanged_by(
@@ -214,7 +206,6 @@ fn a_refused_operation_applies_none_of_the_sequence() {
 
 #[test]
 fn rates_of_a_sequence_print_in_the_order_given() {
-    let _one = one_at_a_time();
     let session = Fixture::on(Keeper::Affine);
 
     let run = session
@@ -230,7 +221,6 @@ fn rates_of_a_sequence_print_in_the_order_given() {
 
 #[test]
 fn each_family_prints_once_where_it_first_appears() {
-    let _one = one_at_a_time();
     let session = Fixture::on(Keeper::Affine);
 
     let run = session
@@ -269,7 +259,6 @@ fn each_family_prints_once_where_it_first_appears() {
 
 #[test]
 fn a_malformed_sequence_is_a_usage_error() {
-    let _one = one_at_a_time();
     let session = frozen();
 
     unchanged_by(&session, &["shift", "realtime"], 2, "usage:");
@@ -304,7 +293,6 @@ fn a_malformed_sequence_is_a_usage_error() {
 
 #[test]
 fn a_null_session_refuses_a_change() {
-    let _one = one_at_a_time();
     let session = Fixture::on(Keeper::Null);
 
     let run = session
