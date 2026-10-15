@@ -686,3 +686,38 @@ fn a_condition_variable_given_its_clock_again_and_then_the_default_times_out_on_
         );
     }
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn every_spelling_of_select_refuses_what_it_refuses_without_the_library() {
+    let native = Run::prog("select_spellings").without_library().run();
+    // The conforming spellings refuse one descriptor past `FD_SETSIZE` and the Darwin extensions
+    // take it, so a row that reached another spelling's genuine function would answer otherwise.
+    assert_eq!(native.nanos("select.conforming.rc"), -1);
+    assert_eq!(
+        native.nanos("select.conforming.errno"),
+        i64::from(libc::EINVAL)
+    );
+    assert_eq!(native.nanos("pselect.conforming.rc"), -1);
+    assert_eq!(
+        native.nanos("pselect.conforming.errno"),
+        i64::from(libc::EINVAL)
+    );
+    assert_eq!(native.nanos("select.extsn.rc"), 0);
+    assert_eq!(native.nanos("pselect.extsn.rc"), 0);
+
+    // On a faked clock and on genuine time alike: either way each call goes on to a genuine
+    // function, and it has to be the one of its own spelling.
+    for (name, value) in [("LIBTIMEWARP_RATE", "2"), ("LIBTIMEWARP_KEEPER", "null")] {
+        let dir = tempfile::tempdir().unwrap();
+        let faked = Run::prog("select_spellings")
+            .session_dir(dir.path())
+            .env(name, value)
+            .run();
+        assert_eq!(
+            faked.under(""),
+            native.under(""),
+            "a spelling answered otherwise under the library with {name}={value}"
+        );
+    }
+}

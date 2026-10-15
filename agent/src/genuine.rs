@@ -172,14 +172,9 @@ genuine! {
         sigmask: *const libc::sigset_t,
     ) -> libc::c_int;
 
-    /// The genuine `select`. macOS on `x86_64` keeps three spellings, and a call the program wrote
-    /// in any of them is answered here by the widest this build found, the one that refuses the
-    /// fewest descriptor sets, which leaves a caller no worse off than without us.
-    #[cfg_attr(darwin_select_extsn, link_name = "select$DARWIN_EXTSN")]
-    #[cfg_attr(
-        all(darwin_select_1050, not(darwin_select_extsn)),
-        link_name = "select$1050"
-    )]
+    /// The genuine `select`, under its plain name. macOS keeps more than one spelling, and each
+    /// differs in what it refuses and how it waits, so each row there reaches the genuine function
+    /// of its own spelling: this one, or one of the two below.
     fn select(
         nfds: libc::c_int,
         readfds: *mut libc::fd_set,
@@ -188,9 +183,48 @@ genuine! {
         timeout: *mut libc::timeval,
     ) -> libc::c_int;
 
-    /// The genuine `pselect`, in the wider of the two spellings macOS on `x86_64` keeps.
-    #[cfg_attr(darwin_pselect_extsn, link_name = "pselect$DARWIN_EXTSN")]
+    /// The genuine `select$1050`, the conforming spelling macOS keeps on `x86_64`, which refuses
+    /// more than `FD_SETSIZE` descriptors.
+    #[cfg(darwin_select_1050)]
+    #[cfg_attr(target_os = "macos", link_name = "select$1050")]
+    fn select_1050(
+        nfds: libc::c_int,
+        readfds: *mut libc::fd_set,
+        writefds: *mut libc::fd_set,
+        exceptfds: *mut libc::fd_set,
+        timeout: *mut libc::timeval,
+    ) -> libc::c_int;
+
+    /// The genuine `select$DARWIN_EXTSN`, which takes descriptor sets of any width.
+    #[cfg(darwin_select_extsn)]
+    #[cfg_attr(target_os = "macos", link_name = "select$DARWIN_EXTSN")]
+    fn select_extsn(
+        nfds: libc::c_int,
+        readfds: *mut libc::fd_set,
+        writefds: *mut libc::fd_set,
+        exceptfds: *mut libc::fd_set,
+        timeout: *mut libc::timeval,
+    ) -> libc::c_int;
+
+    /// The genuine `pselect`, under the name the `libc` crate binds, which is the one its row
+    /// replaces: on macOS `x86_64` that is the conforming `pselect$1050`.
+    #[cfg_attr(
+        all(target_os = "macos", target_arch = "x86_64"),
+        link_name = "pselect$1050"
+    )]
     fn pselect(
+        nfds: libc::c_int,
+        readfds: *mut libc::fd_set,
+        writefds: *mut libc::fd_set,
+        exceptfds: *mut libc::fd_set,
+        timeout: *const libc::timespec,
+        sigmask: *const libc::sigset_t,
+    ) -> libc::c_int;
+
+    /// The genuine `pselect$DARWIN_EXTSN`, which takes descriptor sets of any width.
+    #[cfg(darwin_pselect_extsn)]
+    #[cfg_attr(target_os = "macos", link_name = "pselect$DARWIN_EXTSN")]
+    fn pselect_extsn(
         nfds: libc::c_int,
         readfds: *mut libc::fd_set,
         writefds: *mut libc::fd_set,

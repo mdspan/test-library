@@ -546,11 +546,34 @@ pub(crate) unsafe fn ppoll(
     unsafe { genuine::ppoll(fds, nfds, timeout, sigmask) }.unwrap_or_else(unsupported)
 }
 
+/// One spelling of the genuine `select`. macOS keeps several, which differ in what they refuse and
+/// how they wait, so a row there passes the one of its own spelling.
+pub(crate) type Select = unsafe fn(
+    libc::c_int,
+    *mut libc::fd_set,
+    *mut libc::fd_set,
+    *mut libc::fd_set,
+    *mut libc::timeval,
+) -> Option<libc::c_int>;
+
+/// One spelling of the genuine `pselect`, as [`Select`] is of `select`.
+pub(crate) type Pselect = unsafe fn(
+    libc::c_int,
+    *mut libc::fd_set,
+    *mut libc::fd_set,
+    *mut libc::fd_set,
+    *const libc::timespec,
+    *const libc::sigset_t,
+) -> Option<libc::c_int>;
+
+/// Waits in `spelling`, the genuine `select` of the name the program called.
+///
 /// # Safety
 /// The three sets must be null or valid for writes of an `fd_set`, and `timeout` null or valid for
 /// reads and writes of a `timeval`.
 #[inline]
 pub(crate) unsafe fn select(
+    spelling: Select,
     nfds: libc::c_int,
     readfds: *mut libc::fd_set,
     writefds: *mut libc::fd_set,
@@ -568,12 +591,12 @@ pub(crate) unsafe fn select(
     };
     let Some(wait) = asked else {
         // Safety: every argument is the caller's, passed on unchanged.
-        return unsafe { genuine::select(nfds, readfds, writefds, exceptfds, timeout) }
+        return unsafe { spelling(nfds, readfds, writefds, exceptfds, timeout) }
             .unwrap_or_else(unsupported);
     };
     let mut request = wait.genuine.to_timeval();
     // Safety: the sets are the caller's and the timeout is our own live buffer.
-    let result = unsafe { genuine::select(nfds, readfds, writefds, exceptfds, &raw mut request) }
+    let result = unsafe { spelling(nfds, readfds, writefds, exceptfds, &raw mut request) }
         .unwrap_or_else(unsupported);
     // Linux leaves the time not waited in the caller's own struct, and ours holds it in genuine
     // time, so the program gets the fake duration that stands for. FreeBSD and macOS leave the
@@ -583,11 +606,14 @@ pub(crate) unsafe fn select(
     result
 }
 
+/// Waits in `spelling`, the genuine `pselect` of the name the program called.
+///
 /// # Safety
 /// The three sets must be null or valid for writes of an `fd_set`, `timeout` null or valid for
 /// reads of a `timespec`, and `sigmask` null or valid for reads of a `sigset_t`.
 #[inline]
 pub(crate) unsafe fn pselect(
+    spelling: Pselect,
     nfds: libc::c_int,
     readfds: *mut libc::fd_set,
     writefds: *mut libc::fd_set,
@@ -599,7 +625,7 @@ pub(crate) unsafe fn pselect(
     let converted = unsafe { relative_timeout(Func::Pselect, monotonic_timebase(), timeout) };
     let timeout = converted.as_ref().map_or(timeout, ptr::from_ref);
     // Safety: every other argument is the caller's, passed on unchanged.
-    unsafe { genuine::pselect(nfds, readfds, writefds, exceptfds, timeout, sigmask) }
+    unsafe { spelling(nfds, readfds, writefds, exceptfds, timeout, sigmask) }
         .unwrap_or_else(unsupported)
 }
 

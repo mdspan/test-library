@@ -8,6 +8,7 @@ use std::ffi::c_char;
 
 use common::platform::{SYSCALL_ARGS, genuine_syscall, set_errno};
 
+use crate::genuine;
 use crate::interpose::{self, Timeb};
 use crate::setter;
 use crate::stamp::{self, Statx};
@@ -347,7 +348,7 @@ pub(super) unsafe extern "C" fn select(
     timeout: *mut libc::timeval,
 ) -> libc::c_int {
     // Safety: the caller is the program, calling under libc's contract.
-    unsafe { wait::select(nfds, readfds, writefds, exceptfds, timeout) }
+    unsafe { wait::select(genuine::select, nfds, readfds, writefds, exceptfds, timeout) }
 }
 
 /// # Safety
@@ -362,7 +363,17 @@ pub(super) unsafe extern "C" fn pselect(
     sigmask: *const libc::sigset_t,
 ) -> libc::c_int {
     // Safety: the caller is the program, calling under libc's contract.
-    unsafe { wait::pselect(nfds, readfds, writefds, exceptfds, timeout, sigmask) }
+    unsafe {
+        wait::pselect(
+            genuine::pselect,
+            nfds,
+            readfds,
+            writefds,
+            exceptfds,
+            timeout,
+            sigmask,
+        )
+    }
 }
 
 /// # Safety

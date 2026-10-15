@@ -20,7 +20,11 @@
 //! aarch64 there is one spelling of each. A
 //! spelling is a row of its own, because dyld matches a row by address and two spellings are two
 //! addresses. Whether the image has one at all is asked of the linker in `build.rs` rather than
-//! assumed, so a name that is not there costs a row rather than the build.
+//! assumed, so a name that is not there costs a row rather than the build. Each row passes its call
+//! on to the genuine function of its own spelling, because the spellings differ in what they do:
+//! the conforming `select` and `pselect` refuse more than `FD_SETSIZE` descriptors, the
+//! `$DARWIN_EXTSN` ones take sets of any width, and those of 10.4 on `x86_64` refuse neither and
+//! wait at least 10 ms for any shorter timeout that is not zero.
 //!
 //! What each row catches. Every row catches the program's own call and any library outside the
 //! shared cache. dyld rewrites pointers rather than code, so a call one library of the cache makes
@@ -45,7 +49,7 @@
 //! | `sleep`, `usleep` | Nothing. | Nothing beyond that: each converts and then blocks in the genuine `nanosleep`. |
 //! | `mach_wait_until` | Nothing. | The cache's own use of it. |
 //! | `poll` | Nothing. | The cache's own use of it. |
-//! | the three `select` names, the two `pselect` names | Nothing. | The cache's own use of them. Each answers through the widest spelling the image has, so nothing a caller could name is refused here that would have been allowed without us. |
+//! | the three `select` names, the two `pselect` names | Nothing. | The cache's own use of them. Each waits in the genuine function of its own spelling, so each refuses what that spelling refuses, a conforming one's more than `FD_SETSIZE` descriptors among it. |
 //! | `kevent`, `kevent64` | Nothing. | The cache's own use of them. |
 //! | `kevent_qos` | Nothing, and it converts nothing either: the call names no deadline. | The timers a caller arms through it as events, libdispatch's among them, which stay genuine. |
 //! | `pthread_cond_timedwait` | Nothing. | The relative form beside it, which belongs to no group. |
@@ -69,7 +73,7 @@
 
 use std::ffi::{c_char, c_void};
 
-use crate::{interpose, mach, setter, stamp, timer, wait};
+use crate::{genuine, interpose, mach, setter, stamp, timer, wait};
 
 /// One row of the table dyld reads at load: the replacement, and the function it stands in for.
 #[repr(C)]
@@ -434,7 +438,7 @@ replacements! {
         timeout: *mut libc::timeval,
     ) -> libc::c_int {
         // Safety: the caller is the program, calling under libc's contract.
-        unsafe { wait::select(nfds, readfds, writefds, exceptfds, timeout) }
+        unsafe { wait::select(genuine::select, nfds, readfds, writefds, exceptfds, timeout) }
     }
 
     /// The same wait in the conforming spelling of 10.5, which is a second address and so a second
@@ -449,7 +453,7 @@ replacements! {
         timeout: *mut libc::timeval,
     ) -> libc::c_int {
         // Safety: the caller is the program, calling under libc's contract.
-        unsafe { wait::select(nfds, readfds, writefds, exceptfds, timeout) }
+        unsafe { wait::select(genuine::select_1050, nfds, readfds, writefds, exceptfds, timeout) }
     }
 
     /// The same wait in the spelling a program compiled against the Darwin extensions calls.
@@ -463,7 +467,7 @@ replacements! {
         timeout: *mut libc::timeval,
     ) -> libc::c_int {
         // Safety: the caller is the program, calling under libc's contract.
-        unsafe { wait::select(nfds, readfds, writefds, exceptfds, timeout) }
+        unsafe { wait::select(genuine::select_extsn, nfds, readfds, writefds, exceptfds, timeout) }
     }
 
     /// The same again with a `timespec` timeout and a signal mask.
@@ -477,7 +481,7 @@ replacements! {
         sigmask: *const libc::sigset_t,
     ) -> libc::c_int {
         // Safety: the caller is the program, calling under libc's contract.
-        unsafe { wait::pselect(nfds, readfds, writefds, exceptfds, timeout, sigmask) }
+        unsafe { wait::pselect(genuine::pselect, nfds, readfds, writefds, exceptfds, timeout, sigmask) }
     }
 
     /// The same in the Darwin-extensions spelling.
@@ -492,7 +496,7 @@ replacements! {
         sigmask: *const libc::sigset_t,
     ) -> libc::c_int {
         // Safety: the caller is the program, calling under libc's contract.
-        unsafe { wait::pselect(nfds, readfds, writefds, exceptfds, timeout, sigmask) }
+        unsafe { wait::pselect(genuine::pselect_extsn, nfds, readfds, writefds, exceptfds, timeout, sigmask) }
     }
 
     /// The platform's own wait on a set of events.
