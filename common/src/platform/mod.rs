@@ -19,6 +19,7 @@
 //! | `CLOCKS_PER_SEC` | The units `clock` answers in, which the platform's headers fix. |
 //! | `set_errno` | Sets this thread's `errno`, which is how a refused call reports itself. |
 //! | `thread_id` | The id the kernel gives the calling thread, taking no thread-local storage to answer. |
+//! | `hold_signals` | Runs a closure that may overwrite the register a Go runtime's signal handler takes its goroutine pointer from, with every signal held back where that handler can be reached through a synthetic vDSO entry: Linux on aarch64. Elsewhere it runs the closure as it stands. |
 //! | `take_write_lock` | Takes the write lock on a descriptor, blocking. libc's convention. |
 //! | `probe_write_lock` | Asks the kernel whether the write lock is held, taking nothing. |
 //! | `random_bytes` | Fills a buffer with randomness, for the session name. |

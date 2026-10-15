@@ -10,11 +10,29 @@
 //! Everything else is the read path the interposed libc names run: the same hook, the same keeper,
 //! the same seqlock read flow. That is what makes a target reading through the vDSO and a library
 //! reading through libc agree, in one process, on one clock.
+//!
+//! The one difference is the hook, which runs with signals held back. A Go runtime built without
+//! cgo keeps its goroutine pointer in x28 on aarch64 and its signal handler takes it from there, so
+//! x28 has to hold that pointer at every instruction a signal can be handled at. The library's own
+//! read path leaves x28 alone, which a test checks against the release build's code; a hook is
+//! compiled by somebody else and may not.
 
 use common::hook::Func;
-use common::platform::{clock, kernel_clock_gettime, kernel_gettimeofday};
+use common::platform::{clock, hold_signals, kernel_clock_gettime, kernel_gettimeofday};
+use common::session::clock_now;
+use common::time::Nanos;
 
-use crate::interpose;
+use crate::state;
+
+/// What the session shows for `clock`: [`crate::interpose::faked`], with the hook called with
+/// signals held back.
+#[inline]
+fn faked(func: Func, clock: libc::clockid_t) -> Option<Nanos> {
+    let keeper = clock_now(state::session()?, clock);
+    state::hook().map_or(keeper, |hook| {
+        hold_signals(|| hook.read_clock(func, clock, keeper)).or(keeper)
+    })
+}
 
 /// The vDSO's own `clock_gettime`.
 ///
@@ -26,7 +44,7 @@ pub(super) unsafe extern "C" fn clock_gettime(
     ts: *mut libc::timespec,
 ) -> libc::c_long {
     if !ts.is_null()
-        && let Some(now) = interpose::faked(Func::ClockGettime, clock)
+        && let Some(now) = faked(Func::ClockGettime, clock)
     {
         // Safety: `ts` is non-null, so the caller's guarantee makes it valid for this write.
         unsafe { *ts = now.to_timespec() };
@@ -45,7 +63,7 @@ pub(super) unsafe extern "C" fn gettimeofday(
     tv: *mut libc::timeval,
     tz: *mut libc::c_void,
 ) -> libc::c_long {
-    let Some(now) = interpose::faked(Func::Gettimeofday, clock::REALTIME) else {
+    let Some(now) = faked(Func::Gettimeofday, clock::REALTIME) else {
         // Safety: both pointers are the caller's, passed on unchanged.
         return unsafe { kernel_gettimeofday(tv, tz) };
     };
@@ -67,7 +85,7 @@ pub(super) unsafe extern "C" fn gettimeofday(
 /// Called by the target under the contract the kernel's vDSO gives this function: `t` null or
 /// valid for writes of a `time_t`.
 pub(super) unsafe extern "C" fn time(t: *mut libc::time_t) -> libc::time_t {
-    let seconds = if let Some(now) = interpose::faked(Func::Time, clock::REALTIME) {
+    let seconds = if let Some(now) = faked(Func::Time, clock::REALTIME) {
         now.seconds()
     } else {
         let mut ts = libc::timespec {

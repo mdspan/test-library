@@ -204,6 +204,80 @@ pub fn thread_id() -> u64 {
     u64::try_from(id).unwrap_or(0)
 }
 
+/// The size of the signal set the kernel's `rt_sigprocmask` takes, which is not libc's `sigset_t`.
+#[cfg(target_arch = "aarch64")]
+const KERNEL_SIGSET: libc::c_long = 8;
+
+/// Runs `cold` with every signal this thread can block held back, and lets them through once it
+/// has returned.
+///
+/// A Go runtime built without cgo keeps its goroutine pointer in x28 and its signal handler takes
+/// the pointer from there, so a signal handled on a Go thread while x28 holds anything else starts
+/// the handler on garbage. A synthetic vDSO entry runs on such a thread, and this is how it runs
+/// code that may use x28: a hook, which is somebody else's code, and anything that calls into libc
+/// or formats a log line. A signal held back is handled once the old mask is back, by which point
+/// `cold` has put the register back as the calling convention requires.
+///
+/// `cold` runs as a function of its own, so the prologue that saves x28 before reusing it is held
+/// too. Two raw system calls, for the reason [`thread_id`] makes one, with the kernel's own signal
+/// set.
+#[cfg(target_arch = "aarch64")]
+#[inline]
+pub fn hold_signals<R>(cold: impl FnOnce() -> R) -> R {
+    let every: u64 = !0;
+    let mut before: u64 = 0;
+    // Safety: both sets are live words of the size named, and the kernel leaves `SIGKILL` and
+    // `SIGSTOP` out of any mask it is handed.
+    let held = unsafe {
+        raw_syscall(
+            libc::SYS_rt_sigprocmask,
+            [
+                libc::c_long::from(libc::SIG_BLOCK),
+                as_arg(&raw const every),
+                as_arg(&raw mut before),
+                KERNEL_SIGSET,
+                0,
+                0,
+            ],
+        )
+    } == 0;
+    let answer = run_held(cold);
+    if held {
+        // Safety: `before` is the mask the kernel handed back above.
+        let _restored = unsafe {
+            raw_syscall(
+                libc::SYS_rt_sigprocmask,
+                [
+                    libc::c_long::from(libc::SIG_SETMASK),
+                    as_arg(&raw const before),
+                    0,
+                    KERNEL_SIGSET,
+                    0,
+                    0,
+                ],
+            )
+        };
+    }
+    answer
+}
+
+/// Runs `cold` as it stands.
+///
+/// The Go runtime's signal handler on `x86_64` takes its goroutine pointer from thread-local
+/// storage, which no code under an entry moves.
+#[cfg(not(target_arch = "aarch64"))]
+#[inline]
+pub fn hold_signals<R>(cold: impl FnOnce() -> R) -> R {
+    cold()
+}
+
+/// Calls `cold`, as a function of its own.
+#[cfg(target_arch = "aarch64")]
+#[inline(never)]
+fn run_held<R>(cold: impl FnOnce() -> R) -> R {
+    cold()
+}
+
 /// Sets this thread's `errno`, which is how a refused call reports itself in libc's convention.
 pub fn set_errno(value: libc::c_int) {
     // Safety: `__errno_location` answers this thread's own `errno`, taking nothing.
@@ -653,6 +727,48 @@ mod tests {
         };
         assert_eq!(read, 0);
         Nanos::from_timespec(&ts)
+    }
+
+    /// The signals this thread holds back, as the kernel's own eight-byte set.
+    fn held() -> u64 {
+        let mut mask: u64 = 0;
+        // Safety: a null set changes nothing, and the old one lands in a live word of the size
+        // named.
+        let read = unsafe {
+            raw_syscall(
+                libc::SYS_rt_sigprocmask,
+                [
+                    libc::c_long::from(libc::SIG_BLOCK),
+                    0,
+                    as_arg(&raw mut mask),
+                    8,
+                    0,
+                    0,
+                ],
+            )
+        };
+        assert_eq!(read, 0);
+        mask
+    }
+
+    #[test]
+    fn signals_are_held_while_the_cold_path_runs_and_let_through_after() {
+        let before = held();
+        let during = hold_signals(held);
+        assert_eq!(held(), before, "the old mask is not back");
+        if cfg!(target_arch = "aarch64") {
+            // The standard signals, which are every one the Go runtime handles. An emulator may
+            // keep a few real-time signals of its own back from the mask.
+            let standard: u64 = (1 << 31) - 1;
+            let unblockable = (1 << (libc::SIGKILL - 1)) | (1 << (libc::SIGSTOP - 1));
+            assert_eq!(
+                during & standard,
+                standard & !unblockable,
+                "not every signal was held"
+            );
+        } else {
+            assert_eq!(during, before, "x86_64 has nothing to hold signals for");
+        }
     }
 
     #[test]

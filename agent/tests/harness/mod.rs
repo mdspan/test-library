@@ -55,6 +55,34 @@ pub(crate) fn library_without_vdso() -> PathBuf {
         .clone()
 }
 
+static RELEASE_LIBRARY: OnceLock<PathBuf> = OnceLock::new();
+
+/// The library as a release build makes it, which is the code a user loads, for a case whose
+/// question is about that code rather than about what it answers.
+///
+/// The library under test when the suite runs in release, and otherwise a release build in a target
+/// directory of its own.
+pub(crate) fn release_library() -> PathBuf {
+    if target_dir().ends_with("release") {
+        return library();
+    }
+    RELEASE_LIBRARY
+        .get_or_init(|| {
+            let dir = target_dir().join("timewarp-tests/release");
+            build_library(
+                &["--release", "--target-dir", &dir.to_string_lossy()],
+                &dir.join("release"),
+            )
+        })
+        .clone()
+}
+
+/// The disassembler a case reads machine code with: binutils' `objdump`, unless `OBJDUMP` names
+/// another, the way `CC` names the C compiler.
+pub(crate) fn objdump() -> Command {
+    Command::new(std::env::var_os("OBJDUMP").unwrap_or_else(|| "objdump".into()))
+}
+
 /// Builds the library under test into `into`, with `extra` on the cargo command line.
 fn build_library(extra: &[&str], into: &Path) -> PathBuf {
     let mut cargo = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));

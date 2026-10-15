@@ -65,7 +65,17 @@ pub fn read<T>(header: &Header, compute: impl Fn(&Params) -> T) -> T {
 ///
 /// `None` sends the reader back to spinning, which is what every answer here that is not a whole
 /// value means: whoever moved the words is making progress.
+///
+/// With signals held back, since the probe calls into libc and the report formats a log line,
+/// and either may use x28 on a Go thread inside a synthetic vDSO entry; see
+/// [`platform::hold_signals`].
+#[cold]
 fn recover<T>(header: &Header, counter: u64, compute: &impl Fn(&Params) -> T) -> Option<T> {
+    platform::hold_signals(|| recover_held(header, counter, compute))
+}
+
+/// [`recover`] itself, which runs with signals held back.
+fn recover_held<T>(header: &Header, counter: u64, compute: &impl Fn(&Params) -> T) -> Option<T> {
     let seq = &header.seqlock;
     let state = seq.writer_state.load(Ordering::Acquire); // R5
     // A lock we cannot ask about is one that might be held, which is the answer that keeps the

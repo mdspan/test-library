@@ -95,6 +95,15 @@ pub const fn default_timebase(family: Family) -> Option<libc::clockid_t> {
     }
 }
 
+/// Runs `cold` as it stands.
+///
+/// The Go runtime here reads the clock through libc, and its signal handler takes its goroutine
+/// pointer from thread-local storage rather than from a register `cold` could overwrite.
+#[inline]
+pub fn hold_signals<R>(cold: impl FnOnce() -> R) -> R {
+    cold()
+}
+
 /// The id the kernel gives this thread.
 ///
 /// What names a thread where thread-local storage cannot: a runtime that makes its own threads

@@ -211,6 +211,16 @@ fn osreldate() -> i32 {
     answer
 }
 
+/// Runs `cold` as it stands.
+///
+/// The Go runtime's signal handler takes its goroutine pointer from thread-local storage on
+/// `x86_64`. On aarch64 Go builds no program the loader reaches without linking it externally,
+/// which brings in the cgo runtime, whose handler does the same.
+#[inline]
+pub fn hold_signals<R>(cold: impl FnOnce() -> R) -> R {
+    cold()
+}
+
 /// The id the kernel gives this thread.
 ///
 /// What names a thread where thread-local storage cannot: a runtime that makes its own threads

@@ -429,6 +429,62 @@ fn a_go_sleep_under_a_slow_clock_converges_on_the_instant_it_promised() {
     );
 }
 
+// A Go runtime built without cgo keeps its goroutine pointer in x28 on aarch64, and its signal
+// handler takes the pointer from there. These programs read the clock while the process signals
+// itself without pause, so signals land in the middle of reads through the synthetic vDSO.
+
+/// How many wall-clock reads a signalled program makes: each is two calls through an entry.
+const SIGNALLED_READS: &str = "20000";
+
+/// Runs the signalled program under `library` with `env`, and checks it read the faked clock
+/// through every signal.
+fn signalled(library: PathBuf, env: &[(&str, &str)]) {
+    let Some(program) = harness::go_program("go_clocks") else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let mut run = Run::new(&program)
+        .under_library(library)
+        .arg("signals")
+        .arg(SIGNALLED_READS)
+        .session_dir(dir.path())
+        .env("LIBTIMEWARP_SHIFT", "-2h")
+        .within(std::time::Duration::from_secs(120));
+    for (name, value) in env {
+        run = run.env(name, value);
+    }
+    let report = run.run();
+
+    assert!(report.nanos("go.signals.sent") > 0, "no signal was sent");
+    assert_eq!(report.get("go.signals.reads"), SIGNALLED_READS);
+    let now = report.nanos("go.now");
+    let low = report.before - 2 * HOUR - SECOND;
+    let high = report.after - 2 * HOUR + SECOND;
+    assert!(
+        (low..=high).contains(&now),
+        "time.Now is {now}, not in {low}..={high}",
+    );
+}
+
+/// The hook is code this library did not compile, so it may use x28: this one overwrites it and
+/// spins, and a signal handled meanwhile would start the handler on that value.
+#[test]
+fn a_go_program_takes_signals_while_a_hook_overwrites_x28() {
+    let hook = harness::hook_library("clobbers_x28");
+    signalled(
+        harness::library(),
+        &[("LIBTIMEWARP_HOOK", &hook.to_string_lossy())],
+    );
+}
+
+/// The library's own read path under a release build, which is where the compiler is free to
+/// keep a value in x28.
+#[cfg(target_arch = "aarch64")]
+#[test]
+fn a_go_program_takes_signals_while_reading_through_a_release_build() {
+    signalled(harness::release_library(), &[]);
+}
+
 /// The pairs of readings the ticking mode printed.
 fn ticks(printed: &str) -> Vec<[i64; 2]> {
     printed

@@ -7,7 +7,8 @@
 // what the runtime made of the span; `rates <ms>` reports how far the wall clock and the monotonic
 // clock each move across one faked span, which differ when the two families run at rates of their
 // own; `threads <n> <reads>` reads the clock on n threads at once and reports the range of the
-// wall readings and how often a thread's monotonic clock stepped back.
+// wall readings and how often a thread's monotonic clock stepped back; `signals <reads>` reads the
+// wall clock that many times while the process signals itself without pause.
 package main
 
 import (
@@ -19,8 +20,18 @@ import (
 	"runtime/pprof"
 	"strconv"
 	"sync"
+	"syscall"
 	"time"
 )
+
+// The signals mode reads on the main thread, which is the thread the kernel hands a signal sent to
+// the process whenever that thread is running and not blocking it. A goroutine is only certain to
+// run there when it is locked before main starts.
+func init() {
+	if len(os.Args) > 1 && os.Args[1] == "signals" {
+		runtime.LockOSThread()
+	}
+}
 
 func main() {
 	// A profiling run turns on CPU profiling for the whole program. SIGPROF then fires about a
@@ -48,6 +59,8 @@ func main() {
 		rates(argument(2))
 	case "threads":
 		threads(argument(2), argument(3))
+	case "signals":
+		signals(argument(2))
 	default:
 		fmt.Fprintf(os.Stderr, "unknown mode %q\n", mode)
 		os.Exit(2)
@@ -166,4 +179,36 @@ func threads(count, reads string) {
 	fmt.Printf("go.threads.low=%d\n", low)
 	fmt.Printf("go.threads.high=%d\n", high)
 	fmt.Printf("go.threads.back=%d\n", back)
+}
+
+// The wall clock read again and again while another goroutine sends the process SIGURG without
+// pause, so signals arrive in the middle of reads. SIGURG is the runtime's own preemption signal,
+// which it handles on every thread and otherwise ignores.
+func signals(count string) {
+	reads := number(count)
+	done := make(chan struct{})
+	sent := make(chan int)
+	go func() {
+		pid := os.Getpid()
+		total := 0
+		for {
+			select {
+			case <-done:
+				sent <- total
+				return
+			default:
+			}
+			if syscall.Kill(pid, syscall.SIGURG) == nil {
+				total++
+			}
+		}
+	}()
+	var last time.Time
+	for i := 0; i < reads; i++ {
+		last = time.Now()
+	}
+	close(done)
+	fmt.Printf("go.signals.sent=%d\n", <-sent)
+	fmt.Printf("go.signals.reads=%d\n", reads)
+	fmt.Printf("go.now=%d\n", last.UnixNano())
 }

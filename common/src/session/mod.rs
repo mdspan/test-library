@@ -1196,7 +1196,10 @@ fn family_rate(params: &layout::Params, family: Family) -> Rate {
 /// Every value here comes out of shared memory a writer may be changing, so every step saturates
 /// and the arithmetic holds for any bit pattern. A torn read is discarded by the seqlock around
 /// this, not prevented inside it.
-#[inline]
+///
+/// Out of line, so the read loop around it keeps few values alive across its calls and the
+/// compiler has no use for x28 there; see [`platform::hold_signals`].
+#[inline(never)]
 fn affine_now(params: &layout::Params, family: Family, clock: libc::clockid_t) -> Option<Nanos> {
     match family {
         Family::Realtime => {

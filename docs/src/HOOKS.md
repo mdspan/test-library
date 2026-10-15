@@ -145,6 +145,13 @@ has to hold up there:
 - returns normally, since a `longjmp` out of the hook leaves that thread
   bypassing the hook from then on.
 
+On Linux arm64, a clock read the Go runtime makes reaches the hook with
+every signal blocked. The runtime keeps its own state in a register that a
+compiled hook is free to use, and a signal handled while the hook had that
+register in use would find something else there and crash the program.
+Signals that arrive meanwhile are delivered once the hook returns, so a hook
+must not wait for one, and each of those reads costs two more system calls.
+
 The [promises](README.md#what-it-promises) libtimewarp makes, monotonic
 clocks never running backwards among them, hold for the calls the hook
 declines. For the calls it handles they are the hook's to keep: a hook that
