@@ -10,6 +10,7 @@
 
 mod harness;
 
+use std::os::unix::fs::DirBuilderExt;
 use std::path::Path;
 
 use common::platform::clock;
@@ -142,6 +143,29 @@ fn the_constructor_names_the_session_for_the_processes_below_it() {
     let shared = report.get("probe.shared");
     assert!(!shared.is_empty(), "LIBTIMEWARP__SHARED_FILE was not set");
     assert!(Path::new(shared).exists(), "{shared} does not exist");
+}
+
+#[test]
+fn main_starts_with_errno_at_zero_whatever_the_constructor_ran_into() {
+    let dir = tempfile::tempdir().unwrap();
+    // A session directory that is already there, which the constructor's `mkdir` refuses.
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(dir.path().join("libtimewarp"))
+        .unwrap();
+    let existing = Run::prog("errno_at_start").session_dir(dir.path()).run();
+    assert_eq!(
+        existing.get("main.errno"),
+        "0",
+        "with a session directory that exists"
+    );
+
+    // No session directory named, and a temporary directory that is not there, so no session can
+    // be made and the constructor gives up on one.
+    let none = Run::prog("errno_at_start")
+        .env("TMPDIR", dir.path().join("missing").to_string_lossy())
+        .run();
+    assert_eq!(none.get("main.errno"), "0", "with no session directory set");
 }
 
 #[test]

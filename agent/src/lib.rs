@@ -54,6 +54,7 @@ mod mach;
 mod vdso;
 
 use std::fmt::Display;
+use std::io;
 use std::path::{Path, PathBuf};
 
 use common::config::{self, BadValue, ENV_SHARED_FILE, EnvLookup, ProcessEnv, Settings};
@@ -83,6 +84,16 @@ pub unsafe extern "C" fn libtimewarp_genuine_clock_gettime(
 
 #[ctor::ctor]
 fn constructor() {
+    // C starts `main` with `errno` at 0, and the start below makes calls that are refused on the
+    // way, `mkdir` on a session directory that is already there among them, so whatever `errno`
+    // held on the way in is put back on the way out.
+    let errno = io::Error::last_os_error().raw_os_error().unwrap_or(0);
+    start();
+    common::platform::set_errno(errno);
+}
+
+/// Everything the library does before the program's `main`, in the order it has to happen.
+fn start() {
     // The genuine side of every wait, found before the program can call one. A lookup takes the
     // loader's own lock, and this is the one moment where nothing of the program's is holding it.
     // macOS has nothing to find: dyld bound every genuine function there as an import at load.
