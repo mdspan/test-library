@@ -261,6 +261,44 @@ fn a_frozen_clock_stores_the_genuine_now_and_reads_its_own_instant_back() {
 }
 
 #[test]
+fn a_fraction_out_of_range_meets_the_answer_it_meets_without_the_library() {
+    let dir = tempfile::tempdir().unwrap();
+    let genuine = Run::prog("stamps")
+        .without_library()
+        .arg(dir.path().to_string_lossy())
+        .arg(TARGET_SECONDS.to_string())
+        .run();
+    let dir = tempfile::tempdir().unwrap();
+    let faked = stamps(dir.path(), &[("LIBTIMEWARP_SHIFT", "-2h")]);
+
+    // The same answer and errno, and where the platform takes the value the same instant on the
+    // file: a whole number of hours back converts every nanosecond exactly.
+    let cases = genuine.under("range.");
+    assert!(!cases.is_empty(), "the target set nothing out of range");
+    for (key, value) in &cases {
+        assert_eq!(faked.get(&format!("range.{key}")), value, "range.{key}");
+    }
+
+    // Linux and FreeBSD refuse every one of them. A path that does not exist is looked up first
+    // on Linux, and FreeBSD checks the times first, so there the errno is the platform's own.
+    if cfg!(any(target_os = "linux", target_os = "freebsd")) {
+        for (key, value) in &cases {
+            let Some(case) = key.strip_suffix(".rc") else {
+                continue;
+            };
+            assert_eq!(value, "-1", "range.{key}");
+            if !case.contains("missing") || cfg!(target_os = "freebsd") {
+                assert_eq!(
+                    faked.nanos(&format!("range.{case}.errno")),
+                    i64::from(libc::EINVAL),
+                    "range.{case}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn the_flags_that_name_no_instant_pass_through() {
     let dir = tempfile::tempdir().unwrap();
     let report = stamps(dir.path(), &[("LIBTIMEWARP_SHIFT", "-2h")]);

@@ -107,6 +107,9 @@ session. A timestamp that would fall before 1970 on the faked clock shows
 as 1970. Under a frozen wall clock, setting a date stores the real current
 time.
 
+A date the system refuses, such as a fraction of a second outside its
+range, gets the error the system gives it; macOS refuses none.
+
 ## Setting the Time
 
 `settimeofday`, `clock_settime(CLOCK_REALTIME, ...)`, and `adjtime` change

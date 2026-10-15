@@ -17,11 +17,16 @@
    `<key>.rc` is what the setter itself answered. `lutimes_link` is `lutimes` on a link to the file,
    which sets the link itself, read back with `lstat`.
 
-   Last come the two `utimensat` flags that name no instant: `UTIME_OMIT` on the modification time,
+   Then come the two `utimensat` flags that name no instant: `UTIME_OMIT` on the modification time,
    which must leave the round trip where it was, and `UTIME_NOW` on the access time, which must
-   land at the clock's own now. */
+   land at the clock's own now.
+
+   Last, every setter that takes a fraction is handed one out of its range, on the file and on a
+   path that does not exist. `range.<case>.rc` and `range.<case>.errno` are the answer, and where
+   the call succeeded `range.<case>.mtime` is what the file then shows. */
 #define _GNU_SOURCE
 #define _LARGEFILE64_SOURCE
+#include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -195,6 +200,103 @@ static void set_them_all(void) {
     report_round_trip("futimens", futimens(fd, ts));
 }
 
+/* One out-of-range case: what the call answered, and on a success what the file shows. */
+static void report_range(const char *key, int set, int error) {
+    struct stat st;
+    printf("range.%s.rc=%d\n", key, set);
+    printf("range.%s.errno=%d\n", key, set == 0 ? 0 : error);
+    if (set == 0 && stat(path, &st) == 0) {
+        printf("range.%s.mtime=%lld\n", key, nanos(MTIME_OF(&st).tv_sec, MTIME_OF(&st).tv_nsec));
+    }
+}
+
+/* The nanoseconds a `timespec` setter is handed in each case, the first on the access time and the
+   second on the modification time. -5 is no flag anywhere: Linux spells the two near 2^30, and
+   the BSDs as -1 and -2. */
+static const struct {
+    const char *name;
+    long first;
+    long second;
+} nsec_cases[] = {
+    {"second", 1000000000L, 0},
+    {"seconds", 2000000000L, 0},
+    {"negative", -5, 0},
+    {"omit_beside", UTIME_OMIT, -5},
+    {"now_beside", UTIME_NOW, 2000000000L},
+};
+
+/* The same for the microseconds of a `timeval` setter. */
+static const struct {
+    const char *name;
+    long first;
+    long second;
+} usec_cases[] = {
+    {"second", 1000000L, 0},
+    {"negative", -1, 0},
+    {"modified", 0, 1000001L},
+};
+
+/* Every setter that takes a fraction, handed one out of its range. Where a platform refuses it
+   the call fails, and how is the platform's own business: a case compares against a run without
+   the library. */
+static void set_out_of_range(void) {
+    char key[64];
+    size_t i;
+    int set;
+    const char *missing = "/nonexistent/written";
+
+    for (i = 0; i < sizeof(nsec_cases) / sizeof(nsec_cases[0]); i++) {
+        struct timespec ts[2];
+        ts[0].tv_sec = (time_t)target_s;
+        ts[0].tv_nsec = nsec_cases[i].first;
+        ts[1].tv_sec = (time_t)target_s;
+        ts[1].tv_nsec = nsec_cases[i].second;
+
+        snprintf(key, sizeof(key), "utimensat.%s", nsec_cases[i].name);
+        errno = 0;
+        set = utimensat(AT_FDCWD, path, ts, 0);
+        report_range(key, set, errno);
+
+        snprintf(key, sizeof(key), "futimens.%s", nsec_cases[i].name);
+        errno = 0;
+        set = futimens(fd, ts);
+        report_range(key, set, errno);
+
+        snprintf(key, sizeof(key), "utimensat_missing.%s", nsec_cases[i].name);
+        errno = 0;
+        set = utimensat(AT_FDCWD, missing, ts, 0);
+        report_range(key, set, errno);
+    }
+
+    for (i = 0; i < sizeof(usec_cases) / sizeof(usec_cases[0]); i++) {
+        struct timeval tv[2];
+        tv[0].tv_sec = (time_t)target_s;
+        tv[0].tv_usec = usec_cases[i].first;
+        tv[1].tv_sec = (time_t)target_s;
+        tv[1].tv_usec = usec_cases[i].second;
+
+        snprintf(key, sizeof(key), "utimes.%s", usec_cases[i].name);
+        errno = 0;
+        set = utimes(path, tv);
+        report_range(key, set, errno);
+
+        snprintf(key, sizeof(key), "futimes.%s", usec_cases[i].name);
+        errno = 0;
+        set = futimes(fd, tv);
+        report_range(key, set, errno);
+
+        snprintf(key, sizeof(key), "lutimes.%s", usec_cases[i].name);
+        errno = 0;
+        set = lutimes(path, tv);
+        report_range(key, set, errno);
+
+        snprintf(key, sizeof(key), "utimes_missing.%s", usec_cases[i].name);
+        errno = 0;
+        set = utimes(missing, tv);
+        report_range(key, set, errno);
+    }
+}
+
 /* The two flags that name no instant, on a file whose timestamps are the round trip above. */
 static void set_the_flags(void) {
     struct timespec ts[2];
@@ -238,6 +340,7 @@ int main(int argc, char **argv) {
 
     set_them_all();
     set_the_flags();
+    set_out_of_range();
 
     close(fd);
     fflush(stdout);

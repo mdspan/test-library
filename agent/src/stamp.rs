@@ -13,7 +13,9 @@
 //!
 //! A read converts the buffer the genuine call filled. A set converts a copy of what the program
 //! asked for, never the program's own buffer, and leaves `UTIME_NOW` and `UTIME_OMIT` alone: they
-//! name no instant, so there is nothing in them to convert.
+//! name no instant, so there is nothing in them to convert. A pair the platform refuses is not
+//! converted at all: it goes to the genuine call as the program wrote it, which refuses it at the
+//! point and with the `errno` it would have without us.
 //!
 //! `statx`, the `64` names and the `__xstat` family are Linux's alone, and the birth time inside a
 //! `stat` buffer is the BSDs', so each carries a `cfg` of its own. So does `utime`: FreeBSD's libc
@@ -536,8 +538,27 @@ pub(crate) unsafe fn statx(
     result
 }
 
-/// The genuine pair a fake `timespec` pair becomes, or `None` when it is stored as the program
-/// wrote it: no pair at all, or nothing in it this session converts.
+/// Whether the platform refuses a `timespec` a set names, which it does with `EINVAL` from the
+/// call itself. Linux and FreeBSD refuse nanoseconds outside `0..1e9` other than `UTIME_NOW` and
+/// `UTIME_OMIT`. libSystem hands every value to `setattrlistat`, which refuses none.
+#[inline]
+fn refused_timespec(ts: &libc::timespec) -> bool {
+    cfg!(not(target_os = "macos"))
+        && !(0..Nanos::SECOND).contains(&ts.tv_nsec)
+        && ts.tv_nsec != libc::UTIME_NOW
+        && ts.tv_nsec != libc::UTIME_OMIT
+}
+
+/// The same for a `timeval`: Linux and FreeBSD refuse microseconds outside `0..1e6`, and macOS's
+/// `getutimes` refuses none.
+#[inline]
+fn refused_timeval(tv: &libc::timeval) -> bool {
+    cfg!(not(target_os = "macos")) && !(0..1_000_000).contains(&tv.tv_usec)
+}
+
+/// The genuine pair a fake `timespec` pair becomes, or `None` when the program's own pair goes to
+/// the genuine call: no pair at all, one the platform refuses, which leaves the refusal and its
+/// `errno` to that call, or nothing in it this session converts.
 ///
 /// `UTIME_NOW` and `UTIME_OMIT` sit in the nanoseconds field and name no instant, one asking for
 /// the current time and the other for no change at all, so both pass through untouched.
@@ -559,6 +580,9 @@ unsafe fn stored_timespecs(
     // Safety: `second` is the second of the pair, which the caller guarantees.
     let second = unsafe { *second };
     let mut pair = [first, second];
+    if pair.iter().any(refused_timespec) {
+        return None;
+    }
     let mut converted = false;
     for asked in &mut pair {
         if asked.tv_nsec == libc::UTIME_NOW || asked.tv_nsec == libc::UTIME_OMIT {
@@ -588,6 +612,9 @@ unsafe fn stored_timevals(func: Func, times: *const libc::timeval) -> Option<[li
     // Safety: `second` is the second of the pair, which the caller guarantees.
     let second = unsafe { *second };
     let mut pair = [first, second];
+    if pair.iter().any(refused_timeval) {
+        return None;
+    }
     let mut converted = false;
     for asked in &mut pair {
         if let Some(genuine) = stored(func, Nanos::from_timeval(asked)) {
