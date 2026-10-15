@@ -110,8 +110,10 @@ impl WriteLock {
         // Even, because `begin` repaired anything odd and the write lock keeps every other writer
         // out for as long as this section runs.
         let opened = seq.sequence.load(Ordering::Relaxed);
+        // Release, so a reader that sees the odd counter sees W2's word too, never the cleared word
+        // before it, which a later W10 or repair writes again and R10 would take for unchanged.
         seq.sequence
-            .store(opened.wrapping_add(1), Ordering::Relaxed); // W3
+            .store(opened.wrapping_add(1), Ordering::Release); // W3
         fence(Ordering::SeqCst); // W3 fence: the settle below depends on it
 
         settle(); // W4
@@ -124,6 +126,9 @@ impl WriteLock {
             header.shadow.store(next); // W7
             seq.writer_state
                 .store(WriterState::published(pid).word(), Ordering::Release); // W8
+            // The release store orders only what precedes it. The fence keeps every W9 store
+            // behind the flag, so a reader whose R9 saw one finds the flag set at R10.
+            fence(Ordering::Release); // W8 fence
             header.live.store(next); // W9
         }
         seq.writer_state.store(0, Ordering::Release); // W10

@@ -99,11 +99,13 @@ fn recover_held<T>(header: &Header, counter: u64, compute: &impl Fn(&Params) -> 
     };
     let value = compute(whole);
     fence(Ordering::Acquire); // R10 fence
-    if seq.sequence.load(Ordering::Relaxed) != counter {
+    // The word first, and acquiring: a later section by the same pid writes the word R5 loaded
+    // again, and the acquire carries the W11 before that store to the counter reload below.
+    if seq.writer_state.load(Ordering::Acquire) != state {
+        // R5 can load a stale word, and this is what catches it.
         return None;
     }
-    if seq.writer_state.load(Ordering::Relaxed) != state {
-        // R5 can load a stale word, and this is what catches it.
+    if seq.sequence.load(Ordering::Relaxed) != counter {
         return None;
     }
     report_death(counter, WriterState::from_word(state).pid);
