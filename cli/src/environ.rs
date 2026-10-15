@@ -48,15 +48,23 @@ fn environment(pid: u32) -> io::Result<Vec<u8>> {
 fn environment(pid: u32) -> io::Result<Vec<u8>> {
     // The environment can grow between sizing the buffer and filling it.
     const ATTEMPTS: usize = 4;
-    let mut mib = [
-        libc::CTL_KERN,
-        libc::KERN_PROC,
-        libc::KERN_PROC_ENV,
-        process_id(pid)?,
-    ];
+    let pid = process_id(pid)?;
+    let mut mib = [libc::CTL_KERN, libc::KERN_PROC, libc::KERN_PROC_ENV, pid];
     let mut attempt = 1;
     loop {
-        let mut buf = vec![0; sysctl(&mut mib, None)?];
+        let size = match sysctl(&mut mib, None) {
+            Ok(size) => size,
+            // The kernel answers this for an empty environment too, counting its read of no
+            // environment pointers as a failed one.
+            Err(err)
+                if err.raw_os_error() == Some(libc::ENOMEM)
+                    && environment_count(pid).is_ok_and(|count| count == 0) =>
+            {
+                return Ok(Vec::new());
+            }
+            Err(err) => return Err(err),
+        };
+        let mut buf = vec![0; size];
         match sysctl(&mut mib, Some(&mut buf)) {
             Ok(len) => {
                 buf.truncate(len);
@@ -68,6 +76,32 @@ fn environment(pid: u32) -> io::Result<Vec<u8>> {
             Err(err) => return Err(err),
         }
     }
+}
+
+/// How many entries the environment of process `pid` had at exec: the `AT_ENVC` entry of its
+/// auxiliary vector.
+#[cfg(target_os = "freebsd")]
+fn environment_count(pid: libc::pid_t) -> io::Result<libc::c_long> {
+    /// `sys/elf_common.h`'s number for the entry, which the libc crate does not spell.
+    const AT_ENVC: libc::c_long = 30;
+    const WORD: usize = size_of::<libc::c_long>();
+    let mut mib = [libc::CTL_KERN, libc::KERN_PROC, libc::KERN_PROC_AUXV, pid];
+    let mut auxv = vec![0; sysctl(&mut mib, None)?];
+    let len = sysctl(&mut mib, Some(&mut auxv))?;
+    let word = |bytes: &[u8]| bytes.try_into().map(libc::c_long::from_ne_bytes).ok();
+    auxv.get(..len)
+        .unwrap_or_default()
+        .chunks_exact(2 * WORD)
+        .find_map(|entry| {
+            let (kind, value) = entry.split_at(WORD);
+            (word(kind)? == AT_ENVC).then(|| word(value)).flatten()
+        })
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "the auxiliary vector has no AT_ENVC",
+            )
+        })
 }
 
 #[cfg(target_os = "macos")]
