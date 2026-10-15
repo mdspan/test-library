@@ -8,6 +8,7 @@
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::fs::OpenOptions;
+use std::io::Read;
 use std::mem::offset_of;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
@@ -193,15 +194,27 @@ impl Member {
     fn with(shared_file: Option<&OsStr>) -> Self {
         let program = MEMBER.get_or_init(|| compile("member", &[]));
         let mut command = Command::new(program);
-        command.env_clear().stdout(Stdio::null());
+        command.env_clear().stdout(Stdio::piped());
         if let Some(path) = shared_file {
             command.env(common::config::ENV_SHARED_FILE, path);
         }
-        Self(
-            command
-                .spawn()
-                .expect("a process to read the environment of"),
-        )
+        let mut child = command
+            .spawn()
+            .expect("a process to read the environment of");
+        // `spawn` can return before exec has placed the environment, which reads as empty until
+        // then; the member's "up" comes after.
+        let mut line = [0; 3];
+        let reported = child
+            .stdout
+            .as_mut()
+            .expect("the member's stdout is piped")
+            .read_exact(&mut line);
+        assert!(
+            reported.is_ok() && line == *b"up\n",
+            "the member did not report in: {reported:?}, {line:?}, {:?}",
+            child.wait()
+        );
+        Self(child)
     }
 
     pub(crate) fn pid(&self) -> u32 {
