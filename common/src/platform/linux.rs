@@ -512,9 +512,10 @@ pub unsafe fn genuine_clock_settime(
 /// Makes the genuine one-shot offset adjustment, libc's convention, for a process this library is
 /// not faking.
 ///
-/// Linux has no `adjtime` system call: every libc on it builds the function out of one `adjtimex`
-/// with `ADJ_OFFSET_SINGLESHOT`, whose answer carries the adjustment that was pending before. This
-/// is that, in microseconds, which is the unit the field speaks for a one-shot offset.
+/// Linux has no `adjtime` system call, so this is glibc's construction of it: one `adjtimex` with
+/// `ADJ_OFFSET_SINGLESHOT` for a delta, or `ADJ_OFFSET_SS_READ` for none, which reads the one-shot
+/// adjustment without privilege and sets nothing. Either way the answer carries the adjustment
+/// that was pending before, in microseconds.
 ///
 /// # Safety
 /// `delta` must be null or valid for reads of a `timeval`, and `olddelta` null or valid for writes
@@ -524,9 +525,9 @@ pub unsafe fn genuine_adjtime(
     delta: *const libc::timeval,
     olddelta: *mut libc::timeval,
 ) -> libc::c_int {
-    // Safety: `timex` is a plain-old-data struct, so an all-zero value is a valid one, and zero
-    // modes is the query the kernel makes of it when nothing is being set.
+    // Safety: `timex` is a plain-old-data struct, so an all-zero value is a valid one.
     let mut request: libc::timex = unsafe { std::mem::zeroed() };
+    request.modes = libc::ADJ_OFFSET_SS_READ;
     if !delta.is_null() {
         // Safety: `delta` is non-null, so the caller's guarantee makes it valid for this read.
         let asked = unsafe { &*delta };
@@ -810,6 +811,26 @@ mod tests {
         assert_eq!(
             io::Error::last_os_error().raw_os_error(),
             Some(libc::EINVAL)
+        );
+    }
+
+    #[cfg(target_env = "gnu")]
+    #[test]
+    fn a_null_delta_reads_the_adjustment_still_under_way_as_glibc_does() {
+        let unset = libc::timeval {
+            tv_sec: -1,
+            tv_usec: -1,
+        };
+        let (mut ours, mut glibc) = (unset, unset);
+        // Safety: a null delta sets nothing, and each answer goes to a live `timeval`.
+        let answered = unsafe { genuine_adjtime(std::ptr::null(), &raw mut ours) };
+        // Safety: as above, through glibc's own `adjtime`, which this test binary is not faking.
+        let wanted = unsafe { libc::adjtime(std::ptr::null(), &raw mut glibc) };
+        assert_eq!((answered, wanted), (0, 0));
+        assert_eq!(
+            (ours.tv_sec, ours.tv_usec),
+            (glibc.tv_sec, glibc.tv_usec),
+            "a null delta reported something other than the one-shot adjustment still under way"
         );
     }
 
