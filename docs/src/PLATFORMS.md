@@ -86,7 +86,9 @@ their own. See
 - Both glibc and musl work.
 - Setting the clock from a faked program needs the `CAP_SYS_TIME`
   capability, the same as setting the real clock; see
-  [Setting the Time](COVERAGE.md#setting-the-time).
+  [Setting the Time](COVERAGE.md#setting-the-time). The capabilities a
+  user namespace hands out, under `unshare -r` or in a rootless container,
+  do not count, as they do not for the real clock.
 
 ## macOS
 
@@ -131,8 +133,9 @@ clock there.
 
 ## FreeBSD
 
-- Setting the clock from a faked program needs root, the same as setting
-  the real clock.
+- Setting the clock from a faked program needs the privilege setting the
+  real clock needs: root outside a jail, root in a jail made with
+  `allow.settime`, or a user a MAC policy such as `mac_ntpd` grants it to.
 - The two columns in [Which Clock Is in Which Family](CLOCKS.md#which-clock-is-in-which-family)
   matter: FreeBSD 15 moved `CLOCK_MONOTONIC` into Boottime.
 - `clock` and `times` answer in a 32-bit `clock_t` at 128 ticks a second,

@@ -2,6 +2,7 @@
 //! back what the target printed.
 
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, Output, Stdio};
@@ -401,6 +402,7 @@ pub(crate) struct Run {
     session_dir: Option<PathBuf>,
     current_dir: Option<PathBuf>,
     through: Vec<String>,
+    env_after_wrapper: bool,
     patience: Option<Duration>,
 }
 
@@ -415,6 +417,7 @@ impl Run {
             session_dir: None,
             current_dir: None,
             through: Vec::new(),
+            env_after_wrapper: false,
             patience: None,
         }
     }
@@ -468,6 +471,15 @@ impl Run {
         self
     }
 
+    /// The same, through a command that runs the target with an environment of its own, `sudo`
+    /// for one. The target's environment goes after the wrapper instead, as the arguments of an
+    /// `env -i` that execs the target, so the target is the first process under the library.
+    pub(crate) fn through_resetting(mut self, wrapper: &[String]) -> Self {
+        self.through = wrapper.to_vec();
+        self.env_after_wrapper = true;
+        self
+    }
+
     /// Kills the target and fails the case once `patience` has passed with the target still
     /// running, for a case whose target would otherwise block the suite for good.
     pub(crate) const fn within(mut self, patience: Duration) -> Self {
@@ -494,36 +506,50 @@ impl Run {
 
     /// The same, handing back whatever the target did, for a case where exiting is the point.
     pub(crate) fn run_unchecked(self) -> Report {
-        let mut command = match self.through.split_first() {
-            Some((wrapper, rest)) => {
-                let mut command = Command::new(wrapper);
-                command.args(rest).arg(&self.program);
-                command
-            }
-            None => Command::new(&self.program),
-        };
-        command
-            .args(&self.args)
-            .env_clear()
-            .env("PATH", "/usr/bin:/bin");
+        let mut env: Vec<(OsString, OsString)> = vec![("PATH".into(), "/usr/bin:/bin".into())];
         if self.preload {
             let library = self.library.clone().unwrap_or_else(library);
-            command.env(PRELOAD, library);
+            env.push((PRELOAD.into(), library.into()));
         }
         if let Some(dir) = &self.session_dir {
-            command.env("LIBTIMEWARP_SESSION_DIR", dir);
-        }
-        if let Some(dir) = &self.current_dir {
-            command.current_dir(dir);
+            env.push(("LIBTIMEWARP_SESSION_DIR".into(), dir.into()));
         }
         for (name, value) in &self.env {
-            command.env(name, value);
+            env.push((name.into(), value.into()));
         }
         // A profiling CI row asks every Go target to sample itself, which drives SIGPROF through
         // the shim's reentrancy guard. Forwarded here because the run is otherwise hermetic; a
         // target that does not read it ignores it.
         if let Some(on) = std::env::var_os("TIMEWARP_TEST_GO_PROFILE") {
-            command.env("TIMEWARP_TEST_GO_PROFILE", on);
+            env.push(("TIMEWARP_TEST_GO_PROFILE".into(), on));
+        }
+
+        let mut command = match self.through.split_first() {
+            Some((wrapper, rest)) => {
+                let mut command = Command::new(wrapper);
+                command.args(rest);
+                if self.env_after_wrapper {
+                    command.args(["/usr/bin/env", "-i"]);
+                    command.args(env.iter().map(|(name, value)| {
+                        let mut assignment = name.clone();
+                        assignment.push("=");
+                        assignment.push(value);
+                        assignment
+                    }));
+                }
+                command.arg(&self.program);
+                command
+            }
+            None => Command::new(&self.program),
+        };
+        command.args(&self.args).env_clear();
+        if self.env_after_wrapper {
+            command.env("PATH", "/usr/bin:/bin");
+        } else {
+            command.envs(env);
+        }
+        if let Some(dir) = &self.current_dir {
+            command.current_dir(dir);
         }
 
         let before = genuine_now();

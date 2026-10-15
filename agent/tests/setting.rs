@@ -1,6 +1,14 @@
 //! A target that sets the time: the clock moves for every process of the session, and a program
 //! that probes for privilege by calling a setter sees exactly what it would have seen without us.
 //!
+//! A case runs its target with or without the privilege the kernel asks for, and no target may
+//! ever move the machine's clock. A privileged target runs behind a guard that refuses every
+//! genuine set: on Linux a seccomp filter around this process's own privilege or `CAP_SYS_TIME`
+//! that `sudo` hands over, and on macOS a sandbox around root. FreeBSD has no such guard, so a
+//! target there never holds the privilege, and a process that does runs its targets in a jail.
+//! Where a case cannot have the target it wants it says so on stderr and checks the refusal, and
+//! `TIMEWARP_TEST_SETTERS=require` makes that a failure instead.
+//!
 #![expect(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -17,8 +25,8 @@
 mod harness;
 
 use std::path::Path;
-#[cfg(target_os = "linux")]
 use std::process::{Command, Stdio};
+use std::sync::OnceLock;
 
 use common::hook::{Func, Kind};
 use common::platform::{clock, genuine_nanos, may_set_the_clock};
@@ -46,42 +54,365 @@ const ARENA: u64 = 4096;
 const SETTER_ENTRY: usize = 4;
 const DECLINED_ENTRY: usize = 3;
 
-/// A command that execs the target with the privilege the kernel asks for before it lets a process
-/// set the clock, or `None` when this machine will not hand it out.
+/// What a case runs its target under: the command that execs it, if any, and what that hands the
+/// target.
 ///
-/// On Linux that is `CAP_SYS_TIME` rather than root, and an ordinary user holds every capability
-/// inside a user namespace of their own; a machine with unprivileged user namespaces turned off,
-/// running as a user who holds nothing, leaves the privileged half of these cases without a way in.
-/// FreeBSD gates the call on effective uid 0, which no wrapper can grant, so there a run that is
-/// not already root checks the refusal instead.
-fn with_the_capability() -> Option<Vec<String>> {
-    if may_set_the_clock() {
-        return Some(Vec::new());
-    }
-    #[cfg(target_os = "linux")]
-    {
-        let works = Command::new("unshare")
-            .args(["-U", "-r", "true"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .is_ok_and(|status| status.success());
-        works.then(|| ["unshare", "-U", "-r"].map(str::to_owned).to_vec())
-    }
-    #[cfg(not(target_os = "linux"))]
-    None
+/// No target here may set the machine's clock, even where the library under test fails to take a
+/// setter over. A target the kernel lets set the clock therefore runs behind a guard that refuses
+/// every genuine set before the kernel looks at it, and is used only once a check made through the
+/// same command has seen that guard refuse.
+#[derive(Debug, Clone)]
+struct Target {
+    /// The command and its arguments, which the target's own command line follows.
+    wrapper: Vec<String>,
+    /// Whether the command runs what it execs with an environment of its own, `sudo` for one, so
+    /// the target's environment has to follow the command as arguments.
+    resets_env: bool,
+    /// Whether the kernel lets the target set the clock.
+    privileged: bool,
+    /// Whether the target runs as another user, whose session files this process cannot read.
+    other_user: bool,
 }
 
-/// The same, with a line saying what a machine that will not hand the capability out leaves
-/// unexercised.
-fn capability_or_note(what: &str) -> Vec<String> {
-    with_the_capability().unwrap_or_else(|| {
-        eprintln!(
-            "this machine grants no CAP_SYS_TIME and no user namespace to take it in, so {what} \
-             runs as an unprivileged process and checks the refusal instead"
-        );
-        Vec::new()
-    })
+impl Target {
+    /// The target run as it is, holding whatever this process holds.
+    const fn direct(privileged: bool) -> Self {
+        Self {
+            wrapper: Vec::new(),
+            resets_env: false,
+            privileged,
+            other_user: false,
+        }
+    }
+
+    /// One run of `prog` under this target, its sessions landing in `dir`.
+    fn run(&self, prog: &str, dir: &SessionDir) -> Run {
+        let run = Run::prog(prog).session_dir(dir.path());
+        if self.resets_env {
+            run.through_resetting(&self.wrapper)
+        } else {
+            run.through(&self.wrapper)
+        }
+    }
+}
+
+/// The directory a case's sessions land in. A target running as another user leaves files there
+/// that only that user can remove, and `sudo` removes them with the directory.
+struct SessionDir {
+    dir: tempfile::TempDir,
+    other_user: bool,
+}
+
+impl SessionDir {
+    fn for_target(target: &Target) -> Self {
+        Self {
+            dir: tempfile::tempdir().unwrap(),
+            other_user: target.other_user,
+        }
+    }
+
+    fn path(&self) -> &Path {
+        self.dir.path()
+    }
+}
+
+impl Drop for SessionDir {
+    fn drop(&mut self) {
+        if self.other_user {
+            let _removed = Command::new("sudo")
+                .args(["-n", "rm", "-rf", "--"])
+                .arg(self.dir.path().join("libtimewarp"))
+                .stdin(Stdio::null())
+                .status();
+        }
+    }
+}
+
+/// The variable that makes a case fail rather than fall back when this machine cannot give its
+/// target what the case wants. CI sets it to `require` on the machines that can.
+const STRICT: &str = "TIMEWARP_TEST_SETTERS";
+
+/// Whether this platform has a guard that lets a target hold the privilege at all; see
+/// [`guarded_privilege`].
+const GUARD_EXISTS: bool = !cfg!(target_os = "freebsd");
+
+/// Says that a case runs `what` as an unprivileged process, because `why`, or fails the case where
+/// that was not to be allowed.
+fn fall_back(why: &str, what: &str) {
+    let message =
+        format!("{why}, so {what} runs as an unprivileged process and checks the refusal");
+    assert!(
+        !GUARD_EXISTS || std::env::var(STRICT).as_deref() != Ok("require"),
+        "{message}; {STRICT}=require forbids that"
+    );
+    eprintln!("{message}");
+}
+
+/// Whether `command` runs and succeeds, which is how a wrapper is checked before a case uses it.
+fn runs(command: &[&str]) -> bool {
+    let Some((program, args)) = command.split_first() else {
+        return false;
+    };
+    Command::new(program)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+fn owned(command: &[&str]) -> Vec<String> {
+    command.iter().map(|&part| part.to_owned()).collect()
+}
+
+/// A target the kernel lets set the clock, behind a guard, or why this machine has none.
+fn privileged() -> Result<&'static Target, &'static str> {
+    static FOUND: OnceLock<Result<Target, String>> = OnceLock::new();
+    FOUND
+        .get_or_init(|| {
+            let target = guarded_privilege()?;
+            let check = Run::prog("guard_check").without_library();
+            let check = if target.resets_env {
+                check.through_resetting(&target.wrapper)
+            } else {
+                check.through(&target.wrapper)
+            };
+            let report = check.run_unchecked();
+            if !report.status.success() || !report.has("guarded") {
+                return Err(format!(
+                    "`{}` could not run the guard check ({}: {})",
+                    target.wrapper.join(" "),
+                    report.status,
+                    report.stderr.trim()
+                ));
+            }
+            if report.nanos("privileged") != 1 {
+                return Err(format!(
+                    "`{}` hands the target no privilege to set the clock",
+                    target.wrapper.join(" ")
+                ));
+            }
+            if report.nanos("guarded") != 1 {
+                return Err(format!(
+                    "`{}` hands the target privilege without refusing the genuine sets",
+                    target.wrapper.join(" ")
+                ));
+            }
+            Ok(target)
+        })
+        .as_ref()
+        .map_err(String::as_str)
+}
+
+/// The command that would hand a target genuine privilege behind a guard, still to be checked.
+///
+/// On Linux the guard is `clock_guard`'s seccomp filter, and the privilege is this process's own
+/// or `CAP_SYS_TIME` that `sudo` and `setpriv` hand a target running as this same user. On macOS
+/// the guard is a sandbox that denies `system-set-time`, and the privilege is root, this
+/// process's own or `sudo`'s. FreeBSD has nothing that refuses a genuine set to a process the
+/// kernel lets set the clock, so a target there never holds the privilege.
+fn guarded_privilege() -> Result<Target, String> {
+    #[cfg(target_os = "linux")]
+    {
+        let guard = harness::program("clock_guard")
+            .to_string_lossy()
+            .into_owned();
+        if may_set_the_clock() {
+            return Ok(Target {
+                wrapper: vec![guard],
+                resets_env: false,
+                privileged: true,
+                other_user: false,
+            });
+        }
+        if !runs(&["sudo", "-n", "true"]) {
+            return Err("this process may not set the clock and `sudo -n` will not run".into());
+        }
+        // Safety: `getuid` reads process state and cannot fail.
+        let uid = unsafe { libc::getuid() };
+        // Safety: as above, for `getgid`.
+        let gid = unsafe { libc::getgid() };
+        let mut wrapper = owned(&["sudo", "-n", "setpriv"]);
+        wrapper.extend([format!("--reuid={uid}"), format!("--regid={gid}")]);
+        wrapper.extend(owned(&[
+            "--init-groups",
+            "--inh-caps=+sys_time",
+            "--ambient-caps=+sys_time",
+            "--",
+        ]));
+        wrapper.push(guard);
+        Ok(Target {
+            wrapper,
+            resets_env: true,
+            privileged: true,
+            other_user: false,
+        })
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let sandbox = [
+            "/usr/bin/sandbox-exec",
+            "-p",
+            "(version 1)(allow default)(deny system-set-time)",
+        ];
+        if may_set_the_clock() {
+            return Ok(Target {
+                wrapper: owned(&sandbox),
+                resets_env: true,
+                privileged: true,
+                other_user: false,
+            });
+        }
+        if !runs(&["sudo", "-n", "true"]) {
+            return Err("this process is not root and `sudo -n` will not run".into());
+        }
+        let mut wrapper = owned(&["sudo", "-n"]);
+        wrapper.extend(owned(&sandbox));
+        Ok(Target {
+            wrapper,
+            resets_env: true,
+            privileged: true,
+            other_user: true,
+        })
+    }
+    #[cfg(target_os = "freebsd")]
+    Err(
+        "FreeBSD has nothing that refuses a genuine set to a process the kernel lets set the clock"
+            .into(),
+    )
+}
+
+/// A target the kernel would not let set the clock, or why this machine has none: this process
+/// as it is where it holds no privilege, and otherwise what [`confined`] makes of it.
+fn unprivileged() -> Result<&'static Target, &'static str> {
+    static FOUND: OnceLock<Result<Target, String>> = OnceLock::new();
+    FOUND
+        .get_or_init(|| {
+            if may_set_the_clock() {
+                confined().cloned().map_err(str::to_owned)
+            } else {
+                Ok(Target::direct(false))
+            }
+        })
+        .as_ref()
+        .map_err(String::as_str)
+}
+
+/// A target running as root of a confinement the kernel does not let set the clock, or why this
+/// machine has none: a user namespace of its own on Linux, which hands it every capability inside
+/// and none the kernel checks a set against, and a jail on FreeBSD, whose root has no privilege to
+/// set the clock unless the jail is made with `allow.settime`. macOS has neither.
+fn confined() -> Result<&'static Target, &'static str> {
+    static FOUND: OnceLock<Result<Target, String>> = OnceLock::new();
+    FOUND
+        .get_or_init(|| {
+            #[cfg(target_os = "linux")]
+            let (wrapper, check, missing) = (
+                &["unshare", "-U", "-r"][..],
+                &["unshare", "-U", "-r", "true"][..],
+                "this machine will not make a user namespace for this user",
+            );
+            // A target's own search path is `/usr/bin:/bin`, which `jail` is not on.
+            #[cfg(target_os = "freebsd")]
+            let (wrapper, check, missing) = (
+                &["/usr/sbin/jail", "-c", "path=/", "command=/usr/bin/env"][..],
+                &["/usr/sbin/jail", "-c", "path=/", "command=/usr/bin/true"][..],
+                "this process may not make a jail",
+            );
+            #[cfg(target_os = "macos")]
+            let (wrapper, check, missing): (&[&str], &[&str], _) =
+                (&[], &[], "macOS has neither user namespaces nor jails");
+            if check.is_empty() || !runs(check) {
+                return Err(missing.to_owned());
+            }
+            Ok(Target {
+                wrapper: owned(wrapper),
+                resets_env: false,
+                privileged: false,
+                other_user: false,
+            })
+        })
+        .as_ref()
+        .map_err(String::as_str)
+}
+
+/// The privileged target, or the unprivileged one with a line saying what goes unexercised, or
+/// `None` with a line saying the case is not run at all.
+fn privileged_or_fall_back(what: &str) -> Option<&'static Target> {
+    match privileged() {
+        Ok(target) => Some(target),
+        Err(why) => {
+            fall_back(why, what);
+            unprivileged_or_skip(what)
+        }
+    }
+}
+
+/// The privileged target where this process can read the sessions it leaves, or the unprivileged
+/// one with a line saying what goes unexercised, or `None` with a line saying the case is not run.
+fn privileged_as_this_user_or_fall_back(what: &str) -> Option<&'static Target> {
+    match privileged() {
+        Ok(target) if !target.other_user => Some(target),
+        Ok(_) => {
+            eprintln!(
+                "the privileged target runs as another user, whose session this process cannot \
+                 read, so {what} runs as an unprivileged process and checks the refusal"
+            );
+            unprivileged_or_skip(what)
+        }
+        Err(why) => {
+            fall_back(why, what);
+            unprivileged_or_skip(what)
+        }
+    }
+}
+
+/// Either target, for a case whose answer does not turn on privilege, as long as this process can
+/// read the sessions it leaves; or `None` with a line saying the case is not run.
+fn any_target_as_this_user(what: &str) -> Option<&'static Target> {
+    let target = unprivileged()
+        .or_else(|_| privileged())
+        .ok()
+        .filter(|target| !target.other_user);
+    if target.is_none() {
+        eprintln!("no target here runs as this user, so {what} is not run");
+    }
+    target
+}
+
+/// The unprivileged target, or `None` with a line saying the case is not run.
+fn unprivileged_or_skip(what: &str) -> Option<&'static Target> {
+    unprivileged()
+        .inspect_err(|why| skip(&format!("this process may set the clock and {why}"), what))
+        .ok()
+}
+
+/// Says that a case is not run, because `why`, or fails it where that was not to be allowed.
+fn skip(why: &str, what: &str) {
+    let message = format!("{why}, so {what} is not run");
+    assert!(
+        std::env::var(STRICT).as_deref() != Ok("require"),
+        "{message}; {STRICT}=require forbids that"
+    );
+    eprintln!("{message}");
+}
+
+/// Every target this machine has, privileged and unprivileged.
+fn every_target() -> Vec<&'static Target> {
+    let mut targets = Vec::new();
+    match privileged() {
+        Ok(target) => targets.push(target),
+        Err(why) => fall_back(why, "the case that runs every kind of target"),
+    }
+    match unprivileged() {
+        Ok(target) => targets.push(target),
+        Err(why) => skip(
+            &format!("this process may set the clock and {why}"),
+            "the unprivileged half of the case that runs every kind of target",
+        ),
+    }
+    targets
 }
 
 /// Whether a run that reaches the platform's own setters may pass a null pointer to them.
@@ -93,17 +424,16 @@ fn capability_or_note(what: &str) -> Vec<String> {
 /// ours on all three, so every faked run makes them.
 const GENUINE_NULLS: bool = !cfg!(target_os = "macos");
 
-/// One run of the program that tries every setter, under whatever wrapper and environment a case
+/// One run of the program that tries every setter, under whatever target and environment a case
 /// wants. The library answers the calls that pass a null pointer, so a faked run makes them.
-fn setters(dir: &Path, wrapper: &[String], env: &[(&str, &str)]) -> Report {
-    run_setters(dir, wrapper, env, true)
+fn setters(target: &Target, dir: &SessionDir, env: &[(&str, &str)]) -> Report {
+    run_setters(target, dir, env, true)
 }
 
 /// The run itself, which decides whether the calls that pass a null pointer are made at all.
-fn run_setters(dir: &Path, wrapper: &[String], env: &[(&str, &str)], nulls: bool) -> Report {
-    let mut run = Run::prog("setters")
-        .session_dir(dir)
-        .through(wrapper)
+fn run_setters(target: &Target, dir: &SessionDir, env: &[(&str, &str)], nulls: bool) -> Report {
+    let mut run = target
+        .run("setters", dir)
         .arg(TARGET.to_string())
         .arg(if nulls { "nulls" } else { "nonulls" });
     for (name, value) in env {
@@ -287,37 +617,40 @@ fn assert_passed_through(report: &Report) {
 
 #[test]
 fn a_clock_the_kernel_cannot_set_is_refused_the_way_the_kernel_refuses_it() {
-    let dir = tempfile::tempdir().unwrap();
-    let report = setters(dir.path(), &[], &[]);
+    for target in every_target() {
+        let dir = SessionDir::for_target(target);
+        let report = setters(target, &dir, &[]);
 
-    assert_the_malformed_calls_are_refused(&report);
+        assert_eq!(allowed(&report), target.privileged, "{target:?}");
+        assert_the_malformed_calls_are_refused(&report);
+    }
 }
 
 #[test]
 fn a_set_of_a_clock_no_family_holds_reaches_the_kernel() {
-    let dir = tempfile::tempdir().unwrap();
-    let report = setters(dir.path(), &[], &[]);
+    for target in every_target() {
+        let dir = SessionDir::for_target(target);
+        let report = setters(target, &dir, &[]);
 
-    assert_passed_through(&report);
-    assert_the_machine_is_untouched(&report);
+        assert_passed_through(&report);
+        assert_the_machine_is_untouched(&report);
+    }
 }
 
 #[test]
 fn an_excluded_command_reaches_the_genuine_setters() {
-    if may_set_the_clock() {
-        eprintln!(
-            "this process could genuinely set the machine's clock, so the case that lets a setter \
-             through to the kernel is not run"
-        );
+    let Some(target) = unprivileged_or_skip("the case that lets a setter through to the kernel")
+    else {
         return;
-    }
-    let dir = tempfile::tempdir().unwrap();
+    };
+    let dir = SessionDir::for_target(target);
     // A command on the skip list never touches a session, so every setter it makes is the
-    // platform's own and answers exactly what it would have without us.
+    // platform's own and answers exactly what it would have without us. The commands that confine
+    // a target are on it too, so none of them makes a session for the target to join.
     let report = run_setters(
-        dir.path(),
-        &[],
-        &[("LIBTIMEWARP_SKIP_CMDS", "setters,curl")],
+        target,
+        &dir,
+        &[("LIBTIMEWARP_SKIP_CMDS", "setters,curl,unshare,jail,env")],
         GENUINE_NULLS,
     );
 
@@ -335,42 +668,81 @@ fn an_excluded_command_reaches_the_genuine_setters() {
 
 #[test]
 fn a_setter_succeeds_exactly_where_the_kernel_would_have_let_this_process_set_the_clock() {
-    let dir = tempfile::tempdir().unwrap();
-    let report = setters(dir.path(), &[], &[]);
+    for target in every_target() {
+        let dir = SessionDir::for_target(target);
+        let report = setters(target, &dir, &[]);
 
-    assert_eq!(
-        allowed(&report),
-        may_set_the_clock(),
-        "the target answered a privilege this process does not have, or refused one it does"
-    );
-    assert_the_malformed_calls_are_refused(&report);
-    assert_the_machine_is_untouched(&report);
+        assert_eq!(
+            allowed(&report),
+            target.privileged,
+            "the target answered a privilege the kernel does not grant it, or refused one it does: \
+             {target:?}"
+        );
+        assert_the_malformed_calls_are_refused(&report);
+        assert_the_machine_is_untouched(&report);
+        if target.privileged {
+            assert_the_clock_followed_every_setter(&report);
+        } else {
+            assert_refused_and_unmoved(&report);
+        }
+    }
+}
 
-    if allowed(&report) {
-        assert_the_clock_followed_every_setter(&report);
-    } else {
-        for tag in ["clock_settime", "adjtime", "settimeofday"] {
-            assert_refused(&report, tag, libc::EPERM);
-        }
-        // And a refused setter moves nothing: every reading is the genuine clock.
-        for key in ["before", "after_clock_settime", "after_adjtime"] {
-            assert_near(key, report.nanos(key), report.before);
-        }
+/// The three setters that land for a privileged target, each refused with `EPERM`, and nothing
+/// moved: every reading is the genuine clock.
+fn assert_refused_and_unmoved(report: &Report) {
+    for tag in ["probe", "clock_settime", "adjtime", "settimeofday"] {
+        assert_refused(report, tag, libc::EPERM);
+    }
+    for key in [
+        "before",
+        "after_clock_settime",
+        "after_adjtime",
+        "after_settimeofday",
+    ] {
+        assert_near(key, report.nanos(key), report.before);
     }
 }
 
 #[test]
 fn a_target_with_the_capability_moves_the_clock_the_way_it_asked() {
-    let wrapper = capability_or_note("the setters that land");
-    let dir = tempfile::tempdir().unwrap();
-    let report = setters(dir.path(), &wrapper, &[]);
+    let Some(target) = privileged_or_fall_back("the setters that land") else {
+        return;
+    };
+    let dir = SessionDir::for_target(target);
+    let report = setters(target, &dir, &[]);
 
+    assert_eq!(allowed(&report), target.privileged, "{target:?}");
     assert_the_machine_is_untouched(&report);
-    if allowed(&report) {
+    if target.privileged {
         assert_the_clock_followed_every_setter(&report);
     } else {
-        assert_refused(&report, "clock_settime", libc::EPERM);
+        assert_refused_and_unmoved(&report);
     }
+}
+
+#[test]
+fn root_of_a_user_namespace_or_a_jail_of_its_own_may_not_set_the_clock() {
+    let target = match confined() {
+        Ok(target) => target,
+        Err(why) if cfg!(target_os = "macos") => {
+            eprintln!("{why}, so the case that confines a target is not run");
+            return;
+        }
+        Err(why) => {
+            skip(why, "the case that confines a target");
+            return;
+        }
+    };
+    let dir = SessionDir::for_target(target);
+    let report = setters(target, &dir, &[]);
+
+    // Every capability inside a user namespace, or root inside a jail, and still no privilege the
+    // kernel would let set the clock: the library hears the kernel's answer and refuses.
+    assert_refused_and_unmoved(&report);
+    assert_the_malformed_calls_are_refused(&report);
+    assert_passed_through(&report);
+    assert_the_machine_is_untouched(&report);
 }
 
 /// The three setters that land, each read back afterwards: an absolute set, a shift by a delta
@@ -403,14 +775,20 @@ fn assert_the_clock_followed_every_setter(report: &Report) {
 
 #[test]
 fn two_processes_in_one_session_see_the_same_move() {
-    let wrapper = capability_or_note("one process watching another set the clock");
-    let dir = tempfile::tempdir().unwrap();
-    let report = Run::prog("settime_pair")
-        .session_dir(dir.path())
-        .through(&wrapper)
+    let Some(target) = privileged_or_fall_back("one process watching another set the clock") else {
+        return;
+    };
+    let dir = SessionDir::for_target(target);
+    let report = target
+        .run("settime_pair", &dir)
         .arg(TARGET.to_string())
         .run();
 
+    assert_eq!(
+        report.nanos("setter.result") == 0,
+        target.privileged,
+        "{target:?}"
+    );
     assert_the_machine_is_untouched(&report);
     // Before the set, the watching process reads the genuine wall clock, whichever way this goes.
     assert_near(
@@ -435,9 +813,13 @@ fn two_processes_in_one_session_see_the_same_move() {
 
 #[test]
 fn a_session_on_the_null_keeper_answers_as_an_unprivileged_process_would() {
-    let wrapper = capability_or_note("a null session refusing a process that holds the capability");
-    let dir = tempfile::tempdir().unwrap();
-    let report = setters(dir.path(), &wrapper, &[("LIBTIMEWARP_KEEPER", "null")]);
+    let Some(target) =
+        privileged_or_fall_back("a null session refusing a process that may set the clock")
+    else {
+        return;
+    };
+    let dir = SessionDir::for_target(target);
+    let report = setters(target, &dir, &[("LIBTIMEWARP_KEEPER", "null")]);
 
     // EPERM for the clock that can be set, EINVAL for the ones that cannot, whatever this process
     // actually holds: a session that fakes nothing may not move the machine's clock either.
@@ -494,10 +876,13 @@ fn entry_for(seen: &[Vec<i64>], func: Func, clock: libc::clockid_t) -> &[i64] {
 
 #[test]
 fn a_handled_setter_means_success_and_the_keeper_never_moves() {
-    let dir = tempfile::tempdir().unwrap();
+    let Some(target) = any_target_as_this_user("the case that reads a hook's log") else {
+        return;
+    };
+    let dir = SessionDir::for_target(target);
     let report = setters(
-        dir.path(),
-        &[],
+        target,
+        &dir,
         &[
             ("LIBTIMEWARP_HOOK", &hook_value("setter_log")),
             // A keeper with a setting of its own, so a value it moved would be recognisable.
@@ -527,7 +912,7 @@ fn a_handled_setter_means_success_and_the_keeper_never_moves() {
     // A clock the kernel will not read never reaches the hook, and neither does a call with no
     // instant to hand it: a malformed one, or a bare probe for privilege. Each is refused as it
     // would be without a hook, and one no family holds the way the kernel refuses it.
-    let privileged = may_set_the_clock();
+    let privileged = target.privileged;
     for tag in unread {
         assert_refused(&report, tag, malformed(PRIVILEGE_BEFORE_CLOCK, privileged));
     }
@@ -595,12 +980,16 @@ fn a_handled_setter_means_success_and_the_keeper_never_moves() {
 
 #[test]
 fn a_declined_setter_goes_to_the_keeper_and_never_to_the_genuine_function() {
-    let wrapper = capability_or_note("a declined setter that lands on the keeper");
-    let dir = tempfile::tempdir().unwrap();
+    let Some(target) =
+        privileged_as_this_user_or_fall_back("a declined setter that lands on the keeper")
+    else {
+        return;
+    };
+    let dir = SessionDir::for_target(target);
     // A hook that records every call it is handed and declines all of them.
     let report = setters(
-        dir.path(),
-        &wrapper,
+        target,
+        &dir,
         &[("LIBTIMEWARP_HOOK", &hook_value("clock_group"))],
     );
 
@@ -613,22 +1002,27 @@ fn a_declined_setter_goes_to_the_keeper_and_never_to_the_genuine_function() {
     }
 
     // And the keeper answered them, never the genuine function: the machine's own clock is where
-    // it was, and a process that holds the capability moved the session instead.
+    // it was, and a process that may set the clock moved the session instead.
+    assert_eq!(allowed(&report), target.privileged, "{target:?}");
     assert_the_machine_is_untouched(&report);
-    if allowed(&report) {
+    if target.privileged {
         assert_the_clock_followed_every_setter(&report);
     } else {
-        assert_refused(&report, "settimeofday", libc::EPERM);
+        assert_refused_and_unmoved(&report);
     }
 }
 
 #[test]
 fn a_declined_setter_reaches_the_null_keeper_too() {
-    let wrapper = capability_or_note("a null session refusing a setter the hook declined");
-    let dir = tempfile::tempdir().unwrap();
+    let Some(target) =
+        privileged_as_this_user_or_fall_back("a null session refusing a setter the hook declined")
+    else {
+        return;
+    };
+    let dir = SessionDir::for_target(target);
     let report = setters(
-        dir.path(),
-        &wrapper,
+        target,
+        &dir,
         &[
             ("LIBTIMEWARP_KEEPER", "null"),
             ("LIBTIMEWARP_HOOK", &hook_value("clock_group")),

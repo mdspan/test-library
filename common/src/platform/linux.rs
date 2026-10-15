@@ -573,30 +573,6 @@ pub unsafe fn genuine_adjtime(
 /// Microseconds in a second, the unit a one-shot `adjtimex` offset is counted in.
 const MICROS_PER_SECOND: i64 = 1_000_000;
 
-/// The `capget` layout that carries two 32-bit words per capability set, which every kernel we
-/// support speaks.
-const CAP_VERSION_3: u32 = 0x2008_0522;
-
-/// `CAP_SYS_TIME`, the capability the kernel checks before it lets a process set the clock. It sits
-/// in the low word of the effective set.
-const CAP_SYS_TIME: u32 = 25;
-
-/// What `capget` is asked: which layout, and whose capabilities. A pid of zero is the caller.
-#[repr(C)]
-struct CapHeader {
-    version: u32,
-    pid: libc::c_int,
-}
-
-/// One 32-bit slice of the three capability sets. [`CAP_VERSION_3`] carries two of these.
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-struct CapData {
-    effective: u32,
-    permitted: u32,
-    inheritable: u32,
-}
-
 /// The widest delta libc's own `adjtime` takes here before it refuses with `EINVAL`, in seconds.
 ///
 /// Linux has no `adjtime` system call, so libc folds the delta into the microseconds field of a
@@ -622,37 +598,18 @@ pub const ADJTIME_NULL_ASKS: bool = true;
 /// The units `clock` answers in: the million `CLOCKS_PER_SEC` names on an XSI system.
 pub const CLOCKS_PER_SEC: i64 = 1_000_000;
 
-/// Whether the kernel would let this process set the clock: `CAP_SYS_TIME` in its effective set.
+/// Whether the kernel would let this process set the clock, which only the kernel can answer.
 ///
-/// The effective set rather than the uid, because root in a container often lacks the capability
-/// and a process without root can hold it. Asked of the kernel directly, so a `/proc` that is not
-/// mounted cannot change the answer.
+/// `settimeofday` with neither a time nor a timezone runs the privilege check a set of the wall
+/// clock runs, `CAP_SYS_TIME` in the initial user namespace and every security module's settime
+/// hook, and with nothing to set it stops there. So a capability held in a user namespace of the
+/// process's own is no privilege, as it is none to the kernel, and a seccomp filter that refuses
+/// the call refuses the set. Nothing is written to `errno`.
 #[must_use]
 pub fn may_set_the_clock() -> bool {
-    let mut header = CapHeader {
-        version: CAP_VERSION_3,
-        pid: 0,
-    };
-    let mut sets = [CapData::default(); 2];
-    // Safety: the header names the layout, and `sets` is as long as that layout writes.
-    let read = unsafe {
-        genuine_syscall(
-            libc::SYS_capget,
-            [
-                as_arg(&raw mut header),
-                as_arg(sets.as_mut_ptr()),
-                0,
-                0,
-                0,
-                0,
-            ],
-        )
-    };
-    if read != 0 {
-        return false;
-    }
-    sets.first()
-        .is_some_and(|low| low.effective & (1 << CAP_SYS_TIME) != 0)
+    // Safety: with both pointers null the kernel reads nothing and writes nothing.
+    let answer = unsafe { raw_syscall(libc::SYS_settimeofday, [0; SYSCALL_ARGS]) };
+    answer == 0
 }
 
 /// Takes the write lock on `fd`: an exclusive open-file-description lock on byte 0, blocking until
@@ -831,6 +788,24 @@ mod tests {
             (ours.tv_sec, ours.tv_usec),
             (glibc.tv_sec, glibc.tv_usec),
             "a null delta reported something other than the one-shot adjustment still under way"
+        );
+    }
+
+    #[test]
+    fn the_probe_agrees_with_the_capability_check_adjtimex_makes() {
+        // A tick adjustment the kernel calls absurd: refused for the capability before the value
+        // is looked at, and for the value after, so it sets nothing either way.
+        // Safety: `timex` is a plain-old-data struct, so an all-zero value is a valid one.
+        let mut absurd: libc::timex = unsafe { std::mem::zeroed() };
+        absurd.modes = libc::ADJ_TICK;
+        // Safety: `absurd` is a live `timex`, which is the whole of what this number reads.
+        let answer =
+            unsafe { raw_syscall(libc::SYS_adjtimex, [as_arg(&raw mut absurd), 0, 0, 0, 0, 0]) };
+        assert_ne!(answer, 0, "the kernel took a tick of zero");
+        assert_eq!(
+            may_set_the_clock(),
+            answer == -libc::c_long::from(libc::EINVAL),
+            "settimeofday and adjtimex disagree about CAP_SYS_TIME (adjtimex answered {answer})"
         );
     }
 

@@ -44,6 +44,11 @@ jobs:
       PLATFORM: linux ${{ matrix.arch }}
       # Named, so a Go case that cannot build its program fails rather than skipping.
       GO: go
+      # The cases that set the clock take CAP_SYS_TIME through passwordless sudo and setpriv, for a
+      # target that runs as this user behind a seccomp filter refusing every genuine set, and make
+      # a user namespace for one that holds every capability but that one. Set, so a case that
+      # cannot have its target fails rather than checking the refusal instead.
+      TIMEWARP_TEST_SETTERS: require
     steps:
       - uses: actions/checkout@v4
 
@@ -57,10 +62,10 @@ jobs:
         with:
           go-version: stable
 
-      # The cases that set the clock want CAP_SYS_TIME, which an ordinary user holds inside a user
-      # namespace of their own. Ubuntu 24.04 restricts unprivileged namespaces by default; without
-      # this those cases check the refusal and leave the move unexercised. Older images have no
-      # such knob, which the fallback covers.
+      # One case that sets the clock checks that root of a user namespace of its own, holding every
+      # capability there, may still not set it, which takes an ordinary user making a namespace.
+      # Ubuntu 24.04 restricts unprivileged namespaces by default; without this that case cannot
+      # run. Older images have no such knob, and need none.
       - name: Let an unprivileged user take a namespace of their own
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
 
@@ -202,6 +207,11 @@ jobs:
             other: aarch64-apple-darwin
     env:
       PLATFORM: macos ${{ matrix.arch }} ${{ matrix.release }}
+      # The cases that set the clock run a target as root through passwordless sudo, inside a
+      # sandbox that denies setting the time, which a check through the same command confirms
+      # before any case relies on it. Set, so a case that cannot have that target fails rather than
+      # checking the refusal instead.
+      TIMEWARP_TEST_SETTERS: require
     steps:
       - uses: actions/checkout@v4
 
@@ -404,6 +414,11 @@ jobs:
             fi
             # The pinned Go, named for the harness the way CC names the C compiler.
             export GO=/usr/local/go/bin/go
+            # The VM runs everything as root, and FreeBSD has nothing that would refuse a genuine
+            # set from a target holding root's privilege, so the cases that set the clock run their
+            # targets in a jail, whose root may not set it. Set, so a jail that cannot be made fails
+            # those cases rather than skipping them.
+            export TIMEWARP_TEST_SETTERS=require
             # A hardened kernel refuses a page writable and executable at once, which sends the
             # rewrite down its anonymous-page fallback.
             if [ -n "${{ matrix.allow_wx }}" ]; then

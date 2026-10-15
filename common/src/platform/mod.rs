@@ -12,7 +12,7 @@
 //! | `genuine_times` | Reads the genuine CPU times and elapsed ticks `times` reports, as [`Times`](crate::time::ticks::Times) counts 64 bits wide, or `None` with `errno` set. Never routed through a symbol we interpose. |
 //! | `genuine_getrusage` | Reads the genuine `rusage` of a target, libc's convention. Never routed through a symbol we interpose. |
 //! | `genuine_settimeofday`, `genuine_clock_settime`, `genuine_adjtime` | Set the genuine clock, libc's convention, for a process this library is not faking. |
-//! | `may_set_the_clock` | Whether the kernel would let this process set the clock genuinely. |
+//! | `may_set_the_clock` | Whether the kernel would let this process set the clock genuinely: asked of the kernel with a call it refuses for privilege first and sets nothing with on Linux and FreeBSD, effective uid 0 on macOS. Leaves `errno` alone. |
 //! | `SET_ORDER` | The order the kernel makes the four checks of a set of the clock in. |
 //! | `ADJTIME_NULL_ASKS` | Whether `adjtime` with no delta is a question that needs no privilege. |
 //! | `ADJTIME_SECONDS` | The widest delta the platform's own `adjtime` takes before it refuses. |

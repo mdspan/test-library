@@ -570,13 +570,34 @@ pub const ADJTIME_NULL_ASKS: bool = true;
 /// than at the million an XSI system names, and which libc's own `clock` counts in.
 pub const CLOCKS_PER_SEC: i64 = 128;
 
-/// Whether the kernel would let this process set the clock: an effective uid of 0 here, since
-/// FreeBSD gates the call on the superuser rather than on a capability.
+/// Whether the kernel would let this process set the clock, which only the kernel can answer.
+///
+/// `clock_settime` asks for `PRIV_CLOCK_SETTIME` before it looks at the clock or the value, so a
+/// set of a clock that cannot be set, to a value no clock can hold, is `EPERM` without the
+/// privilege and `EINVAL` with it, and changes nothing either way. That is the answer a jail
+/// gives its root, which has the privilege only under `allow.settime`, and a MAC policy gives a
+/// user it grants the privilege to. Nothing is written to `errno`.
 #[must_use]
 pub fn may_set_the_clock() -> bool {
-    // Safety: `geteuid` reads process state and cannot fail.
-    let euid = unsafe { libc::geteuid() };
-    euid == 0
+    let nowhere = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: -1,
+    };
+    // Safety: the kernel copies the `timespec` in and writes nothing back.
+    let answer = unsafe {
+        raw_syscall(
+            sys::CLOCK_SETTIME,
+            [
+                libc::c_long::from(clock::MONOTONIC),
+                as_arg(&raw const nowhere),
+                0,
+                0,
+                0,
+                0,
+            ],
+        )
+    };
+    answer.refused && answer.value == libc::c_long::from(libc::EINVAL)
 }
 
 /// Takes the write lock on `fd`: an exclusive `flock` over the whole file, blocking until the
@@ -752,13 +773,15 @@ mod tests {
     }
 
     #[test]
-    fn only_the_superuser_may_set_the_clock() {
-        // Safety: `geteuid` reads process state and cannot fail.
-        let euid = unsafe { libc::geteuid() };
+    fn the_probe_agrees_with_a_bare_settimeofday() {
+        // A `settimeofday` with neither a time nor a timezone is a privilege check and nothing
+        // more, made under the name that call asks for the privilege by.
+        // Safety: with both pointers null the kernel reads nothing and writes nothing.
+        let bare = unsafe { raw_syscall(sys::SETTIMEOFDAY, [0; SYSCALL_ARGS]) };
         assert_eq!(
             may_set_the_clock(),
-            euid == 0,
-            "the clock is the superuser's to set here, and nobody else's"
+            !bare.refused,
+            "clock_settime and settimeofday disagree about this process's privilege"
         );
     }
 

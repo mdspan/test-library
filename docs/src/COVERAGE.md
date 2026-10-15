@@ -123,13 +123,17 @@ the session's wall clock, for every program in it, and leave the system
 clock alone. `adjtime` applies its whole adjustment at once.
 
 The call succeeds only where the system would have let the program set the
-real clock: with the `CAP_SYS_TIME` capability on Linux, and as root on
-FreeBSD and macOS. Any other program gets `EPERM`, as it would without the
-library. `clock_settime` on any other clock of a family is refused. A clock
-that is never faked, such as a PTP card's, is set for real, exactly as it
-would be without the library: a program that has the device open for
-writing can set its clock, and setting another process's CPU clock fails
-with `EPERM`.
+real clock. On Linux and FreeBSD the library asks the system, with a call
+that changes nothing, rather than judging by what the program holds: the
+`CAP_SYS_TIME` capability counts on Linux only outside a user namespace, so
+root under `unshare -r` or in a rootless container gets `EPERM`, and root
+counts on FreeBSD only outside a jail, unless the jail was made with
+`allow.settime`. On macOS it takes root. Any other program gets `EPERM`, as
+it would without the library. `clock_settime` on any other clock of a
+family is refused. A clock that is never faked, such as a PTP card's, is
+set for real, exactly as it would be without the library: a program that
+has the device open for writing can set its clock, and setting another
+process's CPU clock fails with `EPERM`.
 
 A refused call gets the error the system would have given it. Where a call
 is wrong in more than one way, which error that is depends on the system:
