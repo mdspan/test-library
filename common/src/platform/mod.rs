@@ -9,7 +9,7 @@
 //! | `default_timebase` | The first clock in a family's column of the family table. FreeBSD answers from the running kernel, because the names crossed over at 15.0. |
 //! | `genuine_clock_gettime` | Reads a genuine clock into the caller's `timespec`, libc's convention. Async-signal-safe, and never routed through a symbol we interpose. |
 //! | `prime_genuine` | Settles, from the constructor, how `genuine_clock_gettime` reads: the kernel's vDSO on Linux, libc on FreeBSD. Nothing on macOS, where dyld settles it at load. |
-//! | `genuine_times` | Reads the genuine `tms` and the elapsed ticks `times` answers, libc's convention. Never routed through a symbol we interpose. |
+//! | `genuine_times` | Reads the genuine CPU times and elapsed ticks `times` reports, as [`Times`](crate::time::ticks::Times) counts 64 bits wide, or `None` with `errno` set. Never routed through a symbol we interpose. |
 //! | `genuine_getrusage` | Reads the genuine `rusage` of a target, libc's convention. Never routed through a symbol we interpose. |
 //! | `genuine_settimeofday`, `genuine_clock_settime`, `genuine_adjtime` | Set the genuine clock, libc's convention, for a process this library is not faking. |
 //! | `may_set_the_clock` | Whether the kernel would let this process set the clock genuinely. |
@@ -241,14 +241,14 @@ mod tests {
 
     #[test]
     fn the_genuine_process_times_and_usage_read() {
-        // Safety: `tms` is plain data, so an all-zero value is a valid one.
-        let mut tms: libc::tms = unsafe { std::mem::zeroed() };
-        // Safety: `tms` is a live, correctly typed buffer.
-        let elapsed = unsafe { genuine_times(&raw mut tms) };
-        assert!(elapsed > 0, "times answered {elapsed}");
-        // A null buffer is allowed, and answers the elapsed ticks all the same.
-        // Safety: `times` takes a null buffer and fills nothing for it.
-        assert!(unsafe { genuine_times(std::ptr::null_mut()) } >= elapsed);
+        let first = genuine_times().expect("times reads");
+        assert!(first.elapsed > 0, "times answered {first:?}");
+        let second = genuine_times().expect("times reads again");
+        assert!(
+            second.elapsed >= first.elapsed,
+            "{second:?} before {first:?}"
+        );
+        assert!(second.user >= first.user && second.system >= first.system);
 
         // Safety: `rusage` is plain data.
         let mut usage: libc::rusage = unsafe { std::mem::zeroed() };

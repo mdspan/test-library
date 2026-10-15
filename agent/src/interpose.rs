@@ -10,6 +10,7 @@ use common::platform::{
 };
 use common::session::{clock_now, cpu_scaled};
 use common::time::Nanos;
+use common::time::ticks;
 
 use crate::state;
 
@@ -200,42 +201,44 @@ pub(crate) fn clock() -> libc::clock_t {
     let Some(cpu) = reading(Func::Clock, clock::PROCESS_CPUTIME) else {
         return NO_TICKS;
     };
-    to_ticks(cpu, CLOCKS_PER_SEC)
+    ticks::narrow(ticks::of_nanos(cpu, CLOCKS_PER_SEC))
 }
 
 /// The process times: consumption in `buf`, which follows the Cpu family, and elapsed time since an
 /// arbitrary point as the answer, which is time passing and so follows Monotonic.
 ///
+/// Every count stays 64 bits wide until it is written out, where it narrows to `clock_t` the way
+/// libc's own `times` narrows it.
+///
 /// # Safety
 /// `buf` must be null or valid for writes of a `tms`.
 #[inline]
 pub(crate) unsafe fn times(buf: *mut libc::tms) -> libc::clock_t {
-    // The genuine call first: the fields it fills are what there is to scale, and nothing else
-    // knows what the children of this process have consumed.
-    // Safety: `buf` is the caller's, passed on unchanged.
-    let elapsed = unsafe { genuine_times(buf) };
-    if state::session().is_none() {
-        return elapsed;
-    }
-    let per_second = ticks_per_second();
-    if !buf.is_null() {
-        // Safety: `buf` is non-null, so the caller's guarantee makes it valid for this write, and
-        // the genuine call above has filled it.
-        let tms = unsafe { &mut *buf };
-        // The children's two fields are consumption as well, so they scale with the other two.
+    // The genuine reading first: its CPU times are what there is to scale, and nothing else knows
+    // what the children of this process have consumed.
+    let Some(mut read) = genuine_times() else {
+        return NO_TICKS;
+    };
+    if state::session().is_some() {
+        let per_second = ticks_per_second();
+        // The children's two times are consumption as well, so they scale with the other two.
         for field in [
-            &mut tms.tms_utime,
-            &mut tms.tms_stime,
-            &mut tms.tms_cutime,
-            &mut tms.tms_cstime,
+            &mut read.user,
+            &mut read.system,
+            &mut read.children_user,
+            &mut read.children_system,
         ] {
             *field = scaled_ticks(*field, per_second);
         }
+        if let Some(now) = faked(Func::Times, monotonic_timebase()) {
+            read.elapsed = ticks::of_nanos(now, per_second);
+        }
     }
-    if elapsed == NO_TICKS {
-        return elapsed;
+    if !buf.is_null() {
+        // Safety: `buf` is non-null, so the caller's guarantee makes it valid for this write.
+        unsafe { *buf = read.tms() };
     }
-    faked(Func::Times, monotonic_timebase()).map_or(elapsed, |now| to_ticks(now, per_second))
+    ticks::narrow(read.elapsed)
 }
 
 /// The resource usage of `who`, with the user and system times scaled by the Cpu family and every
@@ -272,13 +275,13 @@ const fn rusage_clock(who: libc::c_int) -> libc::clockid_t {
     }
 }
 
-/// One field of a `tms`, scaled by the Cpu family: ticks out to nanoseconds, through the hook and
-/// the keeper, and back to ticks.
+/// One of the CPU times `times` reports, scaled by the Cpu family: ticks out to nanoseconds,
+/// through the hook and the keeper, and back to ticks.
 #[inline]
-fn scaled_ticks(ticks: libc::clock_t, per_second: i64) -> libc::clock_t {
-    let genuine = from_ticks(ticks, per_second);
+fn scaled_ticks(count: i64, per_second: i64) -> i64 {
+    let genuine = from_ticks(count, per_second);
     faked_cpu(Func::Times, clock::PROCESS_CPUTIME, genuine)
-        .map_or(ticks, |faked| to_ticks(faked, per_second))
+        .map_or(count, |faked| ticks::of_nanos(faked, per_second))
 }
 
 /// How many ticks a second holds, in the units `times` counts in.
@@ -291,16 +294,9 @@ fn ticks_per_second() -> i64 {
     if ticks > 0 { ticks } else { 100 }
 }
 
-/// Nanoseconds as a count of ticks, truncated towards zero the way a tick count always is.
-#[inline]
-fn to_ticks(value: Nanos, per_second: i64) -> libc::clock_t {
-    let ticks = i128::from(value.0) * i128::from(per_second) / i128::from(Nanos::SECOND);
-    libc::clock_t::try_from(ticks).unwrap_or(NO_TICKS)
-}
-
 /// A count of ticks as nanoseconds.
 #[inline]
-fn from_ticks(ticks: libc::clock_t, per_second: i64) -> Nanos {
-    let nanos = i128::from(ticks) * i128::from(Nanos::SECOND) / i128::from(per_second.max(1));
+fn from_ticks(count: i64, per_second: i64) -> Nanos {
+    let nanos = i128::from(count) * i128::from(Nanos::SECOND) / i128::from(per_second.max(1));
     Nanos(i64::try_from(nanos).unwrap_or(i64::MAX))
 }

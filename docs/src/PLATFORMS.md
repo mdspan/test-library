@@ -135,3 +135,9 @@ clock there.
   the real clock.
 - The two columns in [Which Clock Is in Which Family](CLOCKS.md#which-clock-is-in-which-family)
   matter: FreeBSD 15 moved `CLOCK_MONOTONIC` into Boottime.
+- `clock` and `times` answer in a 32-bit `clock_t` at 128 ticks a second,
+  which runs out after about 194 days. Past that the count wraps to the most
+  negative value and goes on counting, the same as without the library. For
+  the elapsed count `times` returns, which follows the Monotonic family, that
+  is 194 days of faked time; for `clock` and the CPU times, 194 days of
+  faked CPU time.

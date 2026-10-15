@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::elf::Genuine;
 use crate::time::Family;
+use crate::time::ticks::Times;
 
 /// What the header's platform field carries for Linux.
 pub const OS_TAG: u32 = 1;
@@ -346,19 +347,30 @@ pub unsafe fn kernel_gettimeofday(tv: *mut libc::timeval, tz: *mut libc::c_void)
     unsafe { raw_syscall(libc::SYS_gettimeofday, [as_arg(tv), as_arg(tz), 0, 0, 0, 0]) }
 }
 
-/// Reads the genuine process times: the fields of `buf`, and the elapsed ticks `times(2)` answers,
-/// or -1 when the kernel refused. libc's convention, and `buf` may be null.
+/// Reads the genuine process times `times(2)` reports, or `None` with `errno` set when the kernel
+/// refuses. The kernel's `clock_t` is 64 bits here, as wide as the counts.
 ///
 /// Through the raw syscall, avoiding libc for the reason [`genuine_clock_gettime`] does: the agent
 /// exports `times`.
-///
-/// # Safety
-/// `buf` must be null or valid for writes of a `tms`.
+#[must_use]
 #[inline]
-pub unsafe fn genuine_times(buf: *mut libc::tms) -> libc::clock_t {
-    // Safety: the caller guarantees `buf`.
-    let result = unsafe { genuine_syscall(libc::SYS_times, [as_arg(buf), 0, 0, 0, 0, 0]) };
-    libc::clock_t::try_from(result).unwrap_or(-1)
+pub fn genuine_times() -> Option<Times> {
+    let mut tms = libc::tms {
+        tms_utime: 0,
+        tms_stime: 0,
+        tms_cutime: 0,
+        tms_cstime: 0,
+    };
+    // Safety: `tms` is a live, correctly typed buffer, which is all the kernel writes.
+    let elapsed =
+        unsafe { genuine_syscall(libc::SYS_times, [as_arg(&raw mut tms), 0, 0, 0, 0, 0]) };
+    (elapsed != -1).then_some(Times {
+        user: tms.tms_utime,
+        system: tms.tms_stime,
+        children_user: tms.tms_cutime,
+        children_system: tms.tms_cstime,
+        elapsed,
+    })
 }
 
 /// Reads the genuine resource usage of `who` into `usage`. libc's convention.

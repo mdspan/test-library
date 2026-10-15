@@ -4,6 +4,7 @@ use std::io;
 use std::sync::atomic::{AtomicI32, AtomicPtr, Ordering};
 
 use crate::time::Family;
+use crate::time::ticks::{self, Times};
 
 /// What the header's platform field carries for FreeBSD.
 pub const OS_TAG: u32 = 2;
@@ -424,62 +425,40 @@ pub unsafe fn genuine_clock_gettime(
 /// scaling done here and the scaling done above the seam agree.
 const TICKS_PER_SECOND: i64 = 128;
 
-/// A `timeval` of consumed CPU time as a count of ticks, the way libc's own `times` counts it.
-fn ticks_of(time: &libc::timeval) -> libc::clock_t {
-    let ticks = time
-        .tv_sec
-        .saturating_mul(TICKS_PER_SECOND)
-        .saturating_add(time.tv_usec / (1_000_000 / TICKS_PER_SECOND));
-    libc::clock_t::try_from(ticks).unwrap_or(libc::clock_t::MAX)
+/// The genuine resource usage of `who`, or `None` with `errno` set when the kernel refuses it.
+fn rusage(who: libc::c_int) -> Option<libc::rusage> {
+    // Safety: `rusage` is plain data, so an all-zero value is a valid one.
+    let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+    // Safety: `usage` is a live, correctly typed buffer.
+    (unsafe { genuine_getrusage(who, &raw mut usage) } == 0).then_some(usage)
 }
 
-/// Reads the genuine process times: the fields of `buf`, and the elapsed ticks `times(2)` answers,
-/// or -1 when the kernel refused. libc's convention, and `buf` may be null.
+/// Reads the genuine process times `times(3)` reports, or `None` with `errno` set when a call it
+/// is built from is refused.
 ///
 /// FreeBSD has no `times` system call. libc builds the function out of two `getrusage` calls and
-/// one clock read, and so does this, with `getrusage` through the raw call because the agent
-/// exports that name.
-///
-/// # Safety
-/// `buf` must be null or valid for writes of a `tms`.
+/// one read of `CLOCK_MONOTONIC`, and so does this, with `getrusage` through the raw call because
+/// the agent exports that name. The counts are libc's, before it narrows them to `clock_t`.
+#[must_use]
 #[inline]
-pub unsafe fn genuine_times(buf: *mut libc::tms) -> libc::clock_t {
-    if !buf.is_null() {
-        // Safety: `rusage` is plain data, so an all-zero value is a valid one.
-        let mut mine: libc::rusage = unsafe { std::mem::zeroed() };
-        // Safety: the same, for the children's usage.
-        let mut theirs: libc::rusage = unsafe { std::mem::zeroed() };
-        // Safety: `mine` is a live, correctly typed buffer.
-        if unsafe { genuine_getrusage(libc::RUSAGE_SELF, &raw mut mine) } != 0 {
-            return -1;
-        }
-        // Safety: `theirs` is a live, correctly typed buffer.
-        if unsafe { genuine_getrusage(libc::RUSAGE_CHILDREN, &raw mut theirs) } != 0 {
-            return -1;
-        }
-        // Safety: `buf` is non-null, so the caller's guarantee makes it valid for this write.
-        unsafe {
-            *buf = libc::tms {
-                tms_utime: ticks_of(&mine.ru_utime),
-                tms_stime: ticks_of(&mine.ru_stime),
-                tms_cutime: ticks_of(&theirs.ru_utime),
-                tms_cstime: ticks_of(&theirs.ru_stime),
-            };
-        }
-    }
-    let mut ts = libc::timespec {
+pub fn genuine_times() -> Option<Times> {
+    let mine = rusage(libc::RUSAGE_SELF)?;
+    let theirs = rusage(libc::RUSAGE_CHILDREN)?;
+    let mut now = libc::timespec {
         tv_sec: 0,
         tv_nsec: 0,
     };
-    // Safety: `ts` is a live, correctly typed buffer.
-    if unsafe { genuine_clock_gettime(clock::MONOTONIC, &raw mut ts) } != 0 {
-        return -1;
+    // Safety: `now` is a live, correctly typed buffer.
+    if unsafe { genuine_clock_gettime(clock::MONOTONIC, &raw mut now) } != 0 {
+        return None;
     }
-    let ticks = ts
-        .tv_sec
-        .saturating_mul(TICKS_PER_SECOND)
-        .saturating_add(ts.tv_nsec / (1_000_000_000 / TICKS_PER_SECOND));
-    libc::clock_t::try_from(ticks).unwrap_or(libc::clock_t::MAX)
+    Some(Times {
+        user: ticks::of_timeval(&mine.ru_utime, TICKS_PER_SECOND),
+        system: ticks::of_timeval(&mine.ru_stime, TICKS_PER_SECOND),
+        children_user: ticks::of_timeval(&theirs.ru_utime, TICKS_PER_SECOND),
+        children_system: ticks::of_timeval(&theirs.ru_stime, TICKS_PER_SECOND),
+        elapsed: ticks::of_timespec(&now, TICKS_PER_SECOND),
+    })
 }
 
 /// Reads the genuine resource usage of `who` into `usage`. libc's convention.
@@ -869,15 +848,55 @@ mod tests {
     }
 
     #[test]
-    fn the_process_times_come_out_of_the_calls_the_platform_has() {
-        // Safety: `tms` is plain data, so an all-zero value is a valid one.
-        let mut tms: libc::tms = unsafe { std::mem::zeroed() };
-        // Safety: `tms` is a live, correctly typed buffer.
-        let elapsed = unsafe { genuine_times(&raw mut tms) };
-        assert!(elapsed > 0, "times answered {elapsed}");
-        assert!(tms.tms_utime >= 0 && tms.tms_stime >= 0);
-        // A null buffer is allowed, and answers the elapsed ticks all the same.
-        // Safety: a null buffer leaves the fields unwritten.
-        assert!(unsafe { genuine_times(std::ptr::null_mut()) } >= elapsed);
+    fn the_process_times_are_the_ones_libc_answers() {
+        let empty = libc::tms {
+            tms_utime: 0,
+            tms_stime: 0,
+            tms_cutime: 0,
+            tms_cstime: 0,
+        };
+        let (mut before, mut after) = (empty, empty);
+        // Safety: the buffer is a live, correctly typed `tms`.
+        let elapsed_before = unsafe { libc::times(&raw mut before) };
+        let read = genuine_times().expect("the calls times is built from answer");
+        // Safety: as above.
+        let elapsed_after = unsafe { libc::times(&raw mut after) };
+        let elapsed = ticks::narrow::<libc::clock_t>(read.elapsed);
+        assert!(
+            (elapsed_before..=elapsed_after).contains(&elapsed),
+            "elapsed {elapsed}, outside {elapsed_before}..={elapsed_after}"
+        );
+        let tms = read.tms();
+        for (field, low, mid, high) in [
+            (
+                "tms_utime",
+                before.tms_utime,
+                tms.tms_utime,
+                after.tms_utime,
+            ),
+            (
+                "tms_stime",
+                before.tms_stime,
+                tms.tms_stime,
+                after.tms_stime,
+            ),
+            (
+                "tms_cutime",
+                before.tms_cutime,
+                tms.tms_cutime,
+                after.tms_cutime,
+            ),
+            (
+                "tms_cstime",
+                before.tms_cstime,
+                tms.tms_cstime,
+                after.tms_cstime,
+            ),
+        ] {
+            assert!(
+                (low..=high).contains(&mid),
+                "{field} {mid}, outside {low}..={high}"
+            );
+        }
     }
 }

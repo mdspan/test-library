@@ -4,6 +4,7 @@ mod family;
 mod keeper;
 mod nanos;
 mod rate;
+pub mod ticks;
 
 pub use family::Family;
 pub use keeper::Line;

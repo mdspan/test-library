@@ -4,6 +4,7 @@ use std::ffi::c_void;
 use std::io;
 use std::ptr;
 
+use crate::time::ticks::{self, Times};
 use crate::time::{Family, Nanos};
 
 /// What the header's platform field carries for macOS.
@@ -150,9 +151,6 @@ struct TimebaseInfo {
 /// The ticks a second holds in what `times` answers: `CLK_TCK` in libSystem's headers.
 const CLK_TCK: i64 = 100;
 
-/// What `times` answers when it fails: `(clock_t)-1`.
-const NO_TICKS: libc::clock_t = !0;
-
 /// Nothing to settle: every genuine function here is an import of this library's own, which dyld
 /// bound before any code of the process ran.
 pub const fn prime_genuine() {}
@@ -224,50 +222,31 @@ fn rusage(who: libc::c_int) -> Option<libc::rusage> {
     (unsafe { libc::getrusage(who, &raw mut usage) } == 0).then_some(usage)
 }
 
-/// A `timeval` in the ticks `times` counts in, truncated as libSystem truncates it.
-fn ticks(tv: &libc::timeval) -> libc::clock_t {
-    let ticks = tv
-        .tv_sec
-        .saturating_mul(CLK_TCK)
-        .saturating_add(i64::from(tv.tv_usec) / (1_000_000 / CLK_TCK));
-    libc::clock_t::try_from(ticks).unwrap_or(NO_TICKS)
-}
-
-/// Reads the genuine process times: the fields of `buf`, which may be null, and the elapsed ticks
-/// `times(3)` answers. libc's convention.
+/// Reads the genuine process times `times(3)` reports, or `None` with `errno` set when a call it is
+/// built from is refused.
 ///
 /// Built here the way libSystem builds it, out of two `getrusage` calls and one `gettimeofday`,
 /// since libSystem's own `getrusage` call crosses into another library of the cache. The elapsed
 /// ticks count from the epoch rather than from boot, as libSystem's do.
-///
-/// # Safety
-/// `buf` must be null or valid for writes of a `tms`.
 #[must_use]
-pub unsafe fn genuine_times(buf: *mut libc::tms) -> libc::clock_t {
-    let (Some(own), Some(children)) = (rusage(libc::RUSAGE_SELF), rusage(libc::RUSAGE_CHILDREN))
-    else {
-        return NO_TICKS;
-    };
+pub fn genuine_times() -> Option<Times> {
+    let own = rusage(libc::RUSAGE_SELF)?;
+    let children = rusage(libc::RUSAGE_CHILDREN)?;
     let mut now = libc::timeval {
         tv_sec: 0,
         tv_usec: 0,
     };
     // Safety: `now` is a live buffer, and the timezone may be null.
     if unsafe { libc::gettimeofday(&raw mut now, ptr::null_mut()) } != 0 {
-        return NO_TICKS;
+        return None;
     }
-    if !buf.is_null() {
-        // Safety: `buf` is non-null, so the caller's guarantee makes it valid for this write.
-        unsafe {
-            *buf = libc::tms {
-                tms_utime: ticks(&own.ru_utime),
-                tms_stime: ticks(&own.ru_stime),
-                tms_cutime: ticks(&children.ru_utime),
-                tms_cstime: ticks(&children.ru_stime),
-            }
-        };
-    }
-    ticks(&now)
+    Some(Times {
+        user: ticks::of_timeval(&own.ru_utime, CLK_TCK),
+        system: ticks::of_timeval(&own.ru_stime, CLK_TCK),
+        children_user: ticks::of_timeval(&children.ru_utime, CLK_TCK),
+        children_system: ticks::of_timeval(&children.ru_stime, CLK_TCK),
+        elapsed: ticks::of_timeval(&now, CLK_TCK),
+    })
 }
 
 /// Reads the genuine resource usage of `who`. libc's convention.
@@ -533,13 +512,14 @@ mod tests {
             tms_cutime: 0,
             tms_cstime: 0,
         };
-        let (mut before, mut read, mut after) = (empty, empty, empty);
+        let (mut before, mut after) = (empty, empty);
         // Safety: each buffer is a live, correctly typed `tms`.
         let elapsed_before = unsafe { libc::times(&raw mut before) };
-        // Safety: as above.
-        let elapsed = unsafe { genuine_times(&raw mut read) };
+        let genuine = genuine_times().expect("the calls times is built from answer");
         // Safety: as above.
         let elapsed_after = unsafe { libc::times(&raw mut after) };
+        let elapsed = ticks::narrow::<libc::clock_t>(genuine.elapsed);
+        let read = genuine.tms();
         assert!(
             (elapsed_before..=elapsed_after).contains(&elapsed),
             "elapsed {elapsed}, outside {elapsed_before}..={elapsed_after}"
@@ -575,8 +555,6 @@ mod tests {
                 "{field} {mid}, outside {low}..={high}"
             );
         }
-        // Safety: a null buffer is one the call leaves alone.
-        assert_ne!(unsafe { genuine_times(ptr::null_mut()) }, NO_TICKS);
     }
 
     #[test]
