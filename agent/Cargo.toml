@@ -32,7 +32,8 @@ common = { path = "../common" }
 libc = { workspace = true }
 tempfile = "3.24.0"
 
-# The slot try-lock the Go shims claim in assembly is modelled in Rust and checked under loom,
-# which drives the interleavings the atomic exchange hides. Pulled in only for a `--cfg loom` run.
+# The protocol by which the Go shims claim a scratch stack in assembly is modelled in Rust and
+# checked under loom, which drives the interleavings the atomic exchanges hide. Pulled in only for a
+# `--cfg loom` run.
 [target.'cfg(loom)'.dev-dependencies]
 loom = "0.7"

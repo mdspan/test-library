@@ -6,7 +6,8 @@
 // a file and reports the timestamp it reads back beside the clock; `sleep <ms>` sleeps and reports
 // what the runtime made of the span; `rates <ms>` reports how far the wall clock and the monotonic
 // clock each move across one faked span, which differ when the two families run at rates of their
-// own.
+// own; `threads <n> <reads>` reads the clock on n threads at once and reports the range of the
+// wall readings and how often a thread's monotonic clock stepped back.
 package main
 
 import (
@@ -14,8 +15,10 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"runtime/pprof"
 	"strconv"
+	"sync"
 	"time"
 )
 
@@ -43,6 +46,8 @@ func main() {
 		sleep(argument(2))
 	case "rates":
 		rates(argument(2))
+	case "threads":
+		threads(argument(2), argument(3))
 	default:
 		fmt.Fprintf(os.Stderr, "unknown mode %q\n", mode)
 		os.Exit(2)
@@ -116,4 +121,49 @@ func sleep(milliseconds string) {
 	fmt.Printf("go.sleep.asked=%d\n", int64(asked)*int64(time.Millisecond))
 	fmt.Printf("go.sleep.measured=%d\n", time.Since(start).Nanoseconds())
 	fmt.Printf("go.now=%d\n", time.Now().UnixNano())
+}
+
+// The clock read on many threads at once: each goroutine is locked to a thread of its own, and
+// they all start reading together. Reports the earliest and latest wall reading any of them took,
+// and how many times a reading came before the one its thread took just ahead of it on the
+// monotonic clock.
+func threads(count, reads string) {
+	n, r := number(count), number(reads)
+	runtime.GOMAXPROCS(n)
+	lows := make([]int64, n)
+	highs := make([]int64, n)
+	backs := make([]int, n)
+	start := make(chan struct{})
+	var ready, done sync.WaitGroup
+	ready.Add(n)
+	done.Add(n)
+	for i := 0; i < n; i++ {
+		go func(i int) {
+			defer done.Done()
+			runtime.LockOSThread()
+			ready.Done()
+			<-start
+			last := time.Now()
+			low, high := last.UnixNano(), last.UnixNano()
+			for j := 0; j < r; j++ {
+				now := time.Now()
+				if now.Before(last) {
+					backs[i]++
+				}
+				low, high = min(low, now.UnixNano()), max(high, now.UnixNano())
+				last = now
+			}
+			lows[i], highs[i] = low, high
+		}(i)
+	}
+	ready.Wait()
+	close(start)
+	done.Wait()
+	low, high, back := lows[0], highs[0], 0
+	for i := 0; i < n; i++ {
+		low, high, back = min(low, lows[i]), max(high, highs[i]), back+backs[i]
+	}
+	fmt.Printf("go.threads.low=%d\n", low)
+	fmt.Printf("go.threads.high=%d\n", high)
+	fmt.Printf("go.threads.back=%d\n", back)
 }

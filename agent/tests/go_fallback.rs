@@ -206,6 +206,41 @@ fn a_go_reader_under_cpu_profiling_still_reads_the_faked_clock() {
 }
 
 #[test]
+fn go_readers_on_many_threads_at_once_all_read_the_faked_clock() {
+    let Some(program) = harness::go_program("go_clocks") else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    // Sixty-four threads, among which some share the scratch slot their thread pointers hash to,
+    // all reading at once. A read that took the genuine clock would show as a wall reading ten
+    // years past the rest, or as a monotonic reading ahead of the half-rate faked clock, which the
+    // thread's next reading steps back from.
+    let shift = -3650 * DAY;
+    let report = Run::new(&program)
+        .arg("threads")
+        .arg("64")
+        .arg("5000")
+        .session_dir(dir.path())
+        .env("LIBTIMEWARP_SHIFT", "-3650d")
+        .env("LIBTIMEWARP_MONOTONIC_RATE", "0.5")
+        .run();
+
+    let low = report.nanos("go.threads.low");
+    let high = report.nanos("go.threads.high");
+    let earliest = report.before + shift - SECOND;
+    let latest = report.after + shift + SECOND;
+    assert!(
+        earliest <= low && high <= latest,
+        "the wall readings span {low}..={high}, outside {earliest}..={latest}",
+    );
+    assert_eq!(
+        report.nanos("go.threads.back"),
+        0,
+        "a thread's monotonic clock stepped back",
+    );
+}
+
+#[test]
 fn a_go_program_reads_genuine_time_when_the_session_asked_for_no_fallback() {
     let Some(program) = harness::go_program("go_clocks") else {
         return;
