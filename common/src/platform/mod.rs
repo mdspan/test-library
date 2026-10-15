@@ -113,10 +113,11 @@ pub fn timebase_allowed(family: Family, clock: libc::clockid_t) -> bool {
     }
 }
 
-/// Whether the kernel would let `clock_settime` name this clock at all.
+/// Whether the kernel would let `clock_settime` name this clock of the family table at all.
 ///
-/// The wall clock alone, on all three platforms: every other clock is one the kernel derives rather
-/// than keeps, so naming it is `EINVAL` however privileged the caller is.
+/// The wall clock alone, on all three platforms: every other clock a family holds is one the
+/// kernel derives rather than keeps, so naming it is `EINVAL` however privileged the caller is. A
+/// clock no family holds is never asked about, because a set of it goes to the genuine function.
 #[must_use]
 pub const fn settable(clock: libc::clockid_t) -> bool {
     clock == clock::REALTIME

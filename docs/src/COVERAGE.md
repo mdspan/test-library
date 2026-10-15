@@ -125,7 +125,11 @@ clock alone. `adjtime` applies its whole adjustment at once.
 The call succeeds only where the system would have let the program set the
 real clock: with the `CAP_SYS_TIME` capability on Linux, and as root on
 FreeBSD and macOS. Any other program gets `EPERM`, as it would without the
-library. `clock_settime` on any other clock is refused.
+library. `clock_settime` on any other clock of a family is refused. A clock
+that is never faked, such as a PTP card's, is set for real, exactly as it
+would be without the library: a program that has the device open for
+writing can set its clock, and setting another process's CPU clock fails
+with `EPERM`.
 
 A refused call gets the error the system would have given it. Where a call
 is wrong in more than one way, which error that is depends on the system:

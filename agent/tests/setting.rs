@@ -229,9 +229,10 @@ fn assert_the_malformed_calls_are_refused(report: &Report) {
     }
 }
 
-/// Every clock the target named that the kernel will not set, by the tag it reports it under.
+/// Every clock of the family table the target named that the kernel will not set, by the tag it
+/// reports it under.
 fn settable_refusals(report: &Report) -> Vec<&'static str> {
-    let mut tags = vec!["monotonic", "boottime", "bogus"];
+    let mut tags = vec!["monotonic", "boottime"];
     for (name, tag) in [("coarse.available", "coarse"), ("tai.available", "tai")] {
         if report.nanos(name) == 1 {
             tags.push(tag);
@@ -240,12 +241,65 @@ fn settable_refusals(report: &Report) -> Vec<&'static str> {
     tags
 }
 
+/// Every clock the target named that no family holds, by the tag it reports it under: an id no
+/// kernel has heard of, and where the platform has them, another process's CPU clock and a dynamic
+/// clock.
+fn unfaked_clocks(report: &Report) -> Vec<&'static str> {
+    let mut tags = vec!["bogus"];
+    for tag in ["other_cpu", "dynamic"] {
+        if report.nanos(&format!("{tag}.available")) == 1 {
+            tags.push(tag);
+        }
+    }
+    tags
+}
+
+/// What a call answered: its result and its errno.
+fn answer(report: &Report, tag: &str) -> (i64, i64) {
+    (
+        report.nanos(&format!("{tag}.result")),
+        report.nanos(&format!("{tag}.errno")),
+    )
+}
+
+/// Asserts that every set of a clock no family holds got the kernel's own answer, which the target
+/// asked for a second time through `syscall()`, past libc and the library. macOS has no such call,
+/// and its libc refuses any clock but the wall clock before the kernel sees the set.
+///
+/// The kernel lets nobody set another process's CPU clock: Linux finds the clock and then answers
+/// `EPERM`, whatever the caller holds.
+fn assert_passed_through(report: &Report) {
+    for tag in unfaked_clocks(report) {
+        if report.nanos("kernel.available") == 1 {
+            assert_eq!(
+                answer(report, tag),
+                answer(report, &format!("{tag}.kernel")),
+                "{tag} was not answered the way the kernel answers it"
+            );
+        } else {
+            assert_refused(report, tag, libc::EINVAL);
+        }
+    }
+    if cfg!(target_os = "linux") && report.nanos("other_cpu.available") == 1 {
+        assert_refused(report, "other_cpu", libc::EPERM);
+    }
+}
+
 #[test]
 fn a_clock_the_kernel_cannot_set_is_refused_the_way_the_kernel_refuses_it() {
     let dir = tempfile::tempdir().unwrap();
     let report = setters(dir.path(), &[], &[]);
 
     assert_the_malformed_calls_are_refused(&report);
+}
+
+#[test]
+fn a_set_of_a_clock_no_family_holds_reaches_the_kernel() {
+    let dir = tempfile::tempdir().unwrap();
+    let report = setters(dir.path(), &[], &[]);
+
+    assert_passed_through(&report);
+    assert_the_machine_is_untouched(&report);
 }
 
 #[test]
@@ -272,6 +326,7 @@ fn an_excluded_command_reaches_the_genuine_setters() {
         "an excluded command attached to something"
     );
     assert_the_malformed_calls_are_refused(&report);
+    assert_passed_through(&report);
     for tag in ["clock_settime", "adjtime", "settimeofday", "probe"] {
         assert_refused(&report, tag, libc::EPERM);
     }
@@ -390,6 +445,8 @@ fn a_session_on_the_null_keeper_answers_as_an_unprivileged_process_would() {
     for tag in ["clock_settime", "adjtime", "settimeofday", "probe"] {
         assert_refused(&report, tag, libc::EPERM);
     }
+    // A clock no family holds reaches the kernel under either keeper.
+    assert_passed_through(&report);
     assert_the_machine_is_untouched(&report);
     for key in ["before", "after_clock_settime", "after_settimeofday"] {
         assert_near(key, report.nanos(key), report.before);
@@ -448,26 +505,41 @@ fn a_handled_setter_means_success_and_the_keeper_never_moves() {
         ],
     );
 
-    // The clocks the kernel will not read: the bogus one, and on FreeBSD CLOCK_TAI until a time
-    // daemon has told the kernel the TAI offset.
+    // The clocks the kernel will not read: on FreeBSD CLOCK_TAI until a time daemon has told the
+    // kernel the TAI offset, and of the clocks no family holds, the bogus one and the dynamic one
+    // on a descriptor that holds no clock. Another process's CPU clock reads like any other.
     let (unread, read): (Vec<_>, Vec<_>) = settable_refusals(&report)
         .into_iter()
-        .partition(|&tag| tag == "bogus" || (tag == "tai" && genuine_nanos(clock::TAI).is_none()));
+        .partition(|&tag| tag == "tai" && genuine_nanos(clock::TAI).is_none());
+    let (unread_unfaked, read_unfaked): (Vec<_>, Vec<_>) = unfaked_clocks(&report)
+        .into_iter()
+        .partition(|&tag| tag != "other_cpu");
 
     // Handled, so the program sees success whatever privilege it holds and whichever clock it
     // named. The number the hook wrote into `*out` is ignored, because a setter wants neither.
     for tag in ["clock_settime", "settimeofday", "adjtime"]
         .into_iter()
         .chain(read)
+        .chain(read_unfaked.iter().copied())
     {
         assert_succeeded(&report, tag);
     }
     // A clock the kernel will not read never reaches the hook, and neither does a call with no
     // instant to hand it: a malformed one, or a bare probe for privilege. Each is refused as it
-    // would be without a hook.
+    // would be without a hook, and one no family holds the way the kernel refuses it.
     let privileged = may_set_the_clock();
     for tag in unread {
         assert_refused(&report, tag, malformed(PRIVILEGE_BEFORE_CLOCK, privileged));
+    }
+    for tag in unread_unfaked {
+        if report.nanos("kernel.available") == 1 {
+            assert_eq!(
+                answer(&report, tag),
+                answer(&report, &format!("{tag}.kernel"))
+            );
+        } else {
+            assert_refused(&report, tag, libc::EINVAL);
+        }
     }
     assert_refused(
         &report,
@@ -502,11 +574,16 @@ fn a_handled_setter_means_success_and_the_keeper_never_moves() {
         TARGET
     );
     // A clock the keeper would refuse reaches the hook all the same, carrying the id the call
-    // named, so a hook that wants it can have it.
+    // named, so a hook that wants it can have it, and so does one no family holds, which the
+    // genuine function would have answered had the hook declined it.
     assert_eq!(
         entry_for(&seen, Func::ClockSettime, clock::MONOTONIC)[3],
         TARGET
     );
+    if read_unfaked.contains(&"other_cpu") {
+        let other = libc::clockid_t::try_from(report.nanos("other_cpu.id")).unwrap();
+        assert_eq!(entry_for(&seen, Func::ClockSettime, other)[3], TARGET);
+    }
     // A move by a duration names an instant only together with what the family shows now, which is
     // the faked wall clock rather than the genuine one.
     assert_near(
@@ -575,4 +652,6 @@ fn a_declined_setter_reaches_the_null_keeper_too() {
         report.nanos("after_settimeofday"),
         report.before,
     );
+    // A clock no family holds is no keeper's to answer for: declined, its set reaches the kernel.
+    assert_passed_through(&report);
 }

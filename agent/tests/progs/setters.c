@@ -8,7 +8,14 @@
 
    `tai.available` says whether this platform has a TAI clock to name at all; FreeBSD grew one at
    15.0 and has none below that. `coarse.available` says the same for the cheap wall clock, which
-   macOS does not have. */
+   macOS does not have.
+
+   A set of a clock no family holds goes to the kernel. Each such set is made twice: once through
+   `clock_settime`, and once through `syscall()`, under a tag ending in `.kernel`, which reaches
+   the kernel past libc and past the library alike. `kernel.available` says whether this platform
+   has the second way; macOS builds `clock_settime` in libc and has no such call. None of these ids
+   names a clock any kernel lets a set move: one no kernel has heard of, another process's CPU
+   clock, and on Linux a dynamic clock on a descriptor that is no clock. */
 #define _GNU_SOURCE
 #include <errno.h>
 #include <stdio.h>
@@ -16,6 +23,14 @@
 #include <string.h>
 #include <sys/time.h>
 #include <time.h>
+#include <unistd.h>
+#if defined(__linux__) || defined(__FreeBSD__)
+#include <fcntl.h>
+#include <sys/syscall.h>
+#define KERNEL_SETS 1
+#else
+#define KERNEL_SETS 0
+#endif
 
 #define NS_PER_S 1000000000LL
 
@@ -39,6 +54,22 @@ static void set_clock(const char *tag, clockid_t id, time_t seconds, long nanos)
     ts.tv_nsec = nanos;
     errno = 0;
     answered(tag, clock_settime(id, &ts));
+}
+
+/* A set of a clock no family holds, both ways, under `tag` and `tag.kernel`. */
+static void set_unfaked(const char *tag, clockid_t id, time_t seconds) {
+    set_clock(tag, id, seconds, 0);
+#if KERNEL_SETS
+    {
+        char kernel[64];
+        struct timespec ts;
+        ts.tv_sec = seconds;
+        ts.tv_nsec = 0;
+        snprintf(kernel, sizeof kernel, "%s.kernel", tag);
+        errno = 0;
+        answered(kernel, (int)syscall(SYS_clock_settime, id, &ts));
+    }
+#endif
 }
 
 static void set_day(const char *tag, time_t seconds, long micros) {
@@ -102,7 +133,37 @@ int main(int argc, char **argv) {
 #else
     printf("coarse.available=0\n");
 #endif
-    set_clock("bogus", (clockid_t)4242, seconds, 0);
+
+    /* Clocks no family holds, which the kernel answers for. */
+    printf("kernel.available=%d\n", KERNEL_SETS);
+    set_unfaked("bogus", (clockid_t)4242, seconds);
+#if KERNEL_SETS
+    {
+        clockid_t other;
+        int found = clock_getcpuclockid(getppid(), &other) == 0;
+        printf("other_cpu.available=%d\n", found);
+        if (found) {
+            say("other_cpu.id", (long long)other);
+            set_unfaked("other_cpu", other, seconds);
+        }
+    }
+#else
+    printf("other_cpu.available=0\n");
+#endif
+#ifdef __linux__
+    {
+        /* A dynamic clock id names a descriptor: its complement shifted past the three bits that
+           mark the id as a descriptor's. /dev/null holds no clock. */
+        int fd = open("/dev/null", O_RDWR);
+        printf("dynamic.available=%d\n", fd >= 0);
+        if (fd >= 0) {
+            set_unfaked("dynamic", (clockid_t)((~(unsigned)fd << 3) | 3), seconds);
+            close(fd);
+        }
+    }
+#else
+    printf("dynamic.available=0\n");
+#endif
 
     /* Fields outside what the call may carry. */
     set_clock("bad_nanos", CLOCK_REALTIME, seconds, NS_PER_S);

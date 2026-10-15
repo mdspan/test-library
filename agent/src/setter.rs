@@ -10,7 +10,8 @@
 //! session, the hook answers the call or declines it, and a declined setter goes to the keeper:
 //! the affine keeper runs the set, and the null keeper answers as an unprivileged process would
 //! see. A process with no session has nothing of ours to move, so there the genuine function is
-//! the whole of the answer.
+//! the whole of the answer. So is it for a `clock_settime` of a clock the family table leaves on
+//! genuine time, once the hook has declined it, as it is for every read of that clock.
 //!
 //! A refusal is the one the kernel would have made. A call can fail several of the kernel's checks
 //! at once, a malformed value from a process without privilege for one, and each platform makes
@@ -173,6 +174,10 @@ pub(crate) unsafe fn clock_settime(
         // Safety: `tp` is the caller's, passed on unchanged.
         return unsafe { platform::genuine_clock_settime(clock, tp) };
     };
+    if clock::family_of(clock).is_none() {
+        // Safety: `tp` is the caller's, passed on unchanged.
+        return unsafe { passed_through(clock, tp) };
+    }
     if tp.is_null() {
         let why = refusal(header, clock, Carried::Nothing);
         return report(Err(why.unwrap_or(Refused::Fault)));
@@ -184,6 +189,30 @@ pub(crate) unsafe fn clock_settime(
         return report(Err(why.unwrap_or(Refused::Invalid)));
     };
     report(set(header, Func::ClockSettime, clock, Motion::To(at)))
+}
+
+/// A set of a clock the family table leaves on genuine time: a dynamic clock, another process's
+/// CPU clock, or an id no family holds. The hook sees it first, as it sees a read of that clock,
+/// and the genuine function answers whatever the hook declines, privilege and refusals included.
+///
+/// # Safety
+/// `tp` must be null or valid for reads of a `timespec`.
+unsafe fn passed_through(clock: libc::clockid_t, tp: *const libc::timespec) -> libc::c_int {
+    if let Some(hook) = state::hook()
+        && !tp.is_null()
+    {
+        // Safety: `tp` is non-null, so the caller's guarantee makes it valid for this read.
+        let ts = unsafe { &*tp };
+        // A pair the kernel would refuse names no instant to hand the hook, and goes on to hear
+        // the refusal.
+        if let Some(at) = whole(ts.tv_sec, ts.tv_nsec)
+            && hook.set(Func::ClockSettime, clock, at) == Status::Handled
+        {
+            return 0;
+        }
+    }
+    // Safety: `tp` is the caller's, passed on unchanged.
+    unsafe { platform::genuine_clock_settime(clock, tp) }
 }
 
 /// # Safety

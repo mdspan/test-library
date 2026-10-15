@@ -48,6 +48,9 @@ A few clocks are never faked, so they keep reporting real time:
   how a program sees its own usage, and a measurement of somebody else is
   reported as it is.
 
+A `clock_settime` of one of these goes to the system, which answers it as it
+would without the library; see [Setting the Time](COVERAGE.md#setting-the-time).
+
 ## Timebases
 
 Each of Realtime, Monotonic, and Boottime follows a real clock, called its
