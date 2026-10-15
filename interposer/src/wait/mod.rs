@@ -1102,7 +1102,7 @@ pub(crate) unsafe fn pthread_timedjoin_np(
 }
 
 /// The same, where libthr turns the deadline into a timeout itself, by subtracting what
-/// `clock_gettime(CLOCK_REALTIME)` answers. That call reaches our own interposer, so the genuine
+/// `clock_gettime(CLOCK_REALTIME)` answers. That call reaches the interposer, so the genuine
 /// deadline goes in as what that call answers now plus the genuine time left. libthr reads the
 /// clock again after an interrupted wait, and on a clock running faster than the genuine one that
 /// times out early, so a timeout before the genuine deadline is waited out again.

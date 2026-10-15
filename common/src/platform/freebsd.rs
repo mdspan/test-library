@@ -277,9 +277,10 @@ struct Answer {
 
 /// Makes a system call, returning exactly what the kernel returned.
 ///
-/// The instruction rather than libc's, because the agent exports these names too: a call through
-/// libc from inside the library would come back to our own interposer. It takes no lock, allocates
-/// nothing, and touches no shared state, so it is async-signal-safe wherever the program is.
+/// The instruction rather than libc's, because the interposer exports these names too: a call
+/// through libc from inside the interposer would come back to its own definition. It takes no lock,
+/// allocates nothing, and touches no shared state, so it is async-signal-safe wherever the program
+/// is.
 ///
 /// # Safety
 /// The number and the arguments must be a call the kernel will accept, with every pointer among
@@ -448,7 +449,7 @@ fn rusage(who: libc::c_int) -> Option<libc::rusage> {
 ///
 /// FreeBSD has no `times` system call. libc builds the function out of two `getrusage` calls and
 /// one read of `CLOCK_MONOTONIC`, and so does this, with `getrusage` through the raw call because
-/// the agent exports that name. The counts are libc's, before it narrows them to `clock_t`.
+/// the interposer exports that name. The counts are libc's, before it narrows them to `clock_t`.
 #[must_use]
 #[inline]
 pub fn genuine_times() -> Option<Times> {
@@ -473,7 +474,7 @@ pub fn genuine_times() -> Option<Times> {
 
 /// Reads the genuine resource usage of `who` into `usage`. libc's convention.
 ///
-/// Through the raw system call, because the agent exports `getrusage`.
+/// Through the raw system call, because the interposer exports `getrusage`.
 ///
 /// # Safety
 /// `usage` must be valid for writes of a `rusage`.

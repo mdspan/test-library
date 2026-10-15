@@ -88,7 +88,7 @@ pub(crate) fn objdump() -> Command {
 fn build_library(extra: &[&str], into: &Path) -> PathBuf {
     let mut cargo = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
     cargo
-        .args(["build", "-p", "agent"])
+        .args(["build", "-p", "interposer"])
         .args(extra)
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .env_remove("CARGO_MAKEFLAGS");
@@ -117,7 +117,7 @@ pub(crate) const PRELOAD: &str = if cfg!(target_os = "macos") {
 
 static COMPILE: Mutex<()> = Mutex::new(());
 
-/// Compiles `agent/tests/progs/<name>.c`, once per test run.
+/// Compiles `interposer/tests/progs/<name>.c`, once per test run.
 pub(crate) fn program(name: &str) -> PathBuf {
     compile(name, &[])
 }
@@ -160,12 +160,12 @@ pub(crate) fn copy_named(source: &Path, name: &str) -> PathBuf {
     dest
 }
 
-/// Compiles `agent/tests/hooks/<name>.c` into a shared library a session can load, against the
-/// header the library ships for hook authors.
+/// Compiles `interposer/tests/hooks/<name>.c` into a shared library a session can load, against
+/// the header the library ships for hook authors.
 ///
-/// A hook may call the library's genuine-clock symbol, which is the agent's and not there at link
-/// time. A loader that binds lazily leaves such a name to the process it lands in; dyld wants to be
-/// told, which is what the last flag does.
+/// A hook may call the library's genuine-clock symbol, which is the interposer's and not there at
+/// link time. A loader that binds lazily leaves such a name to the process it lands in; dyld wants
+/// to be told, which is what the last flag does.
 pub(crate) fn hook_library(name: &str) -> PathBuf {
     let source = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/hooks")
@@ -209,7 +209,7 @@ fn compile(name: &str, extra: &[String]) -> PathBuf {
     )
 }
 
-/// Compiles `agent/tests/progs/<name>.go` into a dynamically linked Go program, or `None` when
+/// Compiles `interposer/tests/progs/<name>.go` into a dynamically linked Go program, or `None` when
 /// this machine has no Go toolchain to build one with.
 ///
 /// A dynamically linked executable with cgo enabled, because that is the Go binary the library

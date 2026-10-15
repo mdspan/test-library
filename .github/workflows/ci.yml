@@ -81,7 +81,7 @@ jobs:
       # The arm that says the vDSO is not in this build is the one no other job compiles, since
       # every other one turns every feature on.
       - name: Clippy without the vdso feature
-        run: cargo clippy --locked -p agent --no-default-features --all-targets -- -D warnings
+        run: cargo clippy --locked -p interposer --no-default-features --all-targets -- -D warnings
 
       - name: Test
         shell: bash
@@ -164,7 +164,7 @@ jobs:
       # compiles since it turns every feature on.
       - name: Clippy for FreeBSD without the vdso feature
         run: >-
-          cargo clippy --locked -p agent --no-default-features --all-targets
+          cargo clippy --locked -p interposer --no-default-features --all-targets
           --target x86_64-unknown-freebsd -- -D warnings
 
       - name: Clippy for macOS with every probed row present
@@ -233,19 +233,19 @@ jobs:
       - name: The rows the other architecture carries
         run: |
           rustup target add ${{ matrix.other }}
-          cargo build --locked --target ${{ matrix.other }} -p agent
+          cargo build --locked --target ${{ matrix.other }} -p interposer
 
       # A replacement with no row in `__DATA,__interpose` is never called, so the table is read back
       # out of the library that was just built before anything is run against it. This is the one
       # check a compiler that is happy cannot stand in for.
       - name: The interpose table
-        run: cargo test --locked -p agent --test interpose
+        run: cargo test --locked -p interposer --test interpose
 
       # The one group this platform has that neither of the others does, and the one whose
       # conversion depends on the ratio of the machine it runs on. Named on its own so a failure
       # here is a line of its own rather than a line in the whole suite's log.
       - name: The Mach clocks
-        run: cargo test --locked -p agent --test mach_clocks
+        run: cargo test --locked -p interposer --test mach_clocks
 
       - name: Test
         shell: bash
@@ -435,9 +435,9 @@ jobs:
             # interposition, which no other command here compiles.
             if [ "${{ matrix.arch }}" = x86_64 ]; then
               cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
-              cargo clippy --locked -p agent --no-default-features --all-targets -- -D warnings
+              cargo clippy --locked -p interposer --no-default-features --all-targets -- -D warnings
             else
-              cargo check --locked -p agent --no-default-features --all-targets
+              cargo check --locked -p interposer --no-default-features --all-targets
             fi
             # The action runs this script under `set -e`, so a failing suite is caught with `||`,
             # and the exit at the end reports it once the summary has run.
@@ -496,7 +496,7 @@ jobs:
             fi
           done
           for round in $(seq 1 10); do
-            if ! cargo test --locked -p agent --test clock_group >"$RUNNER_TEMP/round.log" 2>&1; then
+            if ! cargo test --locked -p interposer --test clock_group >"$RUNNER_TEMP/round.log" 2>&1; then
               echo "round $round of the clock group failed" >&2
               cat "$RUNNER_TEMP/round.log"
               cp "$RUNNER_TEMP/round.log" "$RUNNER_TEMP/test.log"

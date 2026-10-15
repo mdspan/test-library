@@ -1,5 +1,5 @@
 [package]
-name = "agent"
+name = "interposer"
 version.workspace = true
 edition.workspace = true
 description = "The preloaded library that shifts a process's view of the clock."

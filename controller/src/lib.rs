@@ -12,7 +12,7 @@
 //!
 //! This is the primitive layer. Anything with memory, like a freeze that remembers the rate to
 //! come back to, belongs one level up, in the program that drives it. The crate is shared by the
-//! agent's setters and the `libtimewarp` tool.
+//! interposer's setters and the `libtimewarp` tool.
 
 mod error;
 mod info;

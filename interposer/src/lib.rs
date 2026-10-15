@@ -1,4 +1,4 @@
-//! The agent: the library a target loads.
+//! The interposer: the library a target loads.
 //!
 //! It runs before the program's `main`, joins or creates a session, and answers the clock from it.
 //!

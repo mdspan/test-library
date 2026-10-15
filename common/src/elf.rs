@@ -1,5 +1,5 @@
-//! The ELF a vDSO is written in: what the agent writes its synthetic one in, and the reader that
-//! finds a function in the kernel's.
+//! The ELF a vDSO is written in: what the interposer writes its synthetic one in, and the reader
+//! that finds a function in the kernel's.
 //!
 //! A vDSO is a shared object the kernel maps into every process, and a target that skips libc
 //! parses it by hand: the program headers for the load segment and the dynamic array, the dynamic

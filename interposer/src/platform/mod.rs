@@ -12,8 +12,8 @@ cfg_if::cfg_if! {
         mod macos;
     } else {
         compile_error!(
-            "libtimewarp supports Linux, macOS, and FreeBSD. Add an arm under agent/src/platform \
-             exporting the entry points; see the note in platform/mod.rs."
+            "libtimewarp supports Linux, macOS, and FreeBSD. Add an arm under \
+             interposer/src/platform exporting the entry points; see the note in platform/mod.rs."
         );
     }
 }

@@ -112,9 +112,10 @@ fn as_arg<T>(ptr: *const T) -> libc::c_long {
 /// Makes a system call, returning exactly what the kernel returned: a value, or the negative of
 /// what it refused with.
 ///
-/// The instruction rather than libc's `syscall`, because the agent exports that symbol too: a call
-/// to it from inside the library would come back to our own interposer. It takes no lock, allocates
-/// nothing, and touches no shared state, so it is async-signal-safe wherever the program is.
+/// The instruction rather than libc's `syscall`, because the interposer exports that symbol too: a
+/// call to it from inside the interposer would come back to its own definition. It takes no lock,
+/// allocates nothing, and touches no shared state, so it is async-signal-safe wherever the program
+/// is.
 ///
 /// # Safety
 /// The number and the arguments must be a call the kernel will accept, with every pointer among
@@ -313,9 +314,9 @@ type VdsoClockGettime = unsafe extern "C" fn(libc::clockid_t, *mut libc::timespe
 
 /// Finds the kernel's vDSO clock now, while the auxiliary vector still names the kernel's object.
 ///
-/// The agent points that entry at a synthetic vDSO of its own once a session is installed. A lookup
-/// made after that refuses the synthetic object's entries, which call back into us, and settles on
-/// the system call for good, so the constructor looks first.
+/// The interposer points that entry at a synthetic vDSO of its own once a session is installed. A
+/// lookup made after that refuses the synthetic object's entries, which call back into us, and
+/// settles on the system call for good, so the constructor looks first.
 pub fn prime_genuine() {
     let _found = vdso_clock_gettime();
 }
@@ -358,8 +359,9 @@ fn find_vdso_clock_gettime() -> Option<usize> {
 /// Reads a genuine clock, libc's convention.
 ///
 /// Through the kernel's vDSO, which answers without entering the kernel for every clock it keeps
-/// and makes the system call itself for the rest. Never through libc: the agent exports
-/// `clock_gettime`, so calling it under `LD_PRELOAD` would come back to our own interposer.
+/// and makes the system call itself for the rest. Never through libc: the interposer exports
+/// `clock_gettime`, so calling it under `LD_PRELOAD` would come back to the interposer's own
+/// definition.
 ///
 /// # Safety
 /// `ts` must be valid for writes of a `timespec`.
@@ -424,8 +426,8 @@ pub unsafe fn kernel_gettimeofday(tv: *mut libc::timeval, tz: *mut libc::c_void)
 /// Reads the genuine process times `times(2)` reports, or `None` with `errno` set when the kernel
 /// refuses. The kernel's `clock_t` is 64 bits here, as wide as the counts.
 ///
-/// Through the raw syscall, avoiding libc for the reason [`genuine_clock_gettime`] does: the agent
-/// exports `times`.
+/// Through the raw syscall, avoiding libc for the reason [`genuine_clock_gettime`] does: the
+/// interposer exports `times`.
 #[must_use]
 #[inline]
 pub fn genuine_times() -> Option<Times> {
@@ -449,8 +451,8 @@ pub fn genuine_times() -> Option<Times> {
 
 /// Reads the genuine resource usage of `who` into `usage`. libc's convention.
 ///
-/// Through the raw syscall, avoiding libc for the reason [`genuine_clock_gettime`] does: the agent
-/// exports `getrusage`.
+/// Through the raw syscall, avoiding libc for the reason [`genuine_clock_gettime`] does: the
+/// interposer exports `getrusage`.
 ///
 /// # Safety
 /// `usage` must be valid for writes of a `rusage`.
@@ -489,8 +491,8 @@ pub unsafe fn genuine_settimeofday(
 
 /// Sets a genuine clock, libc's convention, for a process this library is not faking.
 ///
-/// Through the raw syscall, avoiding libc for the reason [`genuine_clock_gettime`] does: the agent
-/// exports `clock_settime`.
+/// Through the raw syscall, avoiding libc for the reason [`genuine_clock_gettime`] does: the
+/// interposer exports `clock_settime`.
 ///
 /// # Safety
 /// `tp` must be null or valid for reads of a `timespec`.

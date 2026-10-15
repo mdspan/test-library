@@ -2,7 +2,7 @@
 name = "common"
 version.workspace = true
 edition.workspace = true
-description = "Session state, configuration, and time arithmetic shared by the agent and its tools."
+description = "Session state, configuration, and time arithmetic shared by the interposer and its tools."
 license.workspace = true
 repository.workspace = true
 

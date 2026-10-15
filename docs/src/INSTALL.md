@@ -47,7 +47,7 @@ Faking Go programs on Linux and FreeBSD takes code that the rest of the
 library does without. To build without it:
 
 ```sh
-cargo build --release -p agent --no-default-features
+cargo build --release -p interposer --no-default-features
 ```
 
 Everything else works the same. Go programs then see the real time. The

@@ -29,7 +29,7 @@
 //! library's own imports of their names instead, which dyld binds past the interpose table.
 //!
 //! An arm may hold more than the table: Linux also supplies `genuine_syscall`, because `syscall()`
-//! is one of the calls we take over there, and only that arm's interposers name it,
+//! is one of the calls we take over there, and only that arm's interposed functions name it,
 //! `kernel_clock_gettime` with `kernel_gettimeofday`, which answer in the convention a vDSO entry
 //! owes its caller in place of libc's, and `AT_SYSINFO_EHDR`, the entry naming the vDSO. FreeBSD
 //! supplies `AT_TIMEKEEP`, the entry naming the timekeep page, which the Go fallback interposition
