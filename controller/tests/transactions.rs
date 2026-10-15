@@ -17,7 +17,7 @@
 
 mod fixture;
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use common::platform::clock;
 use common::session::layout::{Header, Keeper, Params, ParamsValue};
@@ -36,29 +36,30 @@ use fixture::{HOUR, SECOND, fixture, fixture_on, genuine, one_at_a_time, timebas
 /// died between **W3** and **W7**.
 #[track_caller]
 fn while_reading<T>(header: &Header, expected: ParamsValue, body: impl FnOnce() -> T) -> T {
-    let reading = AtomicBool::new(false);
+    /// The reads the reader makes before the section opens.
+    const BEFORE: u64 = 10;
+    let reads = AtomicU64::new(0);
     let stop = AtomicBool::new(false);
     std::thread::scope(|scope| {
         let reader = scope.spawn(|| {
-            let mut reads: u64 = 0;
             let mut whole = true;
-            reading.store(true, Ordering::Release);
             while !stop.load(Ordering::Relaxed) {
                 whole &= read(header, Params::load) == expected;
-                reads += 1;
+                reads.fetch_add(1, Ordering::Relaxed);
             }
-            (whole, reads)
+            whole
         });
         // The section is a few tens of microseconds, which is shorter than starting a thread, so
-        // the reader has to be going before the section opens for it to span one.
-        while !reading.load(Ordering::Acquire) {
+        // the reader has to be reading before the section opens for it to span one.
+        while reads.load(Ordering::Relaxed) < BEFORE && !reader.is_finished() {
             std::hint::spin_loop();
         }
         let value = body();
         stop.store(true, Ordering::Relaxed);
-        let (whole, reads) = reader.join().unwrap();
-        assert!(whole, "a reader saw something the section never published");
-        assert!(reads > 10, "the reader got {reads} reads in");
+        assert!(
+            reader.join().unwrap(),
+            "a reader saw something the section never published"
+        );
         value
     })
 }
