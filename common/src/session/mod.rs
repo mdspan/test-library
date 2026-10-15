@@ -1099,15 +1099,17 @@ pub fn timer_remaining(header: &Header, clock: libc::clockid_t, genuine: Nanos) 
 ///
 /// The rule is the Realtime family's alone, because a file timestamp is a wall-clock instant.
 ///
+/// The whole distance from the anchor is scaled in one step, rounding toward negative infinity, so a
+/// timestamp reads the same at every moment it is read while the family tracks `CLOCK_REALTIME`,
+/// and [`timestamp_stored`] can choose an instant that reads back as what the program set.
+///
 /// The same read path as [`clock_now`]: no lock, no allocation, nothing written to shared memory.
 #[inline]
 pub fn timestamp_shown(header: &Header, stamp: Nanos) -> Option<Nanos> {
     match Keeper::from_tag(header.keeper)? {
         Keeper::Affine => sync::read(header, |params| {
-            let (fake_now, real_now) = realtime_pair(params)?;
-            let rate = family_rate(params, Family::Realtime);
-            let carried = Nanos(rate.scale(stamp.saturating_sub(real_now).0));
-            Some(Nanos(fake_now.saturating_add(carried).0.max(0)))
+            let (line, passage, real_now) = realtime_readings(params)?;
+            Some(Nanos(line.show_instant(passage, real_now, stamp).0.max(0)))
         }),
         // Genuine time underneath, so a timestamp reads as the filesystem wrote it.
         Keeper::Null => None,
@@ -1119,7 +1121,9 @@ pub fn timestamp_shown(header: &Header, stamp: Nanos) -> Option<Nanos> {
 ///
 /// The other direction from [`timestamp_shown`]: the program names an instant in the faked wall
 /// clock and the filesystem keeps genuine ones, so the instant is measured back from the pair,
-/// `real_now + (ts - fake_now) / rate`. A frozen family stores the genuine now, because a clock
+/// `real_now + (ts - fake_now) / rate`, rounded up to the earliest genuine nanosecond that reads
+/// back at `ts` or past it. That is `ts` itself at a rate of one or below, and less than a rate's
+/// worth of nanoseconds past it above. A frozen family stores the genuine now, because a clock
 /// that never advances puts every instant it could name infinitely far away.
 ///
 /// The same read path as [`clock_now`]: no lock, no allocation, nothing written to shared memory.
@@ -1127,25 +1131,23 @@ pub fn timestamp_shown(header: &Header, stamp: Nanos) -> Option<Nanos> {
 pub fn timestamp_stored(header: &Header, stamp: Nanos) -> Option<Nanos> {
     match Keeper::from_tag(header.keeper)? {
         Keeper::Affine => sync::read(header, |params| {
-            let (fake_now, real_now) = realtime_pair(params)?;
-            let rate = family_rate(params, Family::Realtime);
-            if rate == Rate::FROZEN {
-                return Some(real_now);
-            }
-            let measured = Nanos(rate.unscale(stamp.saturating_sub(fake_now).0));
-            Some(real_now.saturating_add(measured))
+            let (line, passage, real_now) = realtime_readings(params)?;
+            Some(
+                line.earliest_showing(passage, real_now, stamp)
+                    .unwrap_or(real_now),
+            )
         }),
         Keeper::Null => None,
     }
 }
 
-/// One paired sample of faked and genuine `CLOCK_REALTIME`, which is what a file timestamp is
-/// converted against.
+/// The Realtime line, with one paired sample of its timebase and of genuine `CLOCK_REALTIME`,
+/// which is what a file timestamp is converted against.
 ///
 /// With no timebase override the two come from a single reading, so the pair is exact. An override
 /// makes the family track another clock, which has a reading of its own to take.
 #[inline]
-fn realtime_pair(params: &layout::Params) -> Option<(Nanos, Nanos)> {
+fn realtime_readings(params: &layout::Params) -> Option<(Line, Nanos, Nanos)> {
     let real_now = platform::genuine_nanos(clock::REALTIME)?;
     let timebase = params.realtime.timebase();
     let passage = if timebase == clock::REALTIME {
@@ -1153,7 +1155,7 @@ fn realtime_pair(params: &layout::Params) -> Option<(Nanos, Nanos)> {
     } else {
         platform::genuine_nanos(timebase)?
     };
-    Some((params.realtime.load().project(passage), real_now))
+    Some((params.realtime.load(), passage, real_now))
 }
 
 /// One timer query's arithmetic.

@@ -53,8 +53,8 @@
 //! | `setitimer`, `getitimer` | Nothing. | The cache's own use of them. |
 //! | `alarm` | Nothing. | Nothing beyond that: it converts and arms through the genuine `setitimer`. |
 //! | the four `stat` names | Nothing. | The cache's own use of them, and the unsuffixed `x86_64` names, which fill a buffer of another shape and so have no row. |
-//! | `utime` | Nothing. | Nothing beyond that: the pair converts here and is set through the genuine `utimes`, the call libSystem builds `utime` out of. |
-//! | `lutimes` | Nothing. | Nothing beyond that: the pair converts here and is set through the genuine `utimes`, or through `setattrlist` on a link, the calls libSystem builds `lutimes` out of. |
+//! | `utime` | Nothing. | Nothing beyond that: the pair converts here and is set through the genuine `utimensat`, or where that fails through the genuine `utimes`, the call libSystem builds `utime` out of. |
+//! | `lutimes` | Nothing. | Nothing beyond that: the pair converts here and is set through the genuine `utimensat`, or where that fails through the genuine `utimes`, or `setattrlist` on a link, the calls libSystem builds `lutimes` out of. |
 //! | `utimes`, `futimes`, `utimensat`, `futimens` | Nothing. | The cache's own use of them. |
 //! | `settimeofday`, `clock_settime`, `adjtime` | Nothing. | The cache's own use of them. |
 //!

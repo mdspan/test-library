@@ -12,10 +12,11 @@
    reported only where the libc has them, and on x86_64 macOS every reader here is compiled to the
    `$INODE64` spelling of its own name, which fills the buffer this file declares.
 
-   Each setter then asks for `argv[2]` on both the access and the modification time and the file is
-   read back with `stat`, so `<key>.mtime` is the round trip through both conversions and
-   `<key>.rc` is what the setter itself answered. `lutimes_link` is `lutimes` on a link to the file,
-   which sets the link itself, read back with `lstat`.
+   Each setter then asks for `argv[2]` plus `FRACTION`, as far as the call can spell it, on both the
+   access and the modification time, and the file is read back with `stat`. `<key>.asked` is the
+   instant the setter named, `<key>.mtime` the round trip through both conversions, and `<key>.rc`
+   what the setter itself answered. `lutimes_link` is `lutimes` on a link to the file, which sets
+   the link itself, read back with `lstat`.
 
    Then come the two `utimensat` flags that name no instant: `UTIME_OMIT` on the modification time,
    which must leave the round trip where it was, and `UTIME_NOW` on the access time, which must
@@ -38,6 +39,11 @@
 #include <utime.h>
 
 #define NS_PER_S 1000000000LL
+
+/* What every setter asks for past the whole second: a nanosecond count no microsecond holds, so a
+   setter that spells microseconds asks for 123456 of them and one that spells nanoseconds for all
+   of it. */
+#define FRACTION 123456789LL
 
 /* Whether a `stat` buffer here has room for the birth time, which the BSDs' has and Linux's does
    not: there it takes `statx` to read one. */
@@ -175,27 +181,35 @@ static void report_link_round_trip(const char *key, int set) {
     }
 }
 
-/* Every setter of the group, each asking for the same instant on both timestamps. */
+/* Every setter of the group, each asking for the same instant on both timestamps, to the
+   precision it has. */
 static void set_them_all(void) {
     struct utimbuf buf;
     struct timeval tv[2];
     struct timespec ts[2];
+    long long whole = target_s * NS_PER_S;
+    long long micros = whole + FRACTION / 1000 * 1000;
+    long long all = whole + FRACTION;
 
     buf.actime = (time_t)target_s;
     buf.modtime = (time_t)target_s;
+    printf("utime.asked=%lld\n", whole);
     report_round_trip("utime", utime(path, &buf));
 
     tv[0].tv_sec = (time_t)target_s;
-    tv[0].tv_usec = 0;
+    tv[0].tv_usec = FRACTION / 1000;
     tv[1] = tv[0];
+    printf("utimes.asked=%lld\nfutimes.asked=%lld\n", micros, micros);
+    printf("lutimes.asked=%lld\nlutimes_link.asked=%lld\n", micros, micros);
     report_round_trip("utimes", utimes(path, tv));
     report_round_trip("futimes", futimes(fd, tv));
     report_round_trip("lutimes", lutimes(path, tv));
     report_link_round_trip("lutimes_link", lutimes(link_path, tv));
 
     ts[0].tv_sec = (time_t)target_s;
-    ts[0].tv_nsec = 0;
+    ts[0].tv_nsec = FRACTION;
     ts[1] = ts[0];
+    printf("utimensat.asked=%lld\nfutimens.asked=%lld\n", all, all);
     report_round_trip("utimensat", utimensat(AT_FDCWD, path, ts, 0));
     report_round_trip("futimens", futimens(fd, ts));
 }

@@ -1074,6 +1074,36 @@ fn a_set_timestamp_is_measured_back_to_a_genuine_instant() {
 }
 
 #[test]
+fn a_set_timestamp_reads_back_to_the_nanosecond() {
+    // A clock set to an instant is anchored at a genuine reading with nanoseconds of its own, so
+    // no distance between the two clocks is a whole second.
+    for (rate, past) in [(1.0, 0), (0.3, 0), (0.25, 0), (2.7, 2), (10.0, 9)] {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut setup = setup_in(tmp.path());
+        setup.realtime_at = Some(Nanos(1_577_836_800 * Nanos::SECOND));
+        setup.realtime.rate = Rate::from_f64(rate).unwrap();
+        let session = create(&setup).unwrap();
+        let header = session.header();
+
+        for asked in [
+            1_577_836_800 * Nanos::SECOND,
+            1_577_836_800_123_456_000,
+            1_577_836_799_987_654_321,
+        ] {
+            let asked = Nanos(asked);
+            let stored = timestamp_stored(header, asked).unwrap();
+            for _ in 0..100 {
+                let shown = timestamp_shown(header, stored).unwrap();
+                assert!(
+                    (asked.0..=asked.0 + past).contains(&shown.0),
+                    "rate {rate}: {asked:?} reads back as {shown:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn a_frozen_clock_stores_the_genuine_now() {
     let tmp = tempfile::tempdir().unwrap();
     let mut setup = setup_in(tmp.path());

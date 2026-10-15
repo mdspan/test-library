@@ -216,30 +216,48 @@ fn a_stat_buffer_carries_a_birth_time_faked_with_the_rest() {
 }
 
 #[test]
-fn a_touch_with_an_explicit_time_lands_where_the_program_meant_it() {
-    // The slack is a second of the clock the case runs, because `utime` names whole seconds and
-    // the second it truncates is a genuine one: a clock at ten times real speed loses ten of its
-    // own for it. Every other setter names microseconds or better and lands far inside this.
-    for (env, slack) in [
-        (vec![("LIBTIMEWARP_SHIFT", "-2h")], SECOND),
-        (vec![("LIBTIMEWARP_RATE", "10")], 10 * SECOND),
+fn a_touch_with_an_explicit_time_reads_back_what_the_program_set() {
+    // Setting the clock anchors it at a genuine reading with nanoseconds of its own, so the
+    // distance between the two clocks is no whole number of seconds or microseconds, and a rate
+    // other than one keeps changing it. Up to a rate of one every fake nanosecond is shown for
+    // some genuine one, so each setter reads back exactly what it named. A faster clock skips fake
+    // nanoseconds, and a set reads back at the first one shown at or after the instant, fewer
+    // than the rate past it.
+    for (env, past) in [
+        (vec![("LIBTIMEWARP_SHIFT", "-2h")], 0),
+        (vec![("LIBTIMEWARP_TIME", "2001-09-09T01:46:40Z")], 0),
+        (vec![("LIBTIMEWARP_TIME", "@1577836800")], 0),
         (
             vec![
                 ("LIBTIMEWARP_RATE", "0.25"),
                 ("LIBTIMEWARP_TIME", SLOW_START),
             ],
-            SECOND,
+            0,
         ),
-        (vec![("LIBTIMEWARP_TIME", "2001-09-09T01:46:40Z")], SECOND),
+        (
+            vec![
+                ("LIBTIMEWARP_RATE", "0.3"),
+                ("LIBTIMEWARP_TIME", SLOW_START),
+            ],
+            0,
+        ),
+        (vec![("LIBTIMEWARP_RATE", "10")], 9),
+        (vec![("LIBTIMEWARP_RATE", "2.7")], 2),
     ] {
         let dir = tempfile::tempdir().unwrap();
         let report = stamps(dir.path(), &env);
         assert_eq!(report.nanos("target"), TARGET);
         for setter in SETTERS {
             assert_eq!(report.nanos(&format!("{setter}.rc")), 0, "{setter} failed");
+            let asked = report.nanos(&format!("{setter}.asked"));
             for stamp in ["atime", "mtime"] {
                 let key = format!("{setter}.{stamp}");
-                assert_near(&key, report.nanos(&key), TARGET, slack);
+                let value = report.nanos(&key);
+                assert!(
+                    (asked..=asked + past).contains(&value),
+                    "{env:?}: {key} = {value} is not {asked} (off by {})",
+                    value - asked
+                );
             }
         }
     }
@@ -252,10 +270,13 @@ fn a_frozen_clock_stores_the_genuine_now_and_reads_its_own_instant_back() {
 
     // A clock that never advances puts every instant the program could name infinitely far away,
     // so a set lands at the genuine now and reads back as the one instant the clock shows.
+    let frozen = report.nanos("now.before");
+    assert_eq!(report.nanos("now.after"), frozen);
     for setter in SETTERS {
+        assert_eq!(report.nanos(&format!("{setter}.rc")), 0, "{setter} failed");
         for stamp in ["atime", "mtime"] {
             let key = format!("{setter}.{stamp}");
-            assert_agrees_with_the_clock(&report, &key);
+            assert_eq!(report.nanos(&key), frozen, "{key}");
         }
     }
 }

@@ -13,18 +13,20 @@
 //!
 //! A read converts the buffer the genuine call filled. A set converts a copy of what the program
 //! asked for, never the program's own buffer, and leaves `UTIME_NOW` and `UTIME_OMIT` alone: they
-//! name no instant, so there is nothing in them to convert. A pair the platform refuses is not
-//! converted at all: it goes to the genuine call as the program wrote it, which refuses it at the
-//! point and with the `errno` it would have without us.
+//! name no instant, so there is nothing in them to convert. The genuine instant keeps every
+//! nanosecond the conversion gives it, so a converted pair is set through `utimensat` or
+//! `futimens` whichever call named it, and reads back as what the program set. A pair the
+//! platform refuses is not converted at all: it goes to the genuine call as the program wrote it,
+//! which refuses it at the point and with the `errno` it would have without us.
 //!
 //! `statx`, the `64` names and the `__xstat` family are Linux's alone, and the birth time inside a
 //! `stat` buffer is the BSDs', so each carries a `cfg` of its own. So does `utime`: FreeBSD's libc
 //! builds it out of one call to `utimes`, which we already take over, and the arm there leaves the
 //! set to that call rather than converting it twice. libSystem builds it out of `utimes` too, but
 //! the program's call to `utime` reaches nothing of ours through that inner call on arm64, so the
-//! macOS arm catches `utime` itself and sets the pair through the genuine `utimes`. libSystem's
-//! `lutimes` sets anything but a link through `utimes` as well, so on macOS the set behind it is
-//! built here from the same inner calls.
+//! macOS arm catches `utime` itself. libSystem's `lutimes` sets anything but a link through
+//! `utimes` as well, so on macOS a set the library makes the way libSystem would is built here
+//! from the same inner calls.
 
 #[cfg(target_os = "linux")]
 use std::ffi::c_uint;
@@ -538,6 +540,28 @@ pub(crate) unsafe fn statx(
     result
 }
 
+/// The pair of instants a set names, as `utimensat` takes them: the access time, then the
+/// modification time.
+type Pair = [libc::timespec; 2];
+
+/// The two values a set names, or `None` for the null pointer that asks for the current time.
+///
+/// # Safety
+/// `times` must be null or valid for reads of two `T`s.
+#[inline]
+const unsafe fn read_two<T: Copy>(times: *const T) -> Option<[T; 2]> {
+    if times.is_null() {
+        return None;
+    }
+    // Safety: `times` is non-null, so the caller's guarantee makes this read valid.
+    let first = unsafe { *times };
+    // Safety: as above, for the second of the two the caller guarantees.
+    let second = unsafe { times.add(1) };
+    // Safety: `second` is the second of the pair, which the caller guarantees.
+    let second = unsafe { *second };
+    Some([first, second])
+}
+
 /// Whether the platform refuses a `timespec` a set names, which it does with `EINVAL` from the
 /// call itself. Linux and FreeBSD refuse nanoseconds outside `0..1e9` other than `UTIME_NOW` and
 /// `UTIME_OMIT`. libSystem hands every value to `setattrlistat`, which refuses none.
@@ -556,33 +580,13 @@ fn refused_timeval(tv: &libc::timeval) -> bool {
     cfg!(not(target_os = "macos")) && !(0..1_000_000).contains(&tv.tv_usec)
 }
 
-/// The genuine pair a fake `timespec` pair becomes, or `None` when the program's own pair goes to
-/// the genuine call: no pair at all, one the platform refuses, which leaves the refusal and its
-/// `errno` to that call, or nothing in it this session converts.
+/// The genuine pair a fake one becomes, each instant to the nanosecond, or `None` when nothing in
+/// it is one this session converts.
 ///
 /// `UTIME_NOW` and `UTIME_OMIT` sit in the nanoseconds field and name no instant, one asking for
 /// the current time and the other for no change at all, so both pass through untouched.
-///
-/// # Safety
-/// `times` must be null or valid for reads of two `timespec`s.
 #[inline]
-unsafe fn stored_timespecs(
-    func: Func,
-    times: *const libc::timespec,
-) -> Option<[libc::timespec; 2]> {
-    if times.is_null() {
-        return None;
-    }
-    // Safety: `times` is non-null, so the caller's guarantee makes this read valid.
-    let first = unsafe { *times };
-    // Safety: as above, for the second of the two the caller guarantees.
-    let second = unsafe { times.add(1) };
-    // Safety: `second` is the second of the pair, which the caller guarantees.
-    let second = unsafe { *second };
-    let mut pair = [first, second];
-    if pair.iter().any(refused_timespec) {
-        return None;
-    }
+fn stored_pair(func: Func, mut pair: Pair) -> Option<Pair> {
     let mut converted = false;
     for asked in &mut pair {
         if asked.tv_nsec == libc::UTIME_NOW || asked.tv_nsec == libc::UTIME_OMIT {
@@ -596,56 +600,182 @@ unsafe fn stored_timespecs(
     converted.then_some(pair)
 }
 
-/// The same for a `timeval` pair, which has no `UTIME_NOW` to leave alone.
+/// The genuine pair a fake `timespec` pair becomes, or `None` when the program's own pair goes to
+/// the genuine call: no pair at all, one the platform refuses, which leaves the refusal and its
+/// `errno` to that call, or nothing in it this session converts.
+///
+/// # Safety
+/// `times` must be null or valid for reads of two `timespec`s.
+#[inline]
+unsafe fn stored_timespecs(func: Func, times: *const libc::timespec) -> Option<Pair> {
+    // Safety: the caller guarantees `times`.
+    let asked = unsafe { read_two(times) }?;
+    if asked.iter().any(refused_timespec) {
+        return None;
+    }
+    stored_pair(func, asked)
+}
+
+/// The same for a `timeval` pair, which has no `UTIME_NOW` to leave alone. What it becomes is a
+/// `timespec` pair, which carries the nanoseconds a converted instant has.
 ///
 /// # Safety
 /// `times` must be null or valid for reads of two `timeval`s.
 #[inline]
-unsafe fn stored_timevals(func: Func, times: *const libc::timeval) -> Option<[libc::timeval; 2]> {
-    if times.is_null() {
+unsafe fn stored_timevals(func: Func, times: *const libc::timeval) -> Option<Pair> {
+    // Safety: the caller guarantees `times`.
+    let asked = unsafe { read_two(times) }?;
+    if asked.iter().any(refused_timeval) {
         return None;
     }
-    // Safety: `times` is non-null, so the caller's guarantee makes this read valid.
-    let first = unsafe { *times };
-    // Safety: as above, for the second of the two the caller guarantees.
-    let second = unsafe { times.add(1) };
-    // Safety: `second` is the second of the pair, which the caller guarantees.
-    let second = unsafe { *second };
-    let mut pair = [first, second];
-    if pair.iter().any(refused_timeval) {
-        return None;
-    }
-    let mut converted = false;
-    for asked in &mut pair {
-        if let Some(genuine) = stored(func, Nanos::from_timeval(asked)) {
-            *asked = genuine.to_timeval();
-            converted = true;
-        }
-    }
-    converted.then_some(pair)
+    stored_pair(func, asked.map(|tv| Nanos::from_timeval(&tv).to_timespec()))
 }
 
-/// The same for the pair of whole seconds `utime` takes.
+/// The same for the pair of whole seconds `utime` takes, which no platform refuses.
 ///
 /// # Safety
 /// `times` must be null or valid for reads of a `utimbuf`.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[inline]
-unsafe fn stored_utimbuf(times: *const libc::utimbuf) -> Option<libc::utimbuf> {
+unsafe fn stored_utimbuf(times: *const libc::utimbuf) -> Option<Pair> {
     if times.is_null() {
         return None;
     }
     // Safety: `times` is non-null, so the caller's guarantee makes this read valid.
-    let mut asked = unsafe { *times };
-    let mut converted = false;
-    for seconds in [&mut asked.actime, &mut asked.modtime] {
-        let stamp = Nanos(seconds.saturating_mul(Nanos::SECOND));
-        if let Some(genuine) = stored(Func::Utime, stamp) {
-            *seconds = genuine.seconds();
-            converted = true;
-        }
+    let asked = unsafe { *times };
+    let asked = [asked.actime, asked.modtime].map(|tv_sec| libc::timespec { tv_sec, tv_nsec: 0 });
+    stored_pair(Func::Utime, asked)
+}
+
+/// Sets a converted pair on `path` to the nanosecond, following a link at its end unless `flags`
+/// holds `AT_SYMLINK_NOFOLLOW`. This is the system call current glibc and musl build `utime`,
+/// `utimes` and `lutimes` out of, so the set is theirs with the nanoseconds left in.
+///
+/// # Safety
+/// `path` must be a valid NUL-terminated path.
+#[cfg(target_os = "linux")]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "the other platforms set through a genuine function, which may be missing"
+)]
+#[inline]
+unsafe fn set_path(path: *const c_char, pair: &Pair, flags: c_int) -> Option<c_int> {
+    // Safety: the caller guarantees `path`.
+    Some(unsafe { set_through_utimensat(libc::AT_FDCWD, path, pair, flags) })
+}
+
+/// The same on an open descriptor, through the system call glibc and musl build `futimes` out of:
+/// `utimensat` with no path.
+#[cfg(target_os = "linux")]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "the other platforms set through a genuine function, which may be missing"
+)]
+#[inline]
+fn set_descriptor(fd: c_int, pair: &Pair) -> Option<c_int> {
+    // Safety: a null path names the descriptor itself.
+    Some(unsafe { set_through_utimensat(fd, std::ptr::null(), pair, 0) })
+}
+
+/// The `utimensat` system call, the one every Linux setter of the group ends in.
+///
+/// # Safety
+/// `path` must be null or a valid NUL-terminated path.
+#[cfg(target_os = "linux")]
+#[inline]
+unsafe fn set_through_utimensat(
+    dirfd: c_int,
+    path: *const c_char,
+    pair: &Pair,
+    flags: c_int,
+) -> c_int {
+    /// A pointer as a system call argument.
+    fn address<T>(ptr: *const T) -> libc::c_long {
+        libc::c_long::try_from(ptr.addr().cast_signed()).unwrap_or(0)
     }
-    converted.then_some(asked)
+    let args = [
+        libc::c_long::from(dirfd),
+        address(path),
+        address(pair.as_ptr()),
+        libc::c_long::from(flags),
+        0,
+        0,
+    ];
+    // Safety: the caller guarantees `path`, and `pair` is two live `timespec`s.
+    let set = unsafe { common::platform::genuine_syscall(libc::SYS_utimensat, args) };
+    c_int::try_from(set).unwrap_or(-1)
+}
+
+/// Sets a converted pair on `path` to the nanosecond through the genuine `utimensat`, following a
+/// link at its end unless `flags` holds `AT_SYMLINK_NOFOLLOW`. The kernel sets it through the same
+/// `setutimes` the `utimes` family ends in.
+///
+/// # Safety
+/// `path` must be a valid NUL-terminated path.
+#[cfg(target_os = "freebsd")]
+#[inline]
+unsafe fn set_path(path: *const c_char, pair: &Pair, flags: c_int) -> Option<c_int> {
+    // Safety: the caller guarantees `path`, and `pair` is two live `timespec`s.
+    unsafe { genuine::utimensat(libc::AT_FDCWD, path, pair.as_ptr(), flags) }
+}
+
+/// The same on an open descriptor, through the genuine `futimens`.
+#[cfg(target_os = "freebsd")]
+#[inline]
+fn set_descriptor(fd: c_int, pair: &Pair) -> Option<c_int> {
+    // Safety: `pair` is two live `timespec`s.
+    unsafe { genuine::futimens(fd, pair.as_ptr()) }
+}
+
+/// Sets a converted pair on `path` to the nanosecond through the genuine `utimensat`, following a
+/// link at its end unless `flags` holds `AT_SYMLINK_NOFOLLOW`.
+///
+/// libSystem's `utimensat` is `setattrlistat`, which refuses a caller that does not own the file
+/// with `EACCES` where `utimes` answers `EPERM`. So when it fails, the set is made again the way
+/// libSystem's `utime`, `utimes` and `lutimes` make it, on the pair rounded up to microseconds,
+/// and that answer stands.
+///
+/// # Safety
+/// `path` must be a valid NUL-terminated path.
+#[cfg(target_os = "macos")]
+#[inline]
+unsafe fn set_path(path: *const c_char, pair: &Pair, flags: c_int) -> Option<c_int> {
+    // Safety: the caller guarantees `path`, and `pair` is two live `timespec`s.
+    if unsafe { genuine::utimensat(libc::AT_FDCWD, path, pair.as_ptr(), flags) }? == 0 {
+        return Some(0);
+    }
+    let micros = in_micros(pair);
+    if flags & libc::AT_SYMLINK_NOFOLLOW != 0 {
+        // Safety: the caller guarantees `path`, and `micros` is two live `timeval`s.
+        unsafe { set_without_following(path, micros.as_ptr()) }
+    } else {
+        // Safety: as above.
+        unsafe { genuine::utimes(path, micros.as_ptr()) }
+    }
+}
+
+/// The same on an open descriptor, through the genuine `futimens` and then the genuine `futimes`.
+#[cfg(target_os = "macos")]
+#[inline]
+fn set_descriptor(fd: c_int, pair: &Pair) -> Option<c_int> {
+    // Safety: `pair` is two live `timespec`s.
+    if unsafe { genuine::futimens(fd, pair.as_ptr()) }? == 0 {
+        return Some(0);
+    }
+    // Safety: the pair is two live `timeval`s.
+    unsafe { genuine::futimes(fd, in_micros(pair).as_ptr()) }
+}
+
+/// A converted pair in the microseconds of a `timeval`, each rounded up, so it reads back no
+/// earlier than the instant the program set.
+#[cfg(target_os = "macos")]
+#[inline]
+fn in_micros(pair: &Pair) -> [libc::timeval; 2] {
+    pair.map(|ts| {
+        Nanos::from_timespec(&ts)
+            .saturating_add(Nanos(999))
+            .to_timeval()
+    })
 }
 
 /// # Safety
@@ -655,9 +785,14 @@ unsafe fn stored_utimbuf(times: *const libc::utimbuf) -> Option<libc::utimbuf> {
 pub(crate) unsafe fn utime(path: *const c_char, times: *const libc::utimbuf) -> c_int {
     // Safety: `times` is the caller's, read under the contract it came with.
     let converted = unsafe { stored_utimbuf(times) };
-    let times = converted.as_ref().map_or(times, std::ptr::from_ref);
-    // Safety: `path` is the caller's, and `times` is either theirs or the copy just built.
-    unsafe { set_utimbuf(path, times) }.unwrap_or_else(unsupported)
+    converted
+        .map_or_else(
+            // Safety: both are the caller's, passed on unchanged.
+            || unsafe { set_utimbuf(path, times) },
+            // Safety: `path` is the caller's.
+            |pair| unsafe { set_path(path, &pair, 0) },
+        )
+        .unwrap_or_else(unsupported)
 }
 
 /// Sets the pair a `utimbuf` names through the genuine `utime`.
@@ -673,7 +808,8 @@ unsafe fn set_utimbuf(path: *const c_char, times: *const libc::utimbuf) -> Optio
 
 /// Sets the pair a `utimbuf` names through the genuine `utimes`, as libSystem's own `utime` does.
 /// That inner call crosses into another library of the shared cache, which reaches our `utimes`
-/// row on `x86_64`, so the pair is handed to `utimes` from here, already converted once.
+/// row on `x86_64`, so the pair is handed to the genuine `utimes` from here instead, past every
+/// row.
 ///
 /// # Safety
 /// `path` must be a valid NUL-terminated path, and `times` null or valid for reads of a `utimbuf`.
@@ -701,9 +837,14 @@ unsafe fn set_utimbuf(path: *const c_char, times: *const libc::utimbuf) -> Optio
 pub(crate) unsafe fn utimes(path: *const c_char, times: *const libc::timeval) -> c_int {
     // Safety: `times` is the caller's, read under the contract it came with.
     let converted = unsafe { stored_timevals(Func::Utimes, times) };
-    let times = converted.as_ref().map_or(times, |pair| pair.as_ptr());
-    // Safety: `path` is the caller's, and `times` is either theirs or the copy just built.
-    unsafe { genuine::utimes(path, times) }.unwrap_or_else(unsupported)
+    converted
+        .map_or_else(
+            // Safety: both are the caller's, passed on unchanged.
+            || unsafe { genuine::utimes(path, times) },
+            // Safety: `path` is the caller's.
+            |pair| unsafe { set_path(path, &pair, 0) },
+        )
+        .unwrap_or_else(unsupported)
 }
 
 /// # Safety
@@ -712,9 +853,13 @@ pub(crate) unsafe fn utimes(path: *const c_char, times: *const libc::timeval) ->
 pub(crate) unsafe fn futimes(fd: c_int, times: *const libc::timeval) -> c_int {
     // Safety: `times` is the caller's, read under the contract it came with.
     let converted = unsafe { stored_timevals(Func::Futimes, times) };
-    let times = converted.as_ref().map_or(times, |pair| pair.as_ptr());
-    // Safety: `times` is either the caller's or the copy just built.
-    unsafe { genuine::futimes(fd, times) }.unwrap_or_else(unsupported)
+    converted
+        .map_or_else(
+            // Safety: `times` is the caller's, passed on unchanged.
+            || unsafe { genuine::futimes(fd, times) },
+            |pair| set_descriptor(fd, &pair),
+        )
+        .unwrap_or_else(unsupported)
 }
 
 /// # Safety
@@ -724,9 +869,14 @@ pub(crate) unsafe fn futimes(fd: c_int, times: *const libc::timeval) -> c_int {
 pub(crate) unsafe fn lutimes(path: *const c_char, times: *const libc::timeval) -> c_int {
     // Safety: `times` is the caller's, read under the contract it came with.
     let converted = unsafe { stored_timevals(Func::Lutimes, times) };
-    let times = converted.as_ref().map_or(times, |pair| pair.as_ptr());
-    // Safety: `path` is the caller's, and `times` is either theirs or the copy just built.
-    unsafe { set_without_following(path, times) }.unwrap_or_else(unsupported)
+    converted
+        .map_or_else(
+            // Safety: both are the caller's, passed on unchanged.
+            || unsafe { set_without_following(path, times) },
+            // Safety: `path` is the caller's.
+            |pair| unsafe { set_path(path, &pair, libc::AT_SYMLINK_NOFOLLOW) },
+        )
+        .unwrap_or_else(unsupported)
 }
 
 /// Sets a pair on `path` itself rather than on what a link there names, through the genuine
