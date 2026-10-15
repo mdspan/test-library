@@ -54,7 +54,6 @@ mod mach;
 mod vdso;
 
 use std::fmt::Display;
-use std::io;
 use std::path::{Path, PathBuf};
 
 use common::config::{self, BadValue, ENV_SHARED_FILE, EnvLookup, ProcessEnv, Settings};
@@ -84,12 +83,12 @@ pub unsafe extern "C" fn libtimewarp_genuine_clock_gettime(
 
 #[ctor::ctor]
 fn constructor() {
-    // C starts `main` with `errno` at 0, and the start below makes calls that are refused on the
-    // way, `mkdir` on a session directory that is already there among them, so whatever `errno`
-    // held on the way in is put back on the way out.
-    let errno = io::Error::last_os_error().raw_os_error().unwrap_or(0);
+    // C starts `main` with `errno` at 0. The start below makes calls that are refused on the way,
+    // `mkdir` on a session directory that is already there among them, and on FreeBSD the
+    // initializer of the libthr this library links runs first and can leave the `ESRCH` of a
+    // `thr_wake(-1)`.
     start();
-    common::platform::set_errno(errno);
+    common::platform::set_errno(0);
 }
 
 /// Everything the library does before the program's `main`, in the order it has to happen.
