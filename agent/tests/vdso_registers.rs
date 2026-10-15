@@ -47,6 +47,10 @@ const INDIRECT: &[&str] = &[
     "blr", "br", "blraa", "blraaz", "blrab", "blrabz", "braa", "braaz", "brab", "brabz",
 ];
 
+/// The instructions after which the next one does not run: an unconditional branch and the
+/// returns.
+const ENDS: &[&str] = &["b", "ret", "retaa", "retab"];
+
 /// One function of a disassembly.
 #[derive(Debug)]
 struct Function {
@@ -59,12 +63,15 @@ struct Function {
 impl Function {
     /// Whether any instruction names x28 or its lower half.
     fn names_x28(&self) -> bool {
-        self.code.iter().any(|(_, operands)| {
-            operands
-                .split(|c: char| !c.is_ascii_alphanumeric())
-                .any(|token| token == "x28" || token == "w28")
-        })
+        self.code.iter().any(|(_, operands)| names_x28(operands))
     }
+}
+
+/// Whether `operands` name x28 or its lower half.
+fn names_x28(operands: &str) -> bool {
+    operands
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|token| token == "x28" || token == "w28")
 }
 
 /// Every function in `listing`, the output of `objdump -d -C --no-show-raw-insn`, by the address it
@@ -82,7 +89,7 @@ fn functions(listing: &str) -> BTreeMap<u64, Function> {
                 },
             );
             current = Some(address);
-        } else if let Some(instruction) = instruction(line)
+        } else if let Some((_, instruction)) = instruction(line)
             && let Some(function) = current.and_then(|at| functions.get_mut(&at))
         {
             function.code.push(instruction);
@@ -98,30 +105,64 @@ fn header(line: &str) -> Option<(u64, String)> {
     Some((u64::from_str_radix(address, 16).ok()?, name.to_owned()))
 }
 
-/// A line that carries an instruction: `   17030:\tstp\tx29, x30, [sp, #-32]!`, with any comment
-/// after `//` dropped.
-fn instruction(line: &str) -> Option<(String, String)> {
+/// A line that carries an instruction: `   17030:\tstp\tx29, x30, [sp, #-32]!`, as its address and
+/// its mnemonic and operands, with any comment after `//` dropped.
+fn instruction(line: &str) -> Option<(u64, (String, String))> {
     let (address, rest) = line.trim_start().split_once(":\t")?;
-    u64::from_str_radix(address, 16).ok()?;
+    let address = u64::from_str_radix(address, 16).ok()?;
     let rest = rest.split("//").next().unwrap_or_default();
     let (mnemonic, operands) = rest.split_once('\t').unwrap_or((rest, ""));
-    Some((mnemonic.trim().to_owned(), operands.trim().to_owned()))
+    Some((
+        address,
+        (mnemonic.trim().to_owned(), operands.trim().to_owned()),
+    ))
+}
+
+/// Where a direct branch goes: the address of `17030 <name>` or `17030 <name+0x10>`, after any
+/// register and bit number the branch tests.
+fn target(mnemonic: &str, operands: &str) -> Option<u64> {
+    let base = mnemonic.split('.').next().unwrap_or(mnemonic);
+    if !BRANCHES.contains(&base) {
+        return None;
+    }
+    let address = operands.split(" <").next().unwrap_or(operands);
+    let address = address.rsplit(", ").next().unwrap_or(address);
+    u64::from_str_radix(address, 16).ok()
 }
 
 /// Where a branch goes when it goes to the start of a function: `17030 <name>`, or `<name@plt>`
 /// for a function of another object. A destination with an offset is inside a function.
 fn destination(mnemonic: &str, operands: &str) -> Option<(u64, String)> {
-    let base = mnemonic.split('.').next().unwrap_or(mnemonic);
-    if !BRANCHES.contains(&base) {
-        return None;
-    }
-    let (address, symbol) = operands.split_once(" <")?;
-    let address = address.rsplit(", ").next().unwrap_or(address);
-    let symbol = symbol.strip_suffix('>')?;
+    let address = target(mnemonic, operands)?;
+    let symbol = operands.split_once(" <")?.1.strip_suffix('>')?;
     if symbol.contains('+') {
         return None;
     }
-    Some((u64::from_str_radix(address, 16).ok()?, symbol.to_owned()))
+    Some((address, symbol.to_owned()))
+}
+
+/// The address of every instruction of `code` a run from `start` can reach: each direct branch is
+/// taken, and each instruction but those in [`ENDS`] and [`INDIRECT`] also falls through to the
+/// next. A run that reaches an address `code` has no instruction at fails the case.
+fn reachable(code: &BTreeMap<u64, (String, String)>, start: u64, listing: &str) -> BTreeSet<u64> {
+    const WIDTH: u64 = 4;
+    let mut reached = BTreeSet::from([start]);
+    let mut queue = VecDeque::from([start]);
+    while let Some(at) = queue.pop_front() {
+        let Some((mnemonic, operands)) = code.get(&at) else {
+            panic!(
+                "a run from {start:#x} reaches {at:#x}, where there is no instruction:\n{listing}"
+            );
+        };
+        let ends = ENDS.contains(&mnemonic.as_str()) || INDIRECT.contains(&mnemonic.as_str());
+        let next = (!ends).then_some(at + WIDTH);
+        for to in target(mnemonic, operands).into_iter().chain(next) {
+            if reached.insert(to) {
+                queue.push_back(to);
+            }
+        }
+    }
+    reached
 }
 
 /// Everything the walk from the entries found.
@@ -283,45 +324,41 @@ fn the_kernel_clock_the_read_path_calls_uses_no_x28() {
     std::fs::write(&copy, image).unwrap();
 
     let symbols = disassemble(&["-T"], &copy);
-    let (start, size) = symbols
+    let start = symbols
         .lines()
         .find(|line| line.ends_with(" __kernel_clock_gettime"))
-        .and_then(|line| {
-            let fields: Vec<&str> = line.split_whitespace().collect();
-            let section = fields.iter().position(|field| *field == ".text")?;
-            Some((
-                u64::from_str_radix(fields.first()?, 16).ok()?,
-                u64::from_str_radix(fields.get(section + 1)?, 16).ok()?,
-            ))
-        })
-        .expect("the kernel's vDSO exports __kernel_clock_gettime with a size");
-    let listing = disassemble(
-        &[
-            "-d",
-            "--no-show-raw-insn",
-            &format!("--start-address={start:#x}"),
-            &format!("--stop-address={:#x}", start + size),
-        ],
-        &copy,
-    );
-    let code: Vec<(String, String)> = listing.lines().filter_map(instruction).collect();
-    assert!(!code.is_empty(), "no code disassembled:\n{listing}");
-    let function = Function {
-        name: "__kernel_clock_gettime".to_owned(),
-        code,
+        .and_then(|line| u64::from_str_radix(line.split_whitespace().next()?, 16).ok())
+        .expect("the kernel's vDSO exports __kernel_clock_gettime");
+    // The functions it calls carry no symbol in the mapped image, so the run is followed
+    // instruction by instruction through the whole image.
+    let listing = disassemble(&["-d", "--no-show-raw-insn"], &copy);
+    let code: BTreeMap<u64, (String, String)> = listing.lines().filter_map(instruction).collect();
+    let run = reachable(&code, start, &listing);
+    let shown = |at: &u64| {
+        let (mnemonic, operands) = &code[at];
+        format!("{at:x}:\t{mnemonic}\t{operands}")
     };
+
+    let indirect: Vec<String> = run
+        .iter()
+        .filter(|at| INDIRECT.contains(&code[at].0.as_str()))
+        .map(shown)
+        .collect();
     assert!(
-        !function.names_x28(),
-        "the kernel's __kernel_clock_gettime uses x28, so a Go thread that takes a signal while the \
-         read path is inside it hands its handler whatever x28 holds:\n{listing}"
+        indirect.is_empty(),
+        "the kernel's __kernel_clock_gettime branches through a register, to code this case cannot \
+         follow:\n{}",
+        indirect.join("\n")
     );
-    // A leaf, so its own body is the whole of what it runs. A kernel whose function calls out
-    // needs the walk above.
+    let using: Vec<String> = run
+        .iter()
+        .filter(|at| names_x28(&code[at].1))
+        .map(shown)
+        .collect();
     assert!(
-        function
-            .code
-            .iter()
-            .all(|(mnemonic, _)| mnemonic != "bl" && !INDIRECT.contains(&mnemonic.as_str())),
-        "the kernel's __kernel_clock_gettime calls other code:\n{listing}"
+        using.is_empty(),
+        "the kernel's __kernel_clock_gettime runs code that uses x28, so a Go thread that takes a \
+         signal while the read path is inside it hands its handler whatever x28 holds:\n{}",
+        using.join("\n")
     );
 }
