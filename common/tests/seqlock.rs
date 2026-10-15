@@ -47,10 +47,10 @@ mod verdict {
     pub(crate) const WRONG_VALUE: i32 = 6;
 }
 
-/// The cases here fork writers, and a writer forked while a thread of another case holds a write
-/// lock would start with the in-process half of the lock already held, so its own `begin` would
-/// never return. Taken for the length of every case here, poison and all: a case that already
-/// failed should not turn the next one into a second failure.
+/// The cases here fork children that go on to run library code, which needs no lock to be held by
+/// a thread the child does not have, and their readers spin on every core they can get. Taken for
+/// the length of every case here, poison and all: a case that already failed should not turn the
+/// next one into a second failure.
 static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
 
 fn one_at_a_time() -> MutexGuard<'static, ()> {
@@ -149,7 +149,9 @@ fn reading_until(header: &Header, until: Nanos, expected: Option<ParamsValue>) -
 }
 
 fn fork_child(body: impl FnOnce() -> i32) -> libc::pid_t {
-    // Safety: `fork` is called from a test that has spawned no threads of its own.
+    // Safety: `fork` is called from a case holding `ONE_AT_A_TIME`, and the one case that runs a
+    // thread beside it parks that thread on a channel first, so the child finds no lock held that
+    // it needs.
     let pid = unsafe { libc::fork() };
     assert!(pid >= 0, "fork: {}", std::io::Error::last_os_error());
     if pid > 0 {
@@ -213,6 +215,17 @@ impl Doorbell {
         // Safety: the descriptor is ours and the buffer is one live byte.
         let got = unsafe { libc::read(self.read_end, std::ptr::from_mut(&mut byte).cast(), 1) };
         assert_eq!(got, 1, "the writer never reached the section");
+    }
+
+    /// Whether it has rung within `millis`, taking nothing off the pipe.
+    fn rang_within(&self, millis: libc::c_int) -> bool {
+        let mut watched = libc::pollfd {
+            fd: self.read_end,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // Safety: `watched` is a live `pollfd` on a descriptor of ours.
+        unsafe { libc::poll(&raw mut watched, 1, millis) > 0 }
     }
 }
 
@@ -317,11 +330,11 @@ fn readers_hold_up_while_a_writer_changes_the_rate_under_them() {
 /// One rate change, W1 through W12.
 fn publish_rate(header: &Header, lock_path: &Path, rate: Rate) -> std::io::Result<()> {
     let lock = begin(header, lock_path)?;
-    let published = lock.publish::<()>(header, |anchor, live| {
+    let published = lock.publish::<std::io::Error>(header, |anchor, live| {
         Ok(at_rate(|c| anchor.of(c), live, rate))
     });
     drop(lock); // W12
-    published.map_err(|()| std::io::Error::other("a rate change nothing refuses"))
+    published
 }
 
 #[test]
@@ -338,7 +351,7 @@ fn a_writer_killed_before_its_shadow_was_whole_leaves_the_live_words_standing() 
     let doorbell = Doorbell::new();
     let writer = fork_child(|| {
         let lock = begin(header, &lock_path).unwrap();
-        lock.publish::<()>(header, |_, _| {
+        lock.publish::<std::io::Error>(header, |_, _| {
             doorbell.ring();
             wait_to_be_killed()
         })
@@ -422,7 +435,7 @@ fn stalled_writer(header: &Header, lock_path: &Path) -> libc::pid_t {
         let Ok(lock) = begin(header, lock_path) else {
             return 1;
         };
-        let published = lock.publish::<()>(header, |_, _| {
+        let published = lock.publish::<std::io::Error>(header, |_, _| {
             doorbell.ring();
             wait_to_be_killed()
         });
@@ -493,4 +506,129 @@ fn a_read_past_its_own_session_s_dead_writer_returns_while_another_session_s_loc
         Some(live),
         "the read waited on another session's lock"
     );
+}
+
+/// What a child forked while the write lock was held answers with, so a failure names the check.
+mod forked {
+    pub(crate) const HOLDS_NOTHING: i32 = 0;
+    pub(crate) const NO_COPY: i32 = 1;
+    pub(crate) const PUBLISHED: i32 = 2;
+    pub(crate) const COUNTER_MOVED: i32 = 3;
+    pub(crate) const PROBE_WRONG: i32 = 4;
+    pub(crate) const CLOSED_ANOTHER_FILE: i32 = 5;
+    pub(crate) const NO_LOCK: i32 = 6;
+}
+
+/// Far longer than any step below takes when it is going to happen at all.
+const STEP_MS: libc::c_int = 5_000;
+
+#[test]
+fn a_child_forked_while_this_thread_holds_the_write_lock_starts_with_none_of_it() {
+    let _one = one_at_a_time();
+    let fixture = fixture().unwrap();
+    let header = fixture.header();
+    let lock_path = fixture.lock_path();
+    let counter = header.seqlock.sequence.load(Ordering::Acquire);
+    let checked = Doorbell::new();
+    let took_it = Doorbell::new();
+
+    let lock = std::cell::Cell::new(Some(begin(header, &lock_path).unwrap()));
+    let child = fork_child(|| {
+        let Some(inherited) = lock.take() else {
+            return forked::NO_COPY;
+        };
+        // A copy of the value and none of the lock, so it writes nothing.
+        if inherited
+            .publish::<std::io::Error>(header, |_, live| Ok(live))
+            .is_ok()
+        {
+            return forked::PUBLISHED;
+        }
+        if header.seqlock.sequence.load(Ordering::Acquire) != counter {
+            return forked::COUNTER_MOVED;
+        }
+        // The parent holds it still, and the kernel says so.
+        if probe_held(header) != Some(true) {
+            return forked::PROBE_WRONG;
+        }
+        // The fork handler closed the inherited descriptor, so its number is free to be handed out
+        // again, and dropping the copy leaves whatever has it now alone. Each `open` takes the
+        // lowest free number, so enough of them take that one too.
+        let others: Vec<libc::c_int> = (0..64)
+            // Safety: the path is a live NUL-terminated string.
+            .map(|_| unsafe { libc::open(c"/dev/null".as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) })
+            .collect();
+        drop(inherited);
+        let still_open = |&fd: &libc::c_int| {
+            // Safety: `F_GETFD` reads a descriptor's flags and changes nothing.
+            unsafe { libc::fcntl(fd, libc::F_GETFD) != -1 }
+        };
+        if !others.iter().all(still_open) {
+            return forked::CLOSED_ANOTHER_FILE;
+        }
+        checked.ring();
+        // Nothing of the parent's lock is left here to wait on but the kernel's own.
+        if begin(header, &lock_path).is_err() {
+            return forked::NO_LOCK;
+        }
+        took_it.ring();
+        forked::HOLDS_NOTHING
+    });
+    assert!(
+        checked.rang_within(STEP_MS),
+        "the child answered {}",
+        reap(child)
+    );
+
+    // The child waits on its parent's lock, and takes it once the parent lets go.
+    let early = took_it.rang_within(200);
+    drop(lock.take());
+    let took = took_it.rang_within(STEP_MS);
+    if !took {
+        kill_and_reap(child);
+    }
+    assert!(!early, "the child took the lock while its parent held it");
+    assert!(took, "the child never took the lock its parent released");
+    assert_eq!(reap(child), forked::HOLDS_NOTHING);
+}
+
+#[test]
+fn a_child_forked_while_another_thread_holds_the_write_lock_waits_only_for_the_parent() {
+    let _one = one_at_a_time();
+    let fixture = fixture().unwrap();
+    let header = fixture.header();
+    let lock_path = fixture.lock_path();
+    let took_it = Doorbell::new();
+    let (held, is_held) = std::sync::mpsc::channel();
+    let (release, released) = std::sync::mpsc::channel::<()>();
+
+    let holder_path = lock_path.clone();
+    std::thread::scope(|scope| {
+        scope.spawn(move || {
+            let lock = WriteLock::acquire(&holder_path).unwrap();
+            held.send(()).unwrap();
+            released.recv().ok();
+            drop(lock);
+        });
+        is_held.recv().unwrap();
+        // The holder is a thread the child will not have, so nothing in the child can ever let go
+        // of the lock it held.
+        let child = fork_child(|| {
+            if begin(header, &lock_path).is_err() {
+                return forked::NO_LOCK;
+            }
+            took_it.ring();
+            forked::HOLDS_NOTHING
+        });
+
+        let early = took_it.rang_within(200);
+        release.send(()).unwrap();
+        let took = took_it.rang_within(STEP_MS);
+        if !took {
+            kill_and_reap(child);
+        }
+        assert!(!early, "the child took the lock while its parent held it");
+        assert!(took, "the child never took the lock its parent released");
+        assert_eq!(reap(child), forked::HOLDS_NOTHING);
+    });
 }

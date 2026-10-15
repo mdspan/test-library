@@ -7,7 +7,7 @@ use std::sync::atomic::{Ordering, fence};
 
 use crate::platform::{self, clock};
 use crate::session::layout::{Header, ParamsValue, WriterState};
-use crate::sync::lock::WriteLock;
+use crate::sync::lock::{self, WriteLock};
 use crate::sync::read;
 use crate::time::Nanos;
 
@@ -81,12 +81,16 @@ impl WriteLock {
     /// and every reader in the session with it.
     ///
     /// # Errors
-    /// Whatever `compute` refused with.
-    pub fn publish<E>(
+    /// Whatever `compute` refused with, or an [`io::Error`] in a child forked while the lock was
+    /// held: the lock stayed with the parent, so the child writes nothing.
+    pub fn publish<E: From<io::Error>>(
         &self,
         header: &Header,
         compute: impl FnOnce(&Anchor, ParamsValue) -> Result<ParamsValue, E>,
     ) -> Result<(), E> {
+        if !self.held() {
+            return Err(E::from(lock::forked_away()));
+        }
         self.section(header, compute)
     }
 

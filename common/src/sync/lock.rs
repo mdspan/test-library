@@ -4,28 +4,77 @@
 //! creates. That ownership is what makes the lock answer the questions the protocol asks of it: a
 //! holder's death releases it, nobody but the holder can drop it, and the kernel will say whether
 //! it is held without handing out a pid.
+//!
+//! Every acquire opens a description of its own, and descriptions conflict with each other within
+//! one process as across processes, so two threads of a process take turns at one session's lock
+//! with nothing in the process to help, and one thread may hold several sessions' locks at once.
 
-use std::cell::Cell;
 use std::ffi::CString;
 use std::io;
 use std::os::raw::c_char;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::ptr;
-use std::sync::atomic::{AtomicPtr, Ordering};
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering, fence};
 
 use crate::platform;
 use crate::session::layout::Header;
 use crate::session::naming;
 
-/// The one writer this process may have.
-///
-/// Re-locking through the same description converts the existing lock instead of blocking, so two
-/// threads of one process would both believe they held it. This mutex is what makes the second one
-/// wait. It covers the process rather than a single session, which costs a process writing two
-/// sessions at once a wait it did not need and is otherwise the same lock.
-static WRITERS: Mutex<()> = Mutex::new(());
+#[path = "held.rs"]
+mod held;
+
+use held::{Entry, Registry};
+
+/// The descriptors of the write locks this process holds, for a forked child to close.
+static HELD: Registry = Registry {
+    slots: AtomicPtr::new(ptr::null_mut()),
+    forks: AtomicU64::new(0),
+};
+
+/// Whether the fork handlers are in place. Set once they are; threads that race to the first
+/// acquire may each put them in place, which costs a fork a second walk that finds nothing.
+static FORKS_HANDLED: AtomicBool = AtomicBool::new(false);
+
+/// Puts the handlers that keep [`HELD`] in step with forks in place, once per process.
+fn handle_forks() -> io::Result<()> {
+    if FORKS_HANDLED.load(Ordering::Acquire) {
+        return Ok(());
+    }
+    // Safety: the three handlers are functions of this library, which is never unloaded, and each
+    // does only what a fork handler may.
+    let refused = unsafe {
+        libc::pthread_atfork(
+            Some(before_fork),
+            Some(after_fork_in_parent),
+            Some(after_fork_in_child),
+        )
+    };
+    if refused != 0 {
+        return Err(io::Error::from_raw_os_error(refused));
+    }
+    FORKS_HANDLED.store(true, Ordering::Release);
+    Ok(())
+}
+
+extern "C" fn before_fork() {
+    HELD.forking();
+}
+
+extern "C" fn after_fork_in_parent() {
+    HELD.forked();
+}
+
+/// Closes every write lock descriptor the child inherited, which leaves the locks with the parent
+/// and this process holding none. Only exchanges and `close`, so a fork from a signal handler is
+/// covered too.
+extern "C" fn after_fork_in_child() {
+    HELD.forked_child(|fd| {
+        // Safety: `fd` is a lock descriptor the parent held when it forked, and this process,
+        // which never locked it, keeps no other use of it.
+        unsafe { libc::close(fd) };
+    });
+}
 
 /// One mapped session this process may read, and the lock file a reader of it probes.
 ///
@@ -191,66 +240,87 @@ pub fn probe_held(header: &Header) -> Option<bool> {
 /// **W1**: the write lock, held across the whole write flow.
 ///
 /// Dropping it is **W12**: closing the descriptor drops the last reference to the description, and
-/// the kernel releases the lock with it.
+/// the kernel releases the lock with it. A child forked while it is held has its copy of the
+/// descriptor closed by the child's fork handler, so the reference the parent drops is the last.
 #[derive(Debug)]
+#[clippy::has_significant_drop]
 pub struct WriteLock {
-    /// The descriptor owning the lock, or -1 once it has been closed.
-    fd: Cell<libc::c_int>,
-    /// The in-process half of the lock, released with it.
-    _writers: MutexGuard<'static, ()>,
+    /// The descriptor owning the lock, as entered in [`HELD`].
+    entry: Entry,
 }
 
 impl WriteLock {
     /// Takes the write lock on `path`, blocking until the holder releases it.
     ///
-    /// The wait has no bound: a held lock means a live writer that will finish.
+    /// The wait has no bound: a held lock means a live writer that will finish. A thread that
+    /// already holds the lock on `path` waits on itself, as on any other holder.
     ///
     /// # Errors
-    /// [`io::Error`] when the lock file cannot be opened, is not ours, or cannot be locked.
+    /// [`io::Error`] when the lock file cannot be opened, is not ours, or cannot be locked, when
+    /// the handlers that close a held lock in a forked child cannot be put in place, or when this
+    /// process is a child forked from a signal handler during the wait.
     pub fn acquire(path: &Path) -> io::Result<Self> {
-        // Above the file lock, so two threads of this process take turns rather than both
-        // converting one description's lock.
-        let writers = WRITERS.lock().unwrap_or_else(PoisonError::into_inner);
-        let fd = open_for_writing(path)?;
+        handle_forks()?;
+        let entry = loop {
+            let Some(generation) = HELD.generation() else {
+                // A fork is under way and may be copying descriptors right now.
+                std::thread::yield_now();
+                continue;
+            };
+            let fd = open_for_writing(path)?;
+            let entry = HELD.enter(generation, fd);
+            if HELD.unforked_since(generation) {
+                break entry;
+            }
+            // A fork started between the open and the entry, so a child may hold this description
+            // with nothing naming it. It is never locked; the next one is opened past the fork.
+            release(entry);
+        };
         loop {
-            // Safety: `fd` is open on the lock file, for writing.
-            if unsafe { platform::take_write_lock(fd) } == 0 {
+            // Safety: the descriptor is open on the lock file, for writing.
+            if unsafe { platform::take_write_lock(entry.fd()) } == 0 {
                 break;
             }
             let err = io::Error::last_os_error();
             // A signal can interrupt the wait on every platform, including where the
             // documentation does not say so.
             if err.kind() != io::ErrorKind::Interrupted {
-                // Safety: we opened this descriptor and nothing else holds it.
-                unsafe { libc::close(fd) };
+                release(entry);
                 return Err(err);
             }
+            if !entry.held() {
+                // A fork from the signal handler, and this is the child, whose handler closed the
+                // descriptor: the number is no longer ours to lock.
+                return Err(forked_away());
+            }
         }
-        Ok(Self {
-            fd: Cell::new(fd),
-            _writers: writers,
-        })
+        Ok(Self { entry })
     }
 
-    /// Drops this process's reference to the lock without releasing it, for a fork that keeps
-    /// running rather than exec'ing.
-    ///
-    /// An inherited descriptor keeps the description, and so the lock, alive past the writer's
-    /// death, leaving readers waiting on a lock nobody will release. `O_CLOEXEC` covers a fork
-    /// followed by an exec; this covers the rest.
-    pub fn close_in_forked_child(&self) {
-        let fd = self.fd.replace(-1);
-        if fd >= 0 {
-            // Safety: this child inherited the descriptor and nothing else here holds it.
-            unsafe { libc::close(fd) };
-        }
+    /// Whether this process holds the lock: always in the process that took it, and never in a
+    /// child forked while it was held, which keeps the value and none of the lock.
+    pub(super) fn held(&self) -> bool {
+        self.entry.held()
     }
 }
 
 impl Drop for WriteLock {
     fn drop(&mut self) {
-        self.close_in_forked_child();
+        release(self.entry);
     }
+}
+
+/// Takes `entry` out of [`HELD`] and closes its descriptor, unless a fork handler closed it first.
+fn release(entry: Entry) {
+    if entry.leave() {
+        // Safety: the entry was still ours, so the descriptor is open and nothing else holds it.
+        unsafe { libc::close(entry.fd()) };
+    }
+}
+
+/// What a child forked while a write lock was held is told when it uses that lock.
+pub(super) fn forked_away() -> io::Error {
+    io::Error::other("the write lock stayed with the process this one was forked from")
 }
 
 /// Opens the lock file the way a writer must: writable, since a write lock needs a writable

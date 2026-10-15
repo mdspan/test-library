@@ -445,8 +445,6 @@ fn a_second_writer_waits_for_the_transaction_to_finish() {
     let go = Pipe::new();
     let took_it = Pipe::new();
 
-    // Forked before the lock is taken: a child of a process already inside a transaction inherits
-    // the in-process half of the write lock held, and would wait on that rather than on the file.
     let second = fork_child(|| {
         go.wait();
         let controller = Controller::attach(&path).unwrap();
@@ -505,6 +503,76 @@ fn a_controller_dying_between_begin_and_commit_leaves_nothing_behind() {
     transaction.abort();
 }
 
+#[test]
+fn a_child_forked_inside_a_transaction_leaves_the_lock_with_its_parent() {
+    let _one = one_at_a_time();
+    let fixture = fixture();
+    let running = Pipe::new();
+    let leave = Pipe::new();
+
+    let mut transaction = fixture.controller.begin().unwrap();
+    transaction.shift(Family::Realtime, Nanos(HOUR)).unwrap();
+    // A child that keeps running past the commit, as a forked worker would, for far longer than
+    // the next transaction should take to begin.
+    let child = fork_child(|| {
+        running.ring();
+        leave.rang_within(5_000);
+        0
+    });
+    running.wait();
+    transaction.commit().unwrap();
+
+    // The commit released the lock, so the next transaction takes it at once rather than once
+    // the child is gone.
+    let started = std::time::Instant::now();
+    let next = fixture.controller.begin().unwrap();
+    let waited = started.elapsed();
+    next.abort();
+    leave.ring();
+    assert!(
+        waited < std::time::Duration::from_secs(1),
+        "the next begin waited {waited:?} for the child"
+    );
+    assert_eq!(reap(child), 0);
+}
+
+#[test]
+fn a_transaction_a_forked_child_inherits_commits_nothing() {
+    let _one = one_at_a_time();
+    let fixture = fixture();
+    let before = fixture.live();
+    let counter = fixture.counter();
+    let done = Pipe::new();
+
+    let mut transaction = fixture.controller.begin().unwrap();
+    transaction.shift(Family::Realtime, Nanos(HOUR)).unwrap();
+    let inherited = std::cell::Cell::new(Some(transaction));
+    let child = fork_child(|| {
+        // The child holds a copy of the transaction and none of the lock, so a commit would be a
+        // second writer inside the parent's turn.
+        let refused = inherited.take().map(Transaction::commit);
+        let code = match refused {
+            Some(Err(Error::Io(_))) if fixture.counter() == counter => 0,
+            _ => 1,
+        };
+        done.ring();
+        code
+    });
+    done.wait();
+    assert_eq!(reap(child), 0, "the child's commit was not refused");
+    assert_eq!(fixture.counter(), counter);
+    assert_eq!(fixture.live(), before);
+
+    // The parent's own copy still holds the lock, and commits once.
+    inherited.take().unwrap().commit().unwrap();
+    assert_eq!(fixture.counter(), counter + 2);
+    let moved = fixture.live().realtime.line.fake_anchor.0 - before.realtime.line.fake_anchor.0;
+    assert!(
+        (HOUR..HOUR + SECOND).contains(&moved),
+        "the realtime anchor moved {moved} ns"
+    );
+}
+
 /// One byte in one direction, for a child to say where it has got to.
 struct Pipe {
     read_end: libc::c_int,
@@ -560,7 +628,7 @@ impl Drop for Pipe {
 /// there would unwind into a test harness that belongs to the parent.
 fn fork_child(body: impl FnOnce() -> i32) -> libc::pid_t {
     // Safety: `fork` is called from a case holding `ONE_AT_A_TIME`, so no other case of this file
-    // is inside a transaction.
+    // is running library code beside it.
     let pid = unsafe { libc::fork() };
     assert!(pid >= 0, "fork: {}", std::io::Error::last_os_error());
     if pid > 0 {

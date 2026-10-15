@@ -26,9 +26,9 @@ pub(crate) fn timebase_of(family: Family) -> libc::clockid_t {
     default_timebase(family).unwrap_or(clock::REALTIME)
 }
 
-/// Every case takes this: a fork while another thread of this process is inside a transaction would
-/// hand the child the in-process half of the write lock already held, and the child would wait on
-/// it forever.
+/// Every case takes this. Some cases fork a child that goes on to run library code, which needs no
+/// lock to be held by a thread the child does not have, and taking turns keeps every other case's
+/// threads waiting here rather than inside the library.
 static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
 
 pub(crate) fn one_at_a_time() -> MutexGuard<'static, ()> {

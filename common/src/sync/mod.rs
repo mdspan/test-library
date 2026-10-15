@@ -15,5 +15,7 @@ pub use lock::{WriteLock, create, install, lock_request, probe_held};
 pub use read::{READ_PATIENCE_NS, read};
 pub use write::{Anchor, WRITE_SETTLE_NS, begin};
 
+#[cfg(all(test, loom))]
+mod interleavings;
 #[cfg(test)]
 mod tests;

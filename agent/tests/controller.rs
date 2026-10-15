@@ -40,8 +40,8 @@ const DAY: i64 = 24 * HOUR;
 /// budget is what a failure runs out of rather than what a pass uses.
 const BUDGET: i64 = 200_000;
 
-/// Both cases here fork, and a fork while another thread of this process is inside a transaction
-/// would hand the child the in-process half of the write lock already held.
+/// Both cases here fork a child that goes on to run library code, which needs no lock to be held by
+/// a thread the child does not have, so the cases take turns.
 static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
 
 fn one_at_a_time() -> MutexGuard<'static, ()> {
@@ -393,7 +393,7 @@ fn parse(printed: &str) -> Vec<[i64; 3]> {
 /// there would unwind into a test harness that belongs to the parent.
 fn fork_child(body: impl FnOnce() -> i32) -> libc::pid_t {
     // Safety: `fork` is called from a case holding `ONE_AT_A_TIME`, so no other case of this file
-    // is inside a transaction.
+    // is running library code beside it.
     let pid = unsafe { libc::fork() };
     assert!(pid >= 0, "fork: {}", std::io::Error::last_os_error());
     if pid > 0 {

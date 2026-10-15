@@ -20,3 +20,8 @@ toml = { version = "1.1.8", default-features = false, features = ["parse", "std"
 
 [dev-dependencies]
 tempfile = "3.24.0"
+
+# The registry a forked child closes its parent's write locks from is modelled under loom, which
+# drives the interleavings of an acquire against a fork. Pulled in only for a `--cfg loom` run.
+[target.'cfg(loom)'.dev-dependencies]
+loom = "0.7"

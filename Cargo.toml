@@ -15,6 +15,8 @@ libc = "0.2.180"
 
 [workspace.lints.rust]
 ffi_unwind_calls = "warn"
+# Set by a model-checking run, in the crates whose interleavings `loom` drives.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)"] }
 let_underscore_drop = "warn"
 missing_debug_implementations = "warn"
 missing_docs = "warn"

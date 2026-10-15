@@ -1,6 +1,7 @@
 //! The two flows against a real session file. The protocol's interleavings are model-checked
 //! elsewhere; these cases pin the steps to the words they move and the calls they make.
 
+use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
@@ -94,7 +95,7 @@ fn a_publish_writes_both_copies_and_closes_the_section() {
     let opened = fixture.counter();
     let lock = begin(fixture.header(), &fixture.lock_path()).unwrap();
 
-    lock.publish::<()>(fixture.header(), |anchor, live| {
+    lock.publish::<io::Error>(fixture.header(), |anchor, live| {
         Ok(at_rate(anchor, live, Rate::from_f64(10.0).unwrap()))
     })
     .unwrap();
@@ -123,10 +124,15 @@ fn a_refused_write_publishes_nothing_and_still_closes_the_section() {
     let opened = fixture.counter();
     let lock = begin(fixture.header(), &fixture.lock_path()).unwrap();
 
-    let refused = lock.publish(fixture.header(), |_, _| Err("would go backwards"));
+    let refused = lock.publish(fixture.header(), |_, _| {
+        Err(io::Error::other("would go backwards"))
+    });
     drop(lock); // W12
 
-    assert_eq!(refused, Err("would go backwards"));
+    assert_eq!(
+        refused.map_err(|err| err.to_string()),
+        Err("would go backwards".to_owned())
+    );
     assert_eq!(fixture.header().live.load(), before);
     assert_eq!(fixture.counter(), opened + 2);
     // Nothing was written and the flag never went up, so a death mid-abort is the recoverable one.
@@ -146,7 +152,7 @@ fn the_anchor_is_sampled_a_settle_after_the_counter_goes_odd() {
     let lock = begin(fixture.header(), &fixture.lock_path()).unwrap();
     let before = platform::genuine_nanos(clock::MONOTONIC).unwrap();
 
-    lock.publish::<()>(fixture.header(), |anchor, live| {
+    lock.publish::<io::Error>(fixture.header(), |anchor, live| {
         let sampled = anchor.of(live.monotonic.timebase).unwrap();
         assert!(
             sampled.0 - before.0 >= WRITE_SETTLE_NS,
@@ -163,7 +169,7 @@ fn every_timebase_in_use_is_sampled_once() {
     let fixture = fixture().unwrap();
     let lock = begin(fixture.header(), &fixture.lock_path()).unwrap();
 
-    lock.publish::<()>(fixture.header(), |anchor, mut live| {
+    lock.publish::<io::Error>(fixture.header(), |anchor, mut live| {
         // Two families on one timebase re-anchor against one instant, not two.
         live.boottime.timebase = live.monotonic.timebase;
         let shared = Anchor::sample(&live);
@@ -183,7 +189,7 @@ fn a_write_section_runs_with_every_maskable_signal_blocked() {
     let fixture = fixture().unwrap();
     let lock = begin(fixture.header(), &fixture.lock_path()).unwrap();
 
-    lock.publish::<()>(fixture.header(), |_, live| {
+    lock.publish::<io::Error>(fixture.header(), |_, live| {
         assert!(blocked(libc::SIGUSR1));
         assert!(blocked(libc::SIGTERM));
         Ok(live)
@@ -389,13 +395,31 @@ fn a_second_writer_of_this_process_waits_rather_than_converting_the_lock() {
     let second = std::thread::spawn(move || {
         drop(WriteLock::acquire(&path).unwrap());
     });
-    // Re-locking through one description converts the lock instead of blocking, so without the
-    // in-process mutex above it this thread would return at once.
+    // Re-locking through one description converts the lock instead of blocking. Each acquire opens
+    // a description of its own, so the kernel makes this thread wait as it would another process.
     std::thread::sleep(std::time::Duration::from_millis(50));
     assert!(!second.is_finished());
 
     drop(lock);
     second.join().unwrap();
+}
+
+#[test]
+fn one_thread_holds_the_write_locks_of_two_sessions_at_once() {
+    let first = fixture().unwrap();
+    let second = fixture().unwrap();
+
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _first = begin(first.header(), &first.lock_path()).unwrap();
+        let _second = begin(second.header(), &second.lock_path()).unwrap();
+        sender.send(()).ok();
+    });
+    // The sessions' locks are separate files, so neither waits on the other.
+    assert!(
+        receiver.recv_timeout(READ_LIMIT).is_ok(),
+        "the thread could not hold both sessions' locks"
+    );
 }
 
 #[test]
